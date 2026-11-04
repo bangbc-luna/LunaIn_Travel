@@ -10,6 +10,8 @@ var (
 	ErrInvalidListing        = httpx.NewError(http.StatusUnprocessableEntity, "invalid_listing", "Thông tin Listing không hợp lệ")
 	ErrListingNotFound       = httpx.NewError(http.StatusNotFound, "not_found", "Không tìm thấy Listing")
 	ErrPartnerSuspended      = httpx.NewError(http.StatusForbidden, "partner_suspended", "Đối tác đang bị đình chỉ, không thể tạo hoặc sửa Listing")
+	ErrInvalidListingState   = httpx.NewError(http.StatusConflict, "invalid_listing_state", "Trạng thái Listing không cho phép thao tác này")
+	ErrListingIncomplete     = httpx.NewError(http.StatusUnprocessableEntity, "listing_incomplete", "Listing chưa đủ thông tin để gửi duyệt")
 	ErrServiceTypeNotEnabled = httpx.NewError(http.StatusUnprocessableEntity, "service_type_not_enabled", "Loại dịch vụ này chưa được bật cho đối tác")
 )
 
@@ -25,5 +27,12 @@ func invalidListing(msg string) error {
 	return &fieldError{
 		app:      httpx.NewError(ErrInvalidListing.Status, ErrInvalidListing.Code, msg),
 		sentinel: ErrInvalidListing,
+	}
+}
+
+func incompleteListing(msg string) error {
+	return &fieldError{
+		app:      httpx.NewError(ErrListingIncomplete.Status, ErrListingIncomplete.Code, msg),
+		sentinel: ErrListingIncomplete,
 	}
 }

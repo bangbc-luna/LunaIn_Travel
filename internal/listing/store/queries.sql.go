@@ -13,6 +13,86 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const approveListing = `-- name: ApproveListing :one
+UPDATE listings
+SET review_status = 'approved', reviewed_at = $1, reviewed_by = $2, updated_at = $1
+WHERE id = $3
+RETURNING id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, rating_sum, rating_count, created_at, updated_at
+`
+
+type ApproveListingParams struct {
+	Now   *time.Time
+	Actor *uuid.UUID
+	ID    uuid.UUID
+}
+
+func (q *Queries) ApproveListing(ctx context.Context, arg ApproveListingParams) (Listing, error) {
+	row := q.db.QueryRow(ctx, approveListing, arg.Now, arg.Actor, arg.ID)
+	var i Listing
+	err := row.Scan(
+		&i.ID,
+		&i.PartnerID,
+		&i.ServiceType,
+		&i.Title,
+		&i.Slug,
+		&i.Summary,
+		&i.Description,
+		&i.CoverFileID,
+		&i.ProvinceCode,
+		&i.WardCode,
+		&i.Address,
+		&i.Latitude,
+		&i.Longitude,
+		&i.ReviewStatus,
+		&i.RejectionReason,
+		&i.SubmittedAt,
+		&i.ReviewedAt,
+		&i.ReviewedBy,
+		&i.Visibility,
+		&i.HiddenReason,
+		&i.HiddenAt,
+		&i.HiddenBy,
+		&i.RatingSum,
+		&i.RatingCount,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const countActiveTicketTypes = `-- name: CountActiveTicketTypes :one
+SELECT count(*) FROM attraction_ticket_types WHERE listing_id = $1 AND active
+`
+
+func (q *Queries) CountActiveTicketTypes(ctx context.Context, listingID uuid.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, countActiveTicketTypes, listingID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countActiveTimeSlots = `-- name: CountActiveTimeSlots :one
+SELECT count(*) FROM attraction_time_slots WHERE listing_id = $1 AND active
+`
+
+func (q *Queries) CountActiveTimeSlots(ctx context.Context, listingID uuid.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, countActiveTimeSlots, listingID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countListingImages = `-- name: CountListingImages :one
+SELECT count(*) FROM listing_images WHERE listing_id = $1
+`
+
+func (q *Queries) CountListingImages(ctx context.Context, listingID uuid.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, countListingImages, listingID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const deleteCancellationTiers = `-- name: DeleteCancellationTiers :exec
 DELETE FROM listing_cancellation_tiers WHERE listing_id = $1
 `
@@ -97,6 +177,44 @@ func (q *Queries) GetClosedDate(ctx context.Context, arg GetClosedDateParams) (A
 		&i.ListingID,
 		&i.Date,
 		&i.Reason,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getListing = `-- name: GetListing :one
+SELECT id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, rating_sum, rating_count, created_at, updated_at FROM listings WHERE id = $1
+`
+
+func (q *Queries) GetListing(ctx context.Context, id uuid.UUID) (Listing, error) {
+	row := q.db.QueryRow(ctx, getListing, id)
+	var i Listing
+	err := row.Scan(
+		&i.ID,
+		&i.PartnerID,
+		&i.ServiceType,
+		&i.Title,
+		&i.Slug,
+		&i.Summary,
+		&i.Description,
+		&i.CoverFileID,
+		&i.ProvinceCode,
+		&i.WardCode,
+		&i.Address,
+		&i.Latitude,
+		&i.Longitude,
+		&i.ReviewStatus,
+		&i.RejectionReason,
+		&i.SubmittedAt,
+		&i.ReviewedAt,
+		&i.ReviewedBy,
+		&i.Visibility,
+		&i.HiddenReason,
+		&i.HiddenAt,
+		&i.HiddenBy,
+		&i.RatingSum,
+		&i.RatingCount,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -192,6 +310,59 @@ func (q *Queries) GetTimeSlot(ctx context.Context, arg GetTimeSlotParams) (Attra
 		&i.EndTime,
 		&i.Weekdays,
 		&i.Active,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const hideListing = `-- name: HideListing :one
+UPDATE listings
+SET visibility = 'hidden_by_admin', hidden_reason = $1, hidden_at = $2, hidden_by = $3, updated_at = $2
+WHERE id = $4
+RETURNING id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, rating_sum, rating_count, created_at, updated_at
+`
+
+type HideListingParams struct {
+	Reason *string
+	Now    *time.Time
+	Actor  *uuid.UUID
+	ID     uuid.UUID
+}
+
+func (q *Queries) HideListing(ctx context.Context, arg HideListingParams) (Listing, error) {
+	row := q.db.QueryRow(ctx, hideListing,
+		arg.Reason,
+		arg.Now,
+		arg.Actor,
+		arg.ID,
+	)
+	var i Listing
+	err := row.Scan(
+		&i.ID,
+		&i.PartnerID,
+		&i.ServiceType,
+		&i.Title,
+		&i.Slug,
+		&i.Summary,
+		&i.Description,
+		&i.CoverFileID,
+		&i.ProvinceCode,
+		&i.WardCode,
+		&i.Address,
+		&i.Latitude,
+		&i.Longitude,
+		&i.ReviewStatus,
+		&i.RejectionReason,
+		&i.SubmittedAt,
+		&i.ReviewedAt,
+		&i.ReviewedBy,
+		&i.Visibility,
+		&i.HiddenReason,
+		&i.HiddenAt,
+		&i.HiddenBy,
+		&i.RatingSum,
+		&i.RatingCount,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -504,6 +675,155 @@ func (q *Queries) ListActiveTicketTypesByIDs(ctx context.Context, arg ListActive
 	return items, nil
 }
 
+const listAdminListings = `-- name: ListAdminListings :many
+SELECT id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, rating_sum, rating_count, created_at, updated_at FROM listings
+WHERE ($1::text IS NULL OR review_status = $1)
+  AND ($2::text IS NULL OR visibility = $2)
+  AND ($3::text IS NULL OR service_type = $3)
+  AND ($4::uuid IS NULL OR partner_id = $4)
+  AND ($5::uuid IS NULL OR id < $5)
+ORDER BY id DESC
+LIMIT $6
+`
+
+type ListAdminListingsParams struct {
+	ReviewStatus *string
+	Visibility   *string
+	ServiceType  *string
+	PartnerID    *uuid.UUID
+	Cursor       *uuid.UUID
+	Lim          int32
+}
+
+func (q *Queries) ListAdminListings(ctx context.Context, arg ListAdminListingsParams) ([]Listing, error) {
+	rows, err := q.db.Query(ctx, listAdminListings,
+		arg.ReviewStatus,
+		arg.Visibility,
+		arg.ServiceType,
+		arg.PartnerID,
+		arg.Cursor,
+		arg.Lim,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Listing
+	for rows.Next() {
+		var i Listing
+		if err := rows.Scan(
+			&i.ID,
+			&i.PartnerID,
+			&i.ServiceType,
+			&i.Title,
+			&i.Slug,
+			&i.Summary,
+			&i.Description,
+			&i.CoverFileID,
+			&i.ProvinceCode,
+			&i.WardCode,
+			&i.Address,
+			&i.Latitude,
+			&i.Longitude,
+			&i.ReviewStatus,
+			&i.RejectionReason,
+			&i.SubmittedAt,
+			&i.ReviewedAt,
+			&i.ReviewedBy,
+			&i.Visibility,
+			&i.HiddenReason,
+			&i.HiddenAt,
+			&i.HiddenBy,
+			&i.RatingSum,
+			&i.RatingCount,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAdminPendingListings = `-- name: ListAdminPendingListings :many
+SELECT id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, rating_sum, rating_count, created_at, updated_at FROM listings
+WHERE review_status = 'pending_review'
+  AND ($1::text IS NULL OR visibility = $1)
+  AND ($2::text IS NULL OR service_type = $2)
+  AND ($3::uuid IS NULL OR partner_id = $3)
+  AND ($4::uuid IS NULL
+       OR (submitted_at, id) > (SELECT c.submitted_at, c.id FROM listings c WHERE c.id = $4))
+ORDER BY submitted_at, id
+LIMIT $5
+`
+
+type ListAdminPendingListingsParams struct {
+	Visibility  *string
+	ServiceType *string
+	PartnerID   *uuid.UUID
+	Cursor      *uuid.UUID
+	Lim         int32
+}
+
+// Review queue: oldest submission first; the cursor row's (submitted_at, id)
+// is the keyset position.
+func (q *Queries) ListAdminPendingListings(ctx context.Context, arg ListAdminPendingListingsParams) ([]Listing, error) {
+	rows, err := q.db.Query(ctx, listAdminPendingListings,
+		arg.Visibility,
+		arg.ServiceType,
+		arg.PartnerID,
+		arg.Cursor,
+		arg.Lim,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Listing
+	for rows.Next() {
+		var i Listing
+		if err := rows.Scan(
+			&i.ID,
+			&i.PartnerID,
+			&i.ServiceType,
+			&i.Title,
+			&i.Slug,
+			&i.Summary,
+			&i.Description,
+			&i.CoverFileID,
+			&i.ProvinceCode,
+			&i.WardCode,
+			&i.Address,
+			&i.Latitude,
+			&i.Longitude,
+			&i.ReviewStatus,
+			&i.RejectionReason,
+			&i.SubmittedAt,
+			&i.ReviewedAt,
+			&i.ReviewedBy,
+			&i.Visibility,
+			&i.HiddenReason,
+			&i.HiddenAt,
+			&i.HiddenBy,
+			&i.RatingSum,
+			&i.RatingCount,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listCancellationTiers = `-- name: ListCancellationTiers :many
 SELECT id, listing_id, hours_before, refund_bps, created_at, updated_at FROM listing_cancellation_tiers WHERE listing_id = $1 ORDER BY hours_before DESC
 `
@@ -669,6 +989,40 @@ func (q *Queries) ListOwnListings(ctx context.Context, arg ListOwnListingsParams
 	return items, nil
 }
 
+const listRecentAuditLog = `-- name: ListRecentAuditLog :many
+SELECT id, listing_id, actor_user_id, action, changes, created_at, updated_at FROM listing_audit_log WHERE listing_id = $1
+ORDER BY created_at DESC, id DESC
+LIMIT 20
+`
+
+func (q *Queries) ListRecentAuditLog(ctx context.Context, listingID uuid.UUID) ([]ListingAuditLog, error) {
+	rows, err := q.db.Query(ctx, listRecentAuditLog, listingID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListingAuditLog
+	for rows.Next() {
+		var i ListingAuditLog
+		if err := rows.Scan(
+			&i.ID,
+			&i.ListingID,
+			&i.ActorUserID,
+			&i.Action,
+			&i.Changes,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listTicketTypes = `-- name: ListTicketTypes :many
 SELECT id, listing_id, name, description, audience, price, active, sort_order, created_at, updated_at FROM attraction_ticket_types
 WHERE listing_id = $1 AND ($2::bool OR active)
@@ -751,6 +1105,46 @@ func (q *Queries) ListTimeSlots(ctx context.Context, arg ListTimeSlotsParams) ([
 	return items, nil
 }
 
+const lockListing = `-- name: LockListing :one
+SELECT id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, rating_sum, rating_count, created_at, updated_at FROM listings WHERE id = $1 FOR NO KEY UPDATE
+`
+
+// Review workflow. Admin transitions lock the row by id only (DB §1.1:
+// users -> partners -> listings); callers check the state after locking.
+func (q *Queries) LockListing(ctx context.Context, id uuid.UUID) (Listing, error) {
+	row := q.db.QueryRow(ctx, lockListing, id)
+	var i Listing
+	err := row.Scan(
+		&i.ID,
+		&i.PartnerID,
+		&i.ServiceType,
+		&i.Title,
+		&i.Slug,
+		&i.Summary,
+		&i.Description,
+		&i.CoverFileID,
+		&i.ProvinceCode,
+		&i.WardCode,
+		&i.Address,
+		&i.Latitude,
+		&i.Longitude,
+		&i.ReviewStatus,
+		&i.RejectionReason,
+		&i.SubmittedAt,
+		&i.ReviewedAt,
+		&i.ReviewedBy,
+		&i.Visibility,
+		&i.HiddenReason,
+		&i.HiddenAt,
+		&i.HiddenBy,
+		&i.RatingSum,
+		&i.RatingCount,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const lockOwnedListing = `-- name: LockOwnedListing :one
 SELECT id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, rating_sum, rating_count, created_at, updated_at FROM listings WHERE id = $1 AND partner_id = $2 FOR NO KEY UPDATE
 `
@@ -765,6 +1159,59 @@ type LockOwnedListingParams struct {
 // which FOR UPDATE would block. Lock order: users -> partners -> listings.
 func (q *Queries) LockOwnedListing(ctx context.Context, arg LockOwnedListingParams) (Listing, error) {
 	row := q.db.QueryRow(ctx, lockOwnedListing, arg.ID, arg.PartnerID)
+	var i Listing
+	err := row.Scan(
+		&i.ID,
+		&i.PartnerID,
+		&i.ServiceType,
+		&i.Title,
+		&i.Slug,
+		&i.Summary,
+		&i.Description,
+		&i.CoverFileID,
+		&i.ProvinceCode,
+		&i.WardCode,
+		&i.Address,
+		&i.Latitude,
+		&i.Longitude,
+		&i.ReviewStatus,
+		&i.RejectionReason,
+		&i.SubmittedAt,
+		&i.ReviewedAt,
+		&i.ReviewedBy,
+		&i.Visibility,
+		&i.HiddenReason,
+		&i.HiddenAt,
+		&i.HiddenBy,
+		&i.RatingSum,
+		&i.RatingCount,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const rejectListing = `-- name: RejectListing :one
+UPDATE listings
+SET review_status = 'rejected', rejection_reason = $1, reviewed_at = $2, reviewed_by = $3, updated_at = $2
+WHERE id = $4
+RETURNING id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, rating_sum, rating_count, created_at, updated_at
+`
+
+type RejectListingParams struct {
+	Reason *string
+	Now    *time.Time
+	Actor  *uuid.UUID
+	ID     uuid.UUID
+}
+
+func (q *Queries) RejectListing(ctx context.Context, arg RejectListingParams) (Listing, error) {
+	row := q.db.QueryRow(ctx, rejectListing,
+		arg.Reason,
+		arg.Now,
+		arg.Actor,
+		arg.ID,
+	)
 	var i Listing
 	err := row.Scan(
 		&i.ID,
@@ -817,6 +1264,143 @@ func (q *Queries) SetListingCover(ctx context.Context, arg SetListingCoverParams
 		arg.ID,
 		arg.PartnerID,
 	)
+	var i Listing
+	err := row.Scan(
+		&i.ID,
+		&i.PartnerID,
+		&i.ServiceType,
+		&i.Title,
+		&i.Slug,
+		&i.Summary,
+		&i.Description,
+		&i.CoverFileID,
+		&i.ProvinceCode,
+		&i.WardCode,
+		&i.Address,
+		&i.Latitude,
+		&i.Longitude,
+		&i.ReviewStatus,
+		&i.RejectionReason,
+		&i.SubmittedAt,
+		&i.ReviewedAt,
+		&i.ReviewedBy,
+		&i.Visibility,
+		&i.HiddenReason,
+		&i.HiddenAt,
+		&i.HiddenBy,
+		&i.RatingSum,
+		&i.RatingCount,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const setListingVisibility = `-- name: SetListingVisibility :one
+UPDATE listings SET visibility = $1, updated_at = $2 WHERE id = $3
+RETURNING id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, rating_sum, rating_count, created_at, updated_at
+`
+
+type SetListingVisibilityParams struct {
+	Visibility string
+	Now        time.Time
+	ID         uuid.UUID
+}
+
+func (q *Queries) SetListingVisibility(ctx context.Context, arg SetListingVisibilityParams) (Listing, error) {
+	row := q.db.QueryRow(ctx, setListingVisibility, arg.Visibility, arg.Now, arg.ID)
+	var i Listing
+	err := row.Scan(
+		&i.ID,
+		&i.PartnerID,
+		&i.ServiceType,
+		&i.Title,
+		&i.Slug,
+		&i.Summary,
+		&i.Description,
+		&i.CoverFileID,
+		&i.ProvinceCode,
+		&i.WardCode,
+		&i.Address,
+		&i.Latitude,
+		&i.Longitude,
+		&i.ReviewStatus,
+		&i.RejectionReason,
+		&i.SubmittedAt,
+		&i.ReviewedAt,
+		&i.ReviewedBy,
+		&i.Visibility,
+		&i.HiddenReason,
+		&i.HiddenAt,
+		&i.HiddenBy,
+		&i.RatingSum,
+		&i.RatingCount,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const submitListing = `-- name: SubmitListing :one
+UPDATE listings
+SET review_status = 'pending_review', submitted_at = $1, rejection_reason = NULL, updated_at = $1
+WHERE id = $2
+RETURNING id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, rating_sum, rating_count, created_at, updated_at
+`
+
+type SubmitListingParams struct {
+	Now *time.Time
+	ID  uuid.UUID
+}
+
+func (q *Queries) SubmitListing(ctx context.Context, arg SubmitListingParams) (Listing, error) {
+	row := q.db.QueryRow(ctx, submitListing, arg.Now, arg.ID)
+	var i Listing
+	err := row.Scan(
+		&i.ID,
+		&i.PartnerID,
+		&i.ServiceType,
+		&i.Title,
+		&i.Slug,
+		&i.Summary,
+		&i.Description,
+		&i.CoverFileID,
+		&i.ProvinceCode,
+		&i.WardCode,
+		&i.Address,
+		&i.Latitude,
+		&i.Longitude,
+		&i.ReviewStatus,
+		&i.RejectionReason,
+		&i.SubmittedAt,
+		&i.ReviewedAt,
+		&i.ReviewedBy,
+		&i.Visibility,
+		&i.HiddenReason,
+		&i.HiddenAt,
+		&i.HiddenBy,
+		&i.RatingSum,
+		&i.RatingCount,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const unhideListing = `-- name: UnhideListing :one
+UPDATE listings
+SET visibility = 'published', hidden_reason = NULL, hidden_at = NULL, hidden_by = NULL, updated_at = $1
+WHERE id = $2
+RETURNING id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, rating_sum, rating_count, created_at, updated_at
+`
+
+type UnhideListingParams struct {
+	Now time.Time
+	ID  uuid.UUID
+}
+
+func (q *Queries) UnhideListing(ctx context.Context, arg UnhideListingParams) (Listing, error) {
+	row := q.db.QueryRow(ctx, unhideListing, arg.Now, arg.ID)
 	var i Listing
 	err := row.Scan(
 		&i.ID,

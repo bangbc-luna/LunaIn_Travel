@@ -131,6 +131,19 @@ func (s *Service) PartnerRoutes(mux httpx.Router, iss *auth.Issuer, requireMembe
 		}{images, l.CoverFileID})
 	}))
 
+	mux.Handle("POST /v1/partner/listings/{id}/submit", withID(func(w http.ResponseWriter, r *http.Request, partnerID, userID, id uuid.UUID) {
+		l, err := s.Submit(r.Context(), partnerID, userID, id)
+		reply(w, r, http.StatusOK, l, err)
+	}))
+	mux.Handle("POST /v1/partner/listings/{id}/publish", withID(func(w http.ResponseWriter, r *http.Request, partnerID, userID, id uuid.UUID) {
+		l, err := s.Publish(r.Context(), partnerID, userID, id)
+		reply(w, r, http.StatusOK, l, err)
+	}))
+	mux.Handle("POST /v1/partner/listings/{id}/unpublish", withID(func(w http.ResponseWriter, r *http.Request, partnerID, userID, id uuid.UUID) {
+		l, err := s.Unpublish(r.Context(), partnerID, userID, id)
+		reply(w, r, http.StatusOK, l, err)
+	}))
+
 	type policyBody struct {
 		Tiers []CancellationTier `json:"tiers"`
 	}

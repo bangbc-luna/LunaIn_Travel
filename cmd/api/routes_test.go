@@ -167,6 +167,12 @@ var adminRoutes = []route{
 	{"DELETE /v1/admin/partners/{id}/service-types/{code}", "/v1/admin/partners/" + uuid.Nil.String() + "/service-types/attraction_ticket"},
 	{"POST /v1/admin/partners/{id}/suspend", "/v1/admin/partners/" + uuid.Nil.String() + "/suspend"},
 	{"POST /v1/admin/partners/{id}/unsuspend", "/v1/admin/partners/" + uuid.Nil.String() + "/unsuspend"},
+	{"GET /v1/admin/listings", "/v1/admin/listings"},
+	{"GET /v1/admin/listings/{id}", "/v1/admin/listings/" + uuid.Nil.String()},
+	{"POST /v1/admin/listings/{id}/approve", "/v1/admin/listings/" + uuid.Nil.String() + "/approve"},
+	{"POST /v1/admin/listings/{id}/reject", "/v1/admin/listings/" + uuid.Nil.String() + "/reject"},
+	{"POST /v1/admin/listings/{id}/hide", "/v1/admin/listings/" + uuid.Nil.String() + "/hide"},
+	{"POST /v1/admin/listings/{id}/unhide", "/v1/admin/listings/" + uuid.Nil.String() + "/unhide"},
 }
 
 // partnerRoutes lists every /v1/partner/* route, like adminRoutes.
@@ -190,6 +196,9 @@ var partnerRoutes = []route{
 	{"PATCH /v1/partner/listings/{id}/time-slots/{slotID}", "/v1/partner/listings/" + uuid.Nil.String() + "/time-slots/" + uuid.Nil.String()},
 	{"PUT /v1/partner/listings/{id}/closed-dates/{date}", "/v1/partner/listings/" + uuid.Nil.String() + "/closed-dates/2099-01-01"},
 	{"DELETE /v1/partner/listings/{id}/closed-dates/{date}", "/v1/partner/listings/" + uuid.Nil.String() + "/closed-dates/2099-01-01"},
+	{"POST /v1/partner/listings/{id}/submit", "/v1/partner/listings/" + uuid.Nil.String() + "/submit"},
+	{"POST /v1/partner/listings/{id}/publish", "/v1/partner/listings/" + uuid.Nil.String() + "/publish"},
+	{"POST /v1/partner/listings/{id}/unpublish", "/v1/partner/listings/" + uuid.Nil.String() + "/unpublish"},
 }
 
 // recordedUnder returns the recorded patterns whose path starts with prefix.

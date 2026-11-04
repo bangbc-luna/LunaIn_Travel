@@ -145,3 +145,82 @@ DELETE FROM attraction_closed_dates WHERE listing_id = @listing_id AND date = @d
 
 -- name: ListClosedDatesFrom :many
 SELECT * FROM attraction_closed_dates WHERE listing_id = @listing_id AND date >= @from_date ORDER BY date;
+
+-- Review workflow. Admin transitions lock the row by id only (DB §1.1:
+-- users -> partners -> listings); callers check the state after locking.
+-- name: LockListing :one
+SELECT * FROM listings WHERE id = @id FOR NO KEY UPDATE;
+
+-- name: GetListing :one
+SELECT * FROM listings WHERE id = @id;
+
+-- name: SubmitListing :one
+UPDATE listings
+SET review_status = 'pending_review', submitted_at = @now, rejection_reason = NULL, updated_at = @now
+WHERE id = @id
+RETURNING *;
+
+-- name: ApproveListing :one
+UPDATE listings
+SET review_status = 'approved', reviewed_at = @now, reviewed_by = @actor, updated_at = @now
+WHERE id = @id
+RETURNING *;
+
+-- name: RejectListing :one
+UPDATE listings
+SET review_status = 'rejected', rejection_reason = @reason, reviewed_at = @now, reviewed_by = @actor, updated_at = @now
+WHERE id = @id
+RETURNING *;
+
+-- name: HideListing :one
+UPDATE listings
+SET visibility = 'hidden_by_admin', hidden_reason = @reason, hidden_at = @now, hidden_by = @actor, updated_at = @now
+WHERE id = @id
+RETURNING *;
+
+-- name: UnhideListing :one
+UPDATE listings
+SET visibility = 'published', hidden_reason = NULL, hidden_at = NULL, hidden_by = NULL, updated_at = @now
+WHERE id = @id
+RETURNING *;
+
+-- name: SetListingVisibility :one
+UPDATE listings SET visibility = @visibility, updated_at = @now WHERE id = @id
+RETURNING *;
+
+-- name: CountListingImages :one
+SELECT count(*) FROM listing_images WHERE listing_id = @listing_id;
+
+-- name: CountActiveTicketTypes :one
+SELECT count(*) FROM attraction_ticket_types WHERE listing_id = @listing_id AND active;
+
+-- name: CountActiveTimeSlots :one
+SELECT count(*) FROM attraction_time_slots WHERE listing_id = @listing_id AND active;
+
+-- name: ListAdminListings :many
+SELECT * FROM listings
+WHERE (sqlc.narg(review_status)::text IS NULL OR review_status = sqlc.narg(review_status))
+  AND (sqlc.narg(visibility)::text IS NULL OR visibility = sqlc.narg(visibility))
+  AND (sqlc.narg(service_type)::text IS NULL OR service_type = sqlc.narg(service_type))
+  AND (sqlc.narg(partner_id)::uuid IS NULL OR partner_id = sqlc.narg(partner_id))
+  AND (sqlc.narg(cursor)::uuid IS NULL OR id < sqlc.narg(cursor))
+ORDER BY id DESC
+LIMIT @lim;
+
+-- Review queue: oldest submission first; the cursor row's (submitted_at, id)
+-- is the keyset position.
+-- name: ListAdminPendingListings :many
+SELECT * FROM listings
+WHERE review_status = 'pending_review'
+  AND (sqlc.narg(visibility)::text IS NULL OR visibility = sqlc.narg(visibility))
+  AND (sqlc.narg(service_type)::text IS NULL OR service_type = sqlc.narg(service_type))
+  AND (sqlc.narg(partner_id)::uuid IS NULL OR partner_id = sqlc.narg(partner_id))
+  AND (sqlc.narg(cursor)::uuid IS NULL
+       OR (submitted_at, id) > (SELECT c.submitted_at, c.id FROM listings c WHERE c.id = sqlc.narg(cursor)))
+ORDER BY submitted_at, id
+LIMIT @lim;
+
+-- name: ListRecentAuditLog :many
+SELECT * FROM listing_audit_log WHERE listing_id = @listing_id
+ORDER BY created_at DESC, id DESC
+LIMIT 20;
