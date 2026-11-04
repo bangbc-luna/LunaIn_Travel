@@ -75,6 +75,45 @@ type Holiday struct {
 	UpdatedAt time.Time
 }
 
+type Listing struct {
+	ID              uuid.UUID
+	PartnerID       uuid.UUID
+	ServiceType     string
+	Title           string
+	Slug            string
+	Summary         *string
+	Description     *string
+	CoverFileID     pgtype.UUID
+	ProvinceCode    *string
+	WardCode        *string
+	Address         *string
+	Latitude        pgtype.Numeric
+	Longitude       pgtype.Numeric
+	ReviewStatus    string
+	RejectionReason *string
+	SubmittedAt     *time.Time
+	ReviewedAt      *time.Time
+	ReviewedBy      pgtype.UUID
+	Visibility      string
+	HiddenReason    *string
+	HiddenAt        *time.Time
+	HiddenBy        pgtype.UUID
+	RatingSum       int32
+	RatingCount     int32
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+}
+
+type ListingAuditLog struct {
+	ID          uuid.UUID
+	ListingID   uuid.UUID
+	ActorUserID uuid.UUID
+	Action      string
+	Changes     []byte
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
 type Partner struct {
 	ID                    uuid.UUID
 	LegalName             string

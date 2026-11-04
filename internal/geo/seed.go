@@ -11,9 +11,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"unicode"
 
-	"golang.org/x/text/unicode/norm"
+	"github.com/bangbc-luna/lunain-travel/internal/platform/text"
 )
 
 // SeedProvince is one row of data/provinces.csv.
@@ -33,33 +32,6 @@ type SeedWard struct {
 
 // seedBatch is the number of rows per INSERT statement in the seed migration.
 const seedBatch = 500
-
-// Slug lowercases s, strips Vietnamese diacritics (đ becomes d), and joins
-// the remaining runs of ASCII letters and digits with "-".
-func Slug(s string) string {
-	var b strings.Builder
-	dash := false
-	for _, r := range norm.NFD.String(s) {
-		switch {
-		case unicode.Is(unicode.Mn, r):
-			continue
-		case r == 'đ' || r == 'Đ':
-			r = 'd'
-		default:
-			r = unicode.ToLower(r)
-		}
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
-			if dash && b.Len() > 0 {
-				b.WriteByte('-')
-			}
-			dash = false
-			b.WriteRune(r)
-		} else {
-			dash = true
-		}
-	}
-	return b.String()
-}
 
 func readCSV(path string, header []string) ([][]string, error) {
 	f, err := os.Open(path)
@@ -133,14 +105,14 @@ func isDigits(s string, n int) bool {
 
 // WardSlugs returns the slug of every ward keyed by ward code. Some distinct
 // wards of one province have names that differ only by diacritics (Xã Văn
-// Lang / Xã Văn Lăng) and so share Slug(name); every member of such a group
+// Lang / Xã Văn Lăng) and so share text.Slug(name); every member of such a group
 // gets "-<ward code>" appended instead. collisions lists those groups (ward
 // codes, sorted) ordered by province code then slug, for the generator to
 // report.
 func WardSlugs(wards []SeedWard) (slugs map[string]string, collisions [][]string) {
 	groups := map[[2]string][]string{}
 	for _, w := range wards {
-		key := [2]string{w.ProvinceCode, Slug(w.Name)}
+		key := [2]string{w.ProvinceCode, text.Slug(w.Name)}
 		groups[key] = append(groups[key], w.Code)
 	}
 	slugs = make(map[string]string, len(wards))
@@ -183,7 +155,7 @@ func ValidateSeed(provinces []SeedProvince, wards []SeedWard) error {
 			errs = append(errs, fmt.Errorf("province %s: duplicate code", p.Code))
 		}
 		pCodes[p.Code] = true
-		s := Slug(p.Name)
+		s := text.Slug(p.Name)
 		if s == "" {
 			errs = append(errs, fmt.Errorf("province %s: empty slug", p.Code))
 		} else if other, ok := pSlugs[s]; ok {
@@ -257,7 +229,7 @@ func Render(provinces []SeedProvince, wards []SeedWard) []byte {
 
 	pRows := make([]string, len(ps))
 	for i, p := range ps {
-		pRows[i] = fmt.Sprintf("(%s, %s, %s, %d)", sqlString(p.Code), sqlString(p.Name), sqlString(Slug(p.Name)), p.SortOrder)
+		pRows[i] = fmt.Sprintf("(%s, %s, %s, %d)", sqlString(p.Code), sqlString(p.Name), sqlString(text.Slug(p.Name)), p.SortOrder)
 	}
 	writeInserts(&buf, "INSERT INTO provinces (code, name, slug, sort_order)", pRows)
 

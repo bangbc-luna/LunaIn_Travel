@@ -20,6 +20,7 @@ import (
 	"github.com/bangbc-luna/lunain-travel/internal/files"
 	"github.com/bangbc-luna/lunain-travel/internal/geo"
 	"github.com/bangbc-luna/lunain-travel/internal/identity"
+	"github.com/bangbc-luna/lunain-travel/internal/listing"
 	"github.com/bangbc-luna/lunain-travel/internal/partner"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/auth"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/clock"
@@ -190,10 +191,14 @@ func serve(log *slog.Logger) error {
 		Pool: pool, Clock: clock.Real{}, Users: idSvc, Catalog: catSvc, Geo: geoSvc, Files: fileSvc,
 	})
 
+	listingSvc := listing.NewService(listing.Deps{
+		Pool: pool, Clock: clock.Real{}, Partners: partnerSvc, Catalog: catSvc, Geo: geoSvc, Files: fileSvc,
+	})
+
 	mux, _ := buildMux(muxDeps{
 		Pool: pool, Issuer: issuer, ClientIP: httpx.ClientIPFunc(cfg.TrustedProxyHops),
 		Identity: idSvc, Settings: settings.NewService(pool, clock.Real{}), Files: fileSvc,
-		Geo: geoSvc, Catalog: catSvc, Partner: partnerSvc,
+		Geo: geoSvc, Catalog: catSvc, Partner: partnerSvc, Listing: listingSvc,
 	})
 
 	srv := &http.Server{

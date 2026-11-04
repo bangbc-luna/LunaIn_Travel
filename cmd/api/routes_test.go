@@ -19,6 +19,7 @@ import (
 	"github.com/bangbc-luna/lunain-travel/internal/files"
 	"github.com/bangbc-luna/lunain-travel/internal/geo"
 	"github.com/bangbc-luna/lunain-travel/internal/identity"
+	"github.com/bangbc-luna/lunain-travel/internal/listing"
 	"github.com/bangbc-luna/lunain-travel/internal/partner"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/auth"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/clock"
@@ -58,10 +59,13 @@ func newTestApp(t *testing.T) *testApp {
 	partnerSvc := partner.NewService(partner.Deps{
 		Pool: pool, Clock: clk, Users: idSvc, Catalog: catSvc, Geo: geoSvc, Files: fileSvc,
 	})
+	listingSvc := listing.NewService(listing.Deps{
+		Pool: pool, Clock: clk, Partners: partnerSvc, Catalog: catSvc, Geo: geoSvc, Files: fileSvc,
+	})
 	mux, patterns := buildMux(muxDeps{
 		Pool: pool, Issuer: issuer, ClientIP: httpx.ClientIPFunc(0),
 		Identity: idSvc, Settings: settings.NewService(pool, clk), Files: fileSvc,
-		Geo: geoSvc, Catalog: catSvc, Partner: partnerSvc,
+		Geo: geoSvc, Catalog: catSvc, Partner: partnerSvc, Listing: listingSvc,
 	})
 	return &testApp{
 		handler: httpx.Chain(mux, httpx.RequestID, httpx.Recover), issuer: issuer,
@@ -171,6 +175,10 @@ var partnerRoutes = []route{
 	{"PATCH /v1/partner/profile", "/v1/partner/profile"},
 	{"GET /v1/partner/bank-accounts", "/v1/partner/bank-accounts"},
 	{"PUT /v1/partner/bank-account", "/v1/partner/bank-account"},
+	{"POST /v1/partner/listings", "/v1/partner/listings"},
+	{"GET /v1/partner/listings", "/v1/partner/listings"},
+	{"GET /v1/partner/listings/{id}", "/v1/partner/listings/" + uuid.Nil.String()},
+	{"PATCH /v1/partner/listings/{id}", "/v1/partner/listings/" + uuid.Nil.String()},
 }
 
 // recordedUnder returns the recorded patterns whose path starts with prefix.

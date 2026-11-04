@@ -206,19 +206,6 @@ func TestValidateSeed_RejectsDuplicateSlugAfterResolution(t *testing.T) {
 	require.NoError(t, geo.ValidateSeed(provinces, wards[:2]))
 }
 
-func TestSlug(t *testing.T) {
-	cases := map[string]string{
-		"Thành phố Hồ Chí Minh": "thanh-pho-ho-chi-minh",
-		"Tỉnh Đắk Lắk":          "tinh-dak-lak",
-		"Đặc khu Bạch Long Vĩ":  "dac-khu-bach-long-vi",
-		"  Xã  Ia H'Drai ":      "xa-ia-h-drai",
-		"Phường 1":              "phuong-1",
-	}
-	for in, want := range cases {
-		require.Equal(t, want, geo.Slug(in), in)
-	}
-}
-
 func TestHTTP_PublicCachedRoutes(t *testing.T) {
 	svc, _ := newSvc(t)
 	mux := http.NewServeMux()
