@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -111,12 +112,18 @@ func TestHTTP_ForgotUnknownEmail202(t *testing.T) {
 func TestHTTP_LoginRateLimited(t *testing.T) {
 	env := newTestEnv(t)
 	srv := newHTTPServer(t, env)
-	for i := 1; i <= 21; i++ {
-		st, _ := doJSON(t, srv, "POST", "/v1/auth/login", "", map[string]string{"email": "a@b.com", "password": "wrong"})
-		if i <= 20 {
-			require.Equal(t, http.StatusUnauthorized, st, "request %d", i)
-		} else {
-			require.Equal(t, http.StatusTooManyRequests, st)
-		}
+	// Malformed bodies still pass through the limiter (outermost) but never
+	// reach argon2, so the burst finishes well inside one refill interval.
+	post := func() *http.Response {
+		resp, err := http.Post(srv.URL+"/v1/auth/login", "application/json", strings.NewReader("{"))
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = resp.Body.Close() })
+		return resp
 	}
+	for i := 1; i <= 20; i++ {
+		require.Equal(t, http.StatusBadRequest, post().StatusCode, "request %d", i)
+	}
+	resp := post()
+	require.Equal(t, http.StatusTooManyRequests, resp.StatusCode)
+	require.NotEmpty(t, resp.Header.Get("Retry-After"))
 }
