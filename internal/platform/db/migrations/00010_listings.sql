@@ -6,7 +6,7 @@ CREATE EXTENSION IF NOT EXISTS unaccent;
 -- cannot back an index. This wrapper pins the dictionary explicitly and is
 -- declared IMMUTABLE so f_unaccent(lower(title)) can be indexed (DB §5.3).
 -- +goose StatementBegin
-CREATE FUNCTION f_unaccent(text) RETURNS text
+CREATE FUNCTION public.f_unaccent(text) RETURNS text
 LANGUAGE sql IMMUTABLE PARALLEL SAFE STRICT
 AS $$ SELECT public.unaccent('public.unaccent', $1) $$;
 -- +goose StatementEnd
@@ -60,7 +60,26 @@ CREATE TABLE listings (
 CREATE INDEX listings_partner_idx ON listings (partner_id, id DESC);
 CREATE INDEX listings_public_idx ON listings (service_type, province_code)
     WHERE review_status = 'approved' AND visibility = 'published';
-CREATE INDEX listings_title_trgm_idx ON listings USING gin (f_unaccent(lower(title)) gin_trgm_ops);
+CREATE INDEX listings_title_trgm_idx ON listings USING gin (public.f_unaccent(lower(title)) gin_trgm_ops);
+
+-- The one definition of public visibility (spec §5.4): approved, published,
+-- partner active and the listing's service type enabled for the partner.
+-- Search, the public detail and BookableListing all read it. Reading
+-- partners and partner_service_types here is an accepted read-only
+-- cross-module read (like Ruling 12 of plan 2): the rule must be one SQL
+-- predicate so search can filter and page correctly. listing never writes or
+-- locks those tables through this view.
+CREATE VIEW visible_listings AS
+SELECT l.*
+FROM listings l
+JOIN partners p ON p.id = l.partner_id
+WHERE l.review_status = 'approved'
+  AND l.visibility = 'published'
+  AND p.status = 'active'
+  AND EXISTS (SELECT 1 FROM partner_service_types pst
+              WHERE pst.partner_id = l.partner_id
+                AND pst.service_type = l.service_type
+                AND pst.disabled_at IS NULL);
 
 -- Every partner-side edit of a listing, with changes = {field: {old, new}}.
 CREATE TABLE listing_audit_log (
@@ -102,5 +121,6 @@ CREATE TABLE listing_cancellation_tiers (
 DROP TABLE listing_cancellation_tiers;
 DROP TABLE listing_images;
 DROP TABLE listing_audit_log;
+DROP VIEW visible_listings;
 DROP TABLE listings;
-DROP FUNCTION f_unaccent(text);
+DROP FUNCTION public.f_unaccent(text);

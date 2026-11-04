@@ -325,6 +325,59 @@ func TestBookableListing_BlocksConcurrentSuspend(t *testing.T) {
 	requireErr(t, err, http.StatusUnprocessableEntity, "listing_not_bookable")
 }
 
+// Ruling 6: search, the public detail and BookableListing read the same
+// visible_listings rule, so they agree on every state.
+func TestVisibility_SearchDetailBookableAgree(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	p := e.partner(t, "Alpha", attraction)
+	susp := e.partner(t, "Beta", attraction)
+	dis := e.partner(t, "Gamma", attraction)
+
+	visible := e.approved(t, p, "Vé hiện")
+	rejected := e.submitted(t, p, "Vé bị từ chối")
+	_, err := e.Svc.Reject(ctx, e.Admin, rejected.ID, "Ảnh mờ")
+	require.NoError(t, err)
+	unpub := e.approved(t, p, "Vé tự gỡ")
+	_, err = e.Svc.Unpublish(ctx, p.ID, p.OwnerUserID, unpub.ID)
+	require.NoError(t, err)
+	hidden := e.approved(t, p, "Vé bị ẩn")
+	_, err = e.Svc.Hide(ctx, e.Admin, hidden.ID, "Vi phạm")
+	require.NoError(t, err)
+	ofSuspended := e.approved(t, susp, "Vé đối tác bị đình chỉ")
+	require.NoError(t, e.Partner.Suspend(ctx, e.Admin, susp.ID, "Vi phạm"))
+	ofDisabled := e.approved(t, dis, "Vé loại bị tắt")
+	require.NoError(t, e.Partner.DisableServiceType(ctx, e.Admin, dis.ID, attraction))
+
+	notVisible := map[string]listing.Listing{
+		"draft":             e.create(t, p, "Vé nháp"),
+		"pending_review":    e.submitted(t, p, "Vé chờ duyệt"),
+		"rejected":          rejected,
+		"unpublished":       unpub,
+		"hidden_by_admin":   hidden,
+		"partner_suspended": ofSuspended,
+		"type_disabled":     ofDisabled,
+	}
+	found := map[string]bool{}
+	for _, c := range e.search(t, listing.SearchFilter{}) {
+		found[c.Slug] = true
+	}
+	require.True(t, found[visible.Slug])
+	_, err = e.Svc.PublicDetail(ctx, visible.Slug)
+	require.NoError(t, err)
+	_, err = e.bookable(t, visible.ID)
+	require.NoError(t, err)
+
+	for state, l := range notVisible {
+		require.False(t, found[l.Slug], "search shows %s", state)
+		_, err := e.Svc.PublicDetail(ctx, l.Slug)
+		requireErr(t, err, http.StatusNotFound, "not_found")
+		_, err = e.bookable(t, l.ID)
+		requireErr(t, err, http.StatusUnprocessableEntity, "listing_not_bookable")
+	}
+	require.Len(t, found, 1)
+}
+
 func TestHTTP_PublicSearchAndDetail(t *testing.T) {
 	e := newEnv(t)
 	p := e.partner(t, "Alpha", attraction)

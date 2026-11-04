@@ -229,48 +229,33 @@ SELECT * FROM listing_audit_log WHERE listing_id = @listing_id
 ORDER BY created_at DESC, id DESC
 LIMIT 20;
 
--- Public visibility (spec §5.4): approved, published, partner active and the
--- listing's service type enabled for the partner. The joins on partner's
--- partners and partner_service_types are an accepted read-only cross-module
--- join (like Ruling 12 of plan 2): search needs the whole rule in one SQL
--- statement to filter and page correctly. listing never writes or locks those
--- tables here; BookableListing locks through PartnerChecker instead.
--- price_from is the cheapest active ticket type, 0 when there is none (prices
--- are > 0 by CHECK; sqlc cannot type a nullable aggregate, so 0 means NULL).
--- With q: ILIKE on the escaped pattern (ESCAPE '\') or trigram similarity
--- >= 0.3, best match first; without q: newest first.
+-- Public search over visible_listings (the single visibility rule, see
+-- migration 00010). price_from is the cheapest active ticket type, 0 when
+-- there is none (prices are > 0 by CHECK; sqlc cannot type a nullable
+-- aggregate, so 0 means NULL). With q: ILIKE on the escaped pattern
+-- (ESCAPE '\') or trigram similarity >= 0.3, best match first; without q:
+-- newest first.
 -- name: SearchPublicListings :many
 SELECT sqlc.embed(l),
        (SELECT COALESCE(min(tt.price), 0) FROM attraction_ticket_types tt
         WHERE tt.listing_id = l.id AND tt.active)::bigint AS price_from
-FROM listings l
-JOIN partners p ON p.id = l.partner_id
-WHERE l.review_status = 'approved' AND l.visibility = 'published' AND p.status = 'active'
-  AND EXISTS (SELECT 1 FROM partner_service_types pst
-              WHERE pst.partner_id = l.partner_id AND pst.service_type = l.service_type
-                AND pst.disabled_at IS NULL)
-  AND (sqlc.narg(service_type)::text IS NULL OR l.service_type = sqlc.narg(service_type))
+FROM visible_listings l
+WHERE (sqlc.narg(service_type)::text IS NULL OR l.service_type = sqlc.narg(service_type))
   AND (sqlc.narg(province_code)::text IS NULL OR l.province_code = sqlc.narg(province_code))
   AND (sqlc.narg(q)::text IS NULL
-       OR f_unaccent(lower(l.title)) ILIKE '%' || f_unaccent(lower(sqlc.narg(pattern)::text)) || '%' ESCAPE '\'
-       OR similarity(f_unaccent(lower(l.title)), f_unaccent(lower(sqlc.narg(q)))) >= 0.3)
+       OR public.f_unaccent(lower(l.title)) ILIKE '%' || public.f_unaccent(lower(sqlc.narg(pattern)::text)) || '%' ESCAPE '\'
+       OR similarity(public.f_unaccent(lower(l.title)), public.f_unaccent(lower(sqlc.narg(q)))) >= 0.3)
 ORDER BY CASE WHEN sqlc.narg(q)::text IS NULL THEN 0
-              ELSE similarity(f_unaccent(lower(l.title)), f_unaccent(lower(sqlc.narg(q)))) END DESC,
+              ELSE similarity(public.f_unaccent(lower(l.title)), public.f_unaccent(lower(sqlc.narg(q)))) END DESC,
          l.id DESC
 LIMIT @lim OFFSET @off;
 
--- Same visibility rule as SearchPublicListings (same accepted read-only join).
 -- name: GetPublicListingBySlug :one
 SELECT sqlc.embed(l),
        (SELECT COALESCE(min(tt.price), 0) FROM attraction_ticket_types tt
         WHERE tt.listing_id = l.id AND tt.active)::bigint AS price_from
-FROM listings l
-JOIN partners p ON p.id = l.partner_id
-WHERE l.slug = @slug
-  AND l.review_status = 'approved' AND l.visibility = 'published' AND p.status = 'active'
-  AND EXISTS (SELECT 1 FROM partner_service_types pst
-              WHERE pst.partner_id = l.partner_id AND pst.service_type = l.service_type
-                AND pst.disabled_at IS NULL);
+FROM visible_listings l
+WHERE l.slug = @slug;
 
 -- name: ListingPartnerID :one
 SELECT partner_id FROM listings WHERE id = @id;
@@ -279,3 +264,6 @@ SELECT partner_id FROM listings WHERE id = @id;
 -- the booking tx ends, but not other bookings. Taken after the partners row.
 -- name: ShareListing :one
 SELECT * FROM listings WHERE id = @id FOR SHARE;
+
+-- name: IsListingVisible :one
+SELECT EXISTS (SELECT 1 FROM visible_listings WHERE id = @id);

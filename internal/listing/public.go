@@ -12,7 +12,6 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/bangbc-luna/lunain-travel/internal/listing/store"
-	"github.com/bangbc-luna/lunain-travel/internal/partner"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/db"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/httpx"
 )
@@ -136,7 +135,7 @@ func (s *Service) Search(ctx context.Context, f SearchFilter) ([]PublicCard, err
 			return fmt.Errorf("search listings: %w", err)
 		}
 		for _, r := range rows {
-			c, err := s.card(ctx, tx, r.Listing, r.PriceFrom)
+			c, err := s.card(ctx, tx, store.Listing(r.VisibleListing), r.PriceFrom)
 			if err != nil {
 				return err
 			}
@@ -162,7 +161,7 @@ func (s *Service) PublicDetail(ctx context.Context, slug string) (PublicDetail, 
 		if err != nil {
 			return fmt.Errorf("get public listing: %w", err)
 		}
-		r := row.Listing
+		r := store.Listing(row.VisibleListing)
 		if out.PublicCard, err = s.card(ctx, tx, r, row.PriceFrom); err != nil {
 			return err
 		}
@@ -207,12 +206,12 @@ func (s *Service) PublicDetail(ctx context.Context, slug string) (PublicDetail, 
 // booking with no ticket lines.
 //
 // Lock order (DB §1.1: partners -> listings): it reads partner_id unlocked
-// (safe: a listing's partner_id never changes),
-// takes the partners row FOR SHARE via Partners.Status (a concurrent Suspend
-// or DisableServiceType waits for the booking tx), then the listings row FOR
-// SHARE (a concurrent partner edit or admin hide waits too), and only then
-// checks the public visibility rule and IsServiceTypeEnabled. A missing or
-// not visible listing is ErrListingNotBookable.
+// (safe: a listing's partner_id never changes), takes the partners row FOR
+// SHARE via Partners.Status (a concurrent Suspend or DisableServiceType waits
+// for the booking tx), then the listings row FOR SHARE (a concurrent partner
+// edit or admin hide waits too), and only then checks visible_listings, the
+// same rule search and the public detail use. A missing, not visible or
+// unsupported listing is ErrListingNotBookable.
 func (s *Service) BookableListing(ctx context.Context, tx pgx.Tx, listingID uuid.UUID) (Listing, error) {
 	q := store.New(tx)
 	partnerID, err := q.ListingPartnerID(ctx, listingID)
@@ -222,8 +221,8 @@ func (s *Service) BookableListing(ctx context.Context, tx pgx.Tx, listingID uuid
 	if err != nil {
 		return Listing{}, fmt.Errorf("listing partner: %w", err)
 	}
-	st, err := s.partners.Status(ctx, tx, partnerID, true)
-	if err != nil {
+	// Called for its FOR SHARE lock; visibility is decided by the view below.
+	if _, err := s.partners.Status(ctx, tx, partnerID, true); err != nil {
 		return Listing{}, err
 	}
 	r, err := q.ShareListing(ctx, listingID)
@@ -231,14 +230,11 @@ func (s *Service) BookableListing(ctx context.Context, tx pgx.Tx, listingID uuid
 		// The row exists (partner_id was read) and listings are never deleted.
 		return Listing{}, fmt.Errorf("share listing: %w", err)
 	}
-	if st != partner.StatusActive || r.ReviewStatus != ReviewApproved || r.Visibility != VisibilityPublished {
-		return Listing{}, ErrListingNotBookable
-	}
-	enabled, err := s.partners.IsServiceTypeEnabled(ctx, tx, partnerID, r.ServiceType)
+	visible, err := q.IsListingVisible(ctx, listingID)
 	if err != nil {
-		return Listing{}, err
+		return Listing{}, fmt.Errorf("listing visible: %w", err)
 	}
-	if !enabled || !supportedServiceType(r.ServiceType) {
+	if !visible || !supportedServiceType(r.ServiceType) {
 		return Listing{}, ErrListingNotBookable
 	}
 	return fromRow(r), nil

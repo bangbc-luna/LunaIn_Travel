@@ -271,52 +271,46 @@ const getPublicListingBySlug = `-- name: GetPublicListingBySlug :one
 SELECT l.id, l.partner_id, l.service_type, l.title, l.slug, l.summary, l.description, l.cover_file_id, l.province_code, l.ward_code, l.address, l.latitude, l.longitude, l.review_status, l.rejection_reason, l.submitted_at, l.reviewed_at, l.reviewed_by, l.visibility, l.hidden_reason, l.hidden_at, l.hidden_by, l.hidden_from_visibility, l.rating_sum, l.rating_count, l.created_at, l.updated_at,
        (SELECT COALESCE(min(tt.price), 0) FROM attraction_ticket_types tt
         WHERE tt.listing_id = l.id AND tt.active)::bigint AS price_from
-FROM listings l
-JOIN partners p ON p.id = l.partner_id
+FROM visible_listings l
 WHERE l.slug = $1
-  AND l.review_status = 'approved' AND l.visibility = 'published' AND p.status = 'active'
-  AND EXISTS (SELECT 1 FROM partner_service_types pst
-              WHERE pst.partner_id = l.partner_id AND pst.service_type = l.service_type
-                AND pst.disabled_at IS NULL)
 `
 
 type GetPublicListingBySlugRow struct {
-	Listing   Listing
-	PriceFrom int64
+	VisibleListing VisibleListing
+	PriceFrom      int64
 }
 
-// Same visibility rule as SearchPublicListings (same accepted read-only join).
 func (q *Queries) GetPublicListingBySlug(ctx context.Context, slug string) (GetPublicListingBySlugRow, error) {
 	row := q.db.QueryRow(ctx, getPublicListingBySlug, slug)
 	var i GetPublicListingBySlugRow
 	err := row.Scan(
-		&i.Listing.ID,
-		&i.Listing.PartnerID,
-		&i.Listing.ServiceType,
-		&i.Listing.Title,
-		&i.Listing.Slug,
-		&i.Listing.Summary,
-		&i.Listing.Description,
-		&i.Listing.CoverFileID,
-		&i.Listing.ProvinceCode,
-		&i.Listing.WardCode,
-		&i.Listing.Address,
-		&i.Listing.Latitude,
-		&i.Listing.Longitude,
-		&i.Listing.ReviewStatus,
-		&i.Listing.RejectionReason,
-		&i.Listing.SubmittedAt,
-		&i.Listing.ReviewedAt,
-		&i.Listing.ReviewedBy,
-		&i.Listing.Visibility,
-		&i.Listing.HiddenReason,
-		&i.Listing.HiddenAt,
-		&i.Listing.HiddenBy,
-		&i.Listing.HiddenFromVisibility,
-		&i.Listing.RatingSum,
-		&i.Listing.RatingCount,
-		&i.Listing.CreatedAt,
-		&i.Listing.UpdatedAt,
+		&i.VisibleListing.ID,
+		&i.VisibleListing.PartnerID,
+		&i.VisibleListing.ServiceType,
+		&i.VisibleListing.Title,
+		&i.VisibleListing.Slug,
+		&i.VisibleListing.Summary,
+		&i.VisibleListing.Description,
+		&i.VisibleListing.CoverFileID,
+		&i.VisibleListing.ProvinceCode,
+		&i.VisibleListing.WardCode,
+		&i.VisibleListing.Address,
+		&i.VisibleListing.Latitude,
+		&i.VisibleListing.Longitude,
+		&i.VisibleListing.ReviewStatus,
+		&i.VisibleListing.RejectionReason,
+		&i.VisibleListing.SubmittedAt,
+		&i.VisibleListing.ReviewedAt,
+		&i.VisibleListing.ReviewedBy,
+		&i.VisibleListing.Visibility,
+		&i.VisibleListing.HiddenReason,
+		&i.VisibleListing.HiddenAt,
+		&i.VisibleListing.HiddenBy,
+		&i.VisibleListing.HiddenFromVisibility,
+		&i.VisibleListing.RatingSum,
+		&i.VisibleListing.RatingCount,
+		&i.VisibleListing.CreatedAt,
+		&i.VisibleListing.UpdatedAt,
 		&i.PriceFrom,
 	)
 	return i, err
@@ -695,6 +689,17 @@ func (q *Queries) InsertTimeSlot(ctx context.Context, arg InsertTimeSlotParams) 
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const isListingVisible = `-- name: IsListingVisible :one
+SELECT EXISTS (SELECT 1 FROM visible_listings WHERE id = $1)
+`
+
+func (q *Queries) IsListingVisible(ctx context.Context, id uuid.UUID) (bool, error) {
+	row := q.db.QueryRow(ctx, isListingVisible, id)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
 }
 
 const listActiveTicketTypesByIDs = `-- name: ListActiveTicketTypesByIDs :many
@@ -1328,19 +1333,14 @@ const searchPublicListings = `-- name: SearchPublicListings :many
 SELECT l.id, l.partner_id, l.service_type, l.title, l.slug, l.summary, l.description, l.cover_file_id, l.province_code, l.ward_code, l.address, l.latitude, l.longitude, l.review_status, l.rejection_reason, l.submitted_at, l.reviewed_at, l.reviewed_by, l.visibility, l.hidden_reason, l.hidden_at, l.hidden_by, l.hidden_from_visibility, l.rating_sum, l.rating_count, l.created_at, l.updated_at,
        (SELECT COALESCE(min(tt.price), 0) FROM attraction_ticket_types tt
         WHERE tt.listing_id = l.id AND tt.active)::bigint AS price_from
-FROM listings l
-JOIN partners p ON p.id = l.partner_id
-WHERE l.review_status = 'approved' AND l.visibility = 'published' AND p.status = 'active'
-  AND EXISTS (SELECT 1 FROM partner_service_types pst
-              WHERE pst.partner_id = l.partner_id AND pst.service_type = l.service_type
-                AND pst.disabled_at IS NULL)
-  AND ($1::text IS NULL OR l.service_type = $1)
+FROM visible_listings l
+WHERE ($1::text IS NULL OR l.service_type = $1)
   AND ($2::text IS NULL OR l.province_code = $2)
   AND ($3::text IS NULL
-       OR f_unaccent(lower(l.title)) ILIKE '%' || f_unaccent(lower($4::text)) || '%' ESCAPE '\'
-       OR similarity(f_unaccent(lower(l.title)), f_unaccent(lower($3))) >= 0.3)
+       OR public.f_unaccent(lower(l.title)) ILIKE '%' || public.f_unaccent(lower($4::text)) || '%' ESCAPE '\'
+       OR similarity(public.f_unaccent(lower(l.title)), public.f_unaccent(lower($3))) >= 0.3)
 ORDER BY CASE WHEN $3::text IS NULL THEN 0
-              ELSE similarity(f_unaccent(lower(l.title)), f_unaccent(lower($3))) END DESC,
+              ELSE similarity(public.f_unaccent(lower(l.title)), public.f_unaccent(lower($3))) END DESC,
          l.id DESC
 LIMIT $6 OFFSET $5
 `
@@ -1355,20 +1355,16 @@ type SearchPublicListingsParams struct {
 }
 
 type SearchPublicListingsRow struct {
-	Listing   Listing
-	PriceFrom int64
+	VisibleListing VisibleListing
+	PriceFrom      int64
 }
 
-// Public visibility (spec §5.4): approved, published, partner active and the
-// listing's service type enabled for the partner. The joins on partner's
-// partners and partner_service_types are an accepted read-only cross-module
-// join (like Ruling 12 of plan 2): search needs the whole rule in one SQL
-// statement to filter and page correctly. listing never writes or locks those
-// tables here; BookableListing locks through PartnerChecker instead.
-// price_from is the cheapest active ticket type, 0 when there is none (prices
-// are > 0 by CHECK; sqlc cannot type a nullable aggregate, so 0 means NULL).
-// With q: ILIKE on the escaped pattern (ESCAPE '\') or trigram similarity
-// >= 0.3, best match first; without q: newest first.
+// Public search over visible_listings (the single visibility rule, see
+// migration 00010). price_from is the cheapest active ticket type, 0 when
+// there is none (prices are > 0 by CHECK; sqlc cannot type a nullable
+// aggregate, so 0 means NULL). With q: ILIKE on the escaped pattern
+// (ESCAPE '\') or trigram similarity >= 0.3, best match first; without q:
+// newest first.
 func (q *Queries) SearchPublicListings(ctx context.Context, arg SearchPublicListingsParams) ([]SearchPublicListingsRow, error) {
 	rows, err := q.db.Query(ctx, searchPublicListings,
 		arg.ServiceType,
@@ -1386,33 +1382,33 @@ func (q *Queries) SearchPublicListings(ctx context.Context, arg SearchPublicList
 	for rows.Next() {
 		var i SearchPublicListingsRow
 		if err := rows.Scan(
-			&i.Listing.ID,
-			&i.Listing.PartnerID,
-			&i.Listing.ServiceType,
-			&i.Listing.Title,
-			&i.Listing.Slug,
-			&i.Listing.Summary,
-			&i.Listing.Description,
-			&i.Listing.CoverFileID,
-			&i.Listing.ProvinceCode,
-			&i.Listing.WardCode,
-			&i.Listing.Address,
-			&i.Listing.Latitude,
-			&i.Listing.Longitude,
-			&i.Listing.ReviewStatus,
-			&i.Listing.RejectionReason,
-			&i.Listing.SubmittedAt,
-			&i.Listing.ReviewedAt,
-			&i.Listing.ReviewedBy,
-			&i.Listing.Visibility,
-			&i.Listing.HiddenReason,
-			&i.Listing.HiddenAt,
-			&i.Listing.HiddenBy,
-			&i.Listing.HiddenFromVisibility,
-			&i.Listing.RatingSum,
-			&i.Listing.RatingCount,
-			&i.Listing.CreatedAt,
-			&i.Listing.UpdatedAt,
+			&i.VisibleListing.ID,
+			&i.VisibleListing.PartnerID,
+			&i.VisibleListing.ServiceType,
+			&i.VisibleListing.Title,
+			&i.VisibleListing.Slug,
+			&i.VisibleListing.Summary,
+			&i.VisibleListing.Description,
+			&i.VisibleListing.CoverFileID,
+			&i.VisibleListing.ProvinceCode,
+			&i.VisibleListing.WardCode,
+			&i.VisibleListing.Address,
+			&i.VisibleListing.Latitude,
+			&i.VisibleListing.Longitude,
+			&i.VisibleListing.ReviewStatus,
+			&i.VisibleListing.RejectionReason,
+			&i.VisibleListing.SubmittedAt,
+			&i.VisibleListing.ReviewedAt,
+			&i.VisibleListing.ReviewedBy,
+			&i.VisibleListing.Visibility,
+			&i.VisibleListing.HiddenReason,
+			&i.VisibleListing.HiddenAt,
+			&i.VisibleListing.HiddenBy,
+			&i.VisibleListing.HiddenFromVisibility,
+			&i.VisibleListing.RatingSum,
+			&i.VisibleListing.RatingCount,
+			&i.VisibleListing.CreatedAt,
+			&i.VisibleListing.UpdatedAt,
 			&i.PriceFrom,
 		); err != nil {
 			return nil, err
