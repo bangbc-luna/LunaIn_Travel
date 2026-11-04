@@ -52,3 +52,9 @@ func WriteError(w http.ResponseWriter, r *http.Request, err error) {
 	}
 	WriteJSON(w, appErr.Status, errorBody{Error: errorPayload{Code: appErr.Code, Message: appErr.Message}})
 }
+
+// NotFound writes ErrNotFound. Register it as the mux's catch-all "/" route
+// so unknown paths (and unsupported methods on known paths) get JSON too.
+func NotFound(w http.ResponseWriter, r *http.Request) {
+	WriteError(w, r, ErrNotFound)
+}

@@ -19,6 +19,7 @@ func newHTTPServer(t *testing.T, env *testEnv) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
 	env.Svc.Routes(mux, env.Issuer, httpx.ClientIPFunc(0))
+	mux.HandleFunc("/", httpx.NotFound) // as in cmd/api
 	srv := httptest.NewServer(httpx.Chain(mux, httpx.RequestID, httpx.Recover))
 	t.Cleanup(srv.Close)
 	return srv
@@ -126,4 +127,23 @@ func TestHTTP_LoginRateLimited(t *testing.T) {
 	resp := post()
 	require.Equal(t, http.StatusTooManyRequests, resp.StatusCode)
 	require.NotEmpty(t, resp.Header.Get("Retry-After"))
+}
+
+func TestHTTP_UnknownRouteJSON404(t *testing.T) {
+	env := newTestEnv(t)
+	srv := newHTTPServer(t, env)
+
+	for _, path := range []string{
+		"/v1/nope",
+		"/v1/auth/login", // known path, wrong method (GET)
+	} {
+		resp, err := http.Get(srv.URL + path)
+		require.NoError(t, err)
+		var out map[string]any
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&out))
+		_ = resp.Body.Close()
+		require.Equal(t, http.StatusNotFound, resp.StatusCode, path)
+		require.True(t, strings.HasPrefix(resp.Header.Get("Content-Type"), "application/json"), path)
+		require.Equal(t, "not_found", errCode(out), path)
+	}
 }

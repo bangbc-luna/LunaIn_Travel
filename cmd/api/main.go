@@ -28,6 +28,10 @@ import (
 	"github.com/bangbc-luna/lunain-travel/internal/platform/mailer"
 )
 
+// migrateTimeout bounds db.Migrate, including waiting for the migration lock
+// held by another replica.
+const migrateTimeout = 5 * time.Minute
+
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(log)
@@ -68,16 +72,20 @@ func createAdmin(args []string) error {
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	pool, err := db.Connect(ctx, cfg.DatabaseURL)
+	connectCtx, cancelConnect := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelConnect()
+	pool, err := db.Connect(connectCtx, cfg.DatabaseURL)
 	if err != nil {
 		return err
 	}
 	defer pool.Close()
-	if err := db.Migrate(ctx, pool); err != nil {
+	migCtx, cancelMig := context.WithTimeout(context.Background(), migrateTimeout)
+	defer cancelMig()
+	if err := db.Migrate(migCtx, pool); err != nil {
 		return err
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 	svc := identity.NewService(identity.Deps{Pool: pool, Clock: clock.Real{}, CodePepper: cfg.CodePepper})
 	var id uuid.UUID
 	err = db.InTx(ctx, pool, func(tx pgx.Tx) error {
@@ -105,15 +113,18 @@ func serve(log *slog.Logger) error {
 		return err
 	}
 
-	startCtx, cancelStart := context.WithTimeout(context.Background(), 30*time.Second)
-	pool, err := db.Connect(startCtx, cfg.DatabaseURL)
+	log.Info("config loaded", "env", cfg.AppEnv, "trusted_proxy_hops", cfg.TrustedProxyHops)
+
+	connectCtx, cancelConnect := context.WithTimeout(context.Background(), 30*time.Second)
+	pool, err := db.Connect(connectCtx, cfg.DatabaseURL)
+	cancelConnect()
 	if err != nil {
-		cancelStart()
 		return err
 	}
 	defer pool.Close()
-	err = db.Migrate(startCtx, pool)
-	cancelStart()
+	migCtx, cancelMig := context.WithTimeout(context.Background(), migrateTimeout)
+	err = db.Migrate(migCtx, pool)
+	cancelMig()
 	if err != nil {
 		return err
 	}
@@ -161,6 +172,7 @@ func serve(log *slog.Logger) error {
 	idSvc.Routes(mux, issuer, httpx.ClientIPFunc(cfg.TrustedProxyHops))
 	mux.HandleFunc("GET /healthz", healthz)
 	mux.HandleFunc("GET /readyz", readyz(pool))
+	mux.HandleFunc("/", httpx.NotFound)
 
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
