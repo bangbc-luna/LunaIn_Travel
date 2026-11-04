@@ -71,3 +71,77 @@ VALUES (@id, @listing_id, @hours_before, @refund_bps, @now, @now);
 
 -- name: ListCancellationTiers :many
 SELECT * FROM listing_cancellation_tiers WHERE listing_id = @listing_id ORDER BY hours_before DESC;
+
+-- name: GetAttraction :one
+SELECT * FROM attractions WHERE listing_id = @listing_id;
+
+-- name: UpsertAttraction :one
+INSERT INTO attractions (listing_id, opening_note, checkin_instructions, created_at, updated_at)
+VALUES (@listing_id, sqlc.narg(opening_note), sqlc.narg(checkin_instructions), @now, @now)
+ON CONFLICT (listing_id) DO UPDATE
+SET opening_note = EXCLUDED.opening_note,
+    checkin_instructions = EXCLUDED.checkin_instructions,
+    updated_at = EXCLUDED.updated_at
+RETURNING *;
+
+-- name: EnsureAttraction :exec
+INSERT INTO attractions (listing_id, created_at, updated_at)
+VALUES (@listing_id, @now, @now)
+ON CONFLICT (listing_id) DO NOTHING;
+
+-- name: InsertTicketType :one
+INSERT INTO attraction_ticket_types (id, listing_id, name, description, audience, price, active, sort_order, created_at, updated_at)
+VALUES (@id, @listing_id, @name, sqlc.narg(description), @audience, @price, @active, @sort_order, @now, @now)
+RETURNING *;
+
+-- name: GetTicketType :one
+SELECT * FROM attraction_ticket_types WHERE id = @id AND listing_id = @listing_id;
+
+-- name: UpdateTicketType :one
+UPDATE attraction_ticket_types
+SET name = @name, description = sqlc.narg(description), audience = @audience, price = @price,
+    active = @active, sort_order = @sort_order, updated_at = @now
+WHERE id = @id AND listing_id = @listing_id
+RETURNING *;
+
+-- name: ListTicketTypes :many
+SELECT * FROM attraction_ticket_types
+WHERE listing_id = @listing_id AND (@include_inactive::bool OR active)
+ORDER BY sort_order, name, id;
+
+-- name: ListActiveTicketTypesByIDs :many
+SELECT * FROM attraction_ticket_types
+WHERE listing_id = @listing_id AND active AND id = ANY(@ids::uuid[]);
+
+-- name: InsertTimeSlot :one
+INSERT INTO attraction_time_slots (id, listing_id, start_time, end_time, weekdays, active, created_at, updated_at)
+VALUES (@id, @listing_id, @start_time, @end_time, @weekdays, @active, @now, @now)
+RETURNING *;
+
+-- name: GetTimeSlot :one
+SELECT * FROM attraction_time_slots WHERE id = @id AND listing_id = @listing_id;
+
+-- name: UpdateTimeSlot :one
+UPDATE attraction_time_slots
+SET start_time = @start_time, end_time = @end_time, weekdays = @weekdays, active = @active, updated_at = @now
+WHERE id = @id AND listing_id = @listing_id
+RETURNING *;
+
+-- name: ListTimeSlots :many
+SELECT * FROM attraction_time_slots
+WHERE listing_id = @listing_id AND (@include_inactive::bool OR active)
+ORDER BY start_time, end_time, id;
+
+-- name: InsertClosedDate :execrows
+INSERT INTO attraction_closed_dates (listing_id, date, reason, created_at, updated_at)
+VALUES (@listing_id, @date, sqlc.narg(reason), @now, @now)
+ON CONFLICT (listing_id, date) DO NOTHING;
+
+-- name: GetClosedDate :one
+SELECT * FROM attraction_closed_dates WHERE listing_id = @listing_id AND date = @date;
+
+-- name: DeleteClosedDate :execrows
+DELETE FROM attraction_closed_dates WHERE listing_id = @listing_id AND date = @date;
+
+-- name: ListClosedDatesFrom :many
+SELECT * FROM attraction_closed_dates WHERE listing_id = @listing_id AND date >= @from_date ORDER BY date;

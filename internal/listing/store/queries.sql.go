@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const deleteCancellationTiers = `-- name: DeleteCancellationTiers :exec
@@ -21,6 +22,23 @@ func (q *Queries) DeleteCancellationTiers(ctx context.Context, listingID uuid.UU
 	return err
 }
 
+const deleteClosedDate = `-- name: DeleteClosedDate :execrows
+DELETE FROM attraction_closed_dates WHERE listing_id = $1 AND date = $2
+`
+
+type DeleteClosedDateParams struct {
+	ListingID uuid.UUID
+	Date      pgtype.Date
+}
+
+func (q *Queries) DeleteClosedDate(ctx context.Context, arg DeleteClosedDateParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteClosedDate, arg.ListingID, arg.Date)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const deleteListingImages = `-- name: DeleteListingImages :exec
 DELETE FROM listing_images WHERE listing_id = $1
 `
@@ -28,6 +46,61 @@ DELETE FROM listing_images WHERE listing_id = $1
 func (q *Queries) DeleteListingImages(ctx context.Context, listingID uuid.UUID) error {
 	_, err := q.db.Exec(ctx, deleteListingImages, listingID)
 	return err
+}
+
+const ensureAttraction = `-- name: EnsureAttraction :exec
+INSERT INTO attractions (listing_id, created_at, updated_at)
+VALUES ($1, $2, $2)
+ON CONFLICT (listing_id) DO NOTHING
+`
+
+type EnsureAttractionParams struct {
+	ListingID uuid.UUID
+	Now       time.Time
+}
+
+func (q *Queries) EnsureAttraction(ctx context.Context, arg EnsureAttractionParams) error {
+	_, err := q.db.Exec(ctx, ensureAttraction, arg.ListingID, arg.Now)
+	return err
+}
+
+const getAttraction = `-- name: GetAttraction :one
+SELECT listing_id, opening_note, checkin_instructions, created_at, updated_at FROM attractions WHERE listing_id = $1
+`
+
+func (q *Queries) GetAttraction(ctx context.Context, listingID uuid.UUID) (Attraction, error) {
+	row := q.db.QueryRow(ctx, getAttraction, listingID)
+	var i Attraction
+	err := row.Scan(
+		&i.ListingID,
+		&i.OpeningNote,
+		&i.CheckinInstructions,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getClosedDate = `-- name: GetClosedDate :one
+SELECT listing_id, date, reason, created_at, updated_at FROM attraction_closed_dates WHERE listing_id = $1 AND date = $2
+`
+
+type GetClosedDateParams struct {
+	ListingID uuid.UUID
+	Date      pgtype.Date
+}
+
+func (q *Queries) GetClosedDate(ctx context.Context, arg GetClosedDateParams) (AttractionClosedDate, error) {
+	row := q.db.QueryRow(ctx, getClosedDate, arg.ListingID, arg.Date)
+	var i AttractionClosedDate
+	err := row.Scan(
+		&i.ListingID,
+		&i.Date,
+		&i.Reason,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }
 
 const getOwnedListing = `-- name: GetOwnedListing :one
@@ -67,6 +140,58 @@ func (q *Queries) GetOwnedListing(ctx context.Context, arg GetOwnedListingParams
 		&i.HiddenBy,
 		&i.RatingSum,
 		&i.RatingCount,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getTicketType = `-- name: GetTicketType :one
+SELECT id, listing_id, name, description, audience, price, active, sort_order, created_at, updated_at FROM attraction_ticket_types WHERE id = $1 AND listing_id = $2
+`
+
+type GetTicketTypeParams struct {
+	ID        uuid.UUID
+	ListingID uuid.UUID
+}
+
+func (q *Queries) GetTicketType(ctx context.Context, arg GetTicketTypeParams) (AttractionTicketType, error) {
+	row := q.db.QueryRow(ctx, getTicketType, arg.ID, arg.ListingID)
+	var i AttractionTicketType
+	err := row.Scan(
+		&i.ID,
+		&i.ListingID,
+		&i.Name,
+		&i.Description,
+		&i.Audience,
+		&i.Price,
+		&i.Active,
+		&i.SortOrder,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getTimeSlot = `-- name: GetTimeSlot :one
+SELECT id, listing_id, start_time, end_time, weekdays, active, created_at, updated_at FROM attraction_time_slots WHERE id = $1 AND listing_id = $2
+`
+
+type GetTimeSlotParams struct {
+	ID        uuid.UUID
+	ListingID uuid.UUID
+}
+
+func (q *Queries) GetTimeSlot(ctx context.Context, arg GetTimeSlotParams) (AttractionTimeSlot, error) {
+	row := q.db.QueryRow(ctx, getTimeSlot, arg.ID, arg.ListingID)
+	var i AttractionTimeSlot
+	err := row.Scan(
+		&i.ID,
+		&i.ListingID,
+		&i.StartTime,
+		&i.EndTime,
+		&i.Weekdays,
+		&i.Active,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -121,6 +246,32 @@ func (q *Queries) InsertCancellationTier(ctx context.Context, arg InsertCancella
 		arg.Now,
 	)
 	return err
+}
+
+const insertClosedDate = `-- name: InsertClosedDate :execrows
+INSERT INTO attraction_closed_dates (listing_id, date, reason, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $4)
+ON CONFLICT (listing_id, date) DO NOTHING
+`
+
+type InsertClosedDateParams struct {
+	ListingID uuid.UUID
+	Date      pgtype.Date
+	Reason    *string
+	Now       time.Time
+}
+
+func (q *Queries) InsertClosedDate(ctx context.Context, arg InsertClosedDateParams) (int64, error) {
+	result, err := q.db.Exec(ctx, insertClosedDate,
+		arg.ListingID,
+		arg.Date,
+		arg.Reason,
+		arg.Now,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const insertListing = `-- name: InsertListing :one
@@ -226,6 +377,133 @@ func (q *Queries) InsertListingImage(ctx context.Context, arg InsertListingImage
 	return err
 }
 
+const insertTicketType = `-- name: InsertTicketType :one
+INSERT INTO attraction_ticket_types (id, listing_id, name, description, audience, price, active, sort_order, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
+RETURNING id, listing_id, name, description, audience, price, active, sort_order, created_at, updated_at
+`
+
+type InsertTicketTypeParams struct {
+	ID          uuid.UUID
+	ListingID   uuid.UUID
+	Name        string
+	Description *string
+	Audience    string
+	Price       int64
+	Active      bool
+	SortOrder   int32
+	Now         time.Time
+}
+
+func (q *Queries) InsertTicketType(ctx context.Context, arg InsertTicketTypeParams) (AttractionTicketType, error) {
+	row := q.db.QueryRow(ctx, insertTicketType,
+		arg.ID,
+		arg.ListingID,
+		arg.Name,
+		arg.Description,
+		arg.Audience,
+		arg.Price,
+		arg.Active,
+		arg.SortOrder,
+		arg.Now,
+	)
+	var i AttractionTicketType
+	err := row.Scan(
+		&i.ID,
+		&i.ListingID,
+		&i.Name,
+		&i.Description,
+		&i.Audience,
+		&i.Price,
+		&i.Active,
+		&i.SortOrder,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const insertTimeSlot = `-- name: InsertTimeSlot :one
+INSERT INTO attraction_time_slots (id, listing_id, start_time, end_time, weekdays, active, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
+RETURNING id, listing_id, start_time, end_time, weekdays, active, created_at, updated_at
+`
+
+type InsertTimeSlotParams struct {
+	ID        uuid.UUID
+	ListingID uuid.UUID
+	StartTime pgtype.Time
+	EndTime   pgtype.Time
+	Weekdays  int16
+	Active    bool
+	Now       time.Time
+}
+
+func (q *Queries) InsertTimeSlot(ctx context.Context, arg InsertTimeSlotParams) (AttractionTimeSlot, error) {
+	row := q.db.QueryRow(ctx, insertTimeSlot,
+		arg.ID,
+		arg.ListingID,
+		arg.StartTime,
+		arg.EndTime,
+		arg.Weekdays,
+		arg.Active,
+		arg.Now,
+	)
+	var i AttractionTimeSlot
+	err := row.Scan(
+		&i.ID,
+		&i.ListingID,
+		&i.StartTime,
+		&i.EndTime,
+		&i.Weekdays,
+		&i.Active,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const listActiveTicketTypesByIDs = `-- name: ListActiveTicketTypesByIDs :many
+SELECT id, listing_id, name, description, audience, price, active, sort_order, created_at, updated_at FROM attraction_ticket_types
+WHERE listing_id = $1 AND active AND id = ANY($2::uuid[])
+`
+
+type ListActiveTicketTypesByIDsParams struct {
+	ListingID uuid.UUID
+	Ids       []uuid.UUID
+}
+
+func (q *Queries) ListActiveTicketTypesByIDs(ctx context.Context, arg ListActiveTicketTypesByIDsParams) ([]AttractionTicketType, error) {
+	rows, err := q.db.Query(ctx, listActiveTicketTypesByIDs, arg.ListingID, arg.Ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []AttractionTicketType
+	for rows.Next() {
+		var i AttractionTicketType
+		if err := rows.Scan(
+			&i.ID,
+			&i.ListingID,
+			&i.Name,
+			&i.Description,
+			&i.Audience,
+			&i.Price,
+			&i.Active,
+			&i.SortOrder,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listCancellationTiers = `-- name: ListCancellationTiers :many
 SELECT id, listing_id, hours_before, refund_bps, created_at, updated_at FROM listing_cancellation_tiers WHERE listing_id = $1 ORDER BY hours_before DESC
 `
@@ -244,6 +522,41 @@ func (q *Queries) ListCancellationTiers(ctx context.Context, listingID uuid.UUID
 			&i.ListingID,
 			&i.HoursBefore,
 			&i.RefundBps,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listClosedDatesFrom = `-- name: ListClosedDatesFrom :many
+SELECT listing_id, date, reason, created_at, updated_at FROM attraction_closed_dates WHERE listing_id = $1 AND date >= $2 ORDER BY date
+`
+
+type ListClosedDatesFromParams struct {
+	ListingID uuid.UUID
+	FromDate  pgtype.Date
+}
+
+func (q *Queries) ListClosedDatesFrom(ctx context.Context, arg ListClosedDatesFromParams) ([]AttractionClosedDate, error) {
+	rows, err := q.db.Query(ctx, listClosedDatesFrom, arg.ListingID, arg.FromDate)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []AttractionClosedDate
+	for rows.Next() {
+		var i AttractionClosedDate
+		if err := rows.Scan(
+			&i.ListingID,
+			&i.Date,
+			&i.Reason,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
@@ -343,6 +656,88 @@ func (q *Queries) ListOwnListings(ctx context.Context, arg ListOwnListingsParams
 			&i.HiddenBy,
 			&i.RatingSum,
 			&i.RatingCount,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listTicketTypes = `-- name: ListTicketTypes :many
+SELECT id, listing_id, name, description, audience, price, active, sort_order, created_at, updated_at FROM attraction_ticket_types
+WHERE listing_id = $1 AND ($2::bool OR active)
+ORDER BY sort_order, name, id
+`
+
+type ListTicketTypesParams struct {
+	ListingID       uuid.UUID
+	IncludeInactive bool
+}
+
+func (q *Queries) ListTicketTypes(ctx context.Context, arg ListTicketTypesParams) ([]AttractionTicketType, error) {
+	rows, err := q.db.Query(ctx, listTicketTypes, arg.ListingID, arg.IncludeInactive)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []AttractionTicketType
+	for rows.Next() {
+		var i AttractionTicketType
+		if err := rows.Scan(
+			&i.ID,
+			&i.ListingID,
+			&i.Name,
+			&i.Description,
+			&i.Audience,
+			&i.Price,
+			&i.Active,
+			&i.SortOrder,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listTimeSlots = `-- name: ListTimeSlots :many
+SELECT id, listing_id, start_time, end_time, weekdays, active, created_at, updated_at FROM attraction_time_slots
+WHERE listing_id = $1 AND ($2::bool OR active)
+ORDER BY start_time, end_time, id
+`
+
+type ListTimeSlotsParams struct {
+	ListingID       uuid.UUID
+	IncludeInactive bool
+}
+
+func (q *Queries) ListTimeSlots(ctx context.Context, arg ListTimeSlotsParams) ([]AttractionTimeSlot, error) {
+	rows, err := q.db.Query(ctx, listTimeSlots, arg.ListingID, arg.IncludeInactive)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []AttractionTimeSlot
+	for rows.Next() {
+		var i AttractionTimeSlot
+		if err := rows.Scan(
+			&i.ID,
+			&i.ListingID,
+			&i.StartTime,
+			&i.EndTime,
+			&i.Weekdays,
+			&i.Active,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
@@ -523,6 +918,130 @@ func (q *Queries) UpdateListingContent(ctx context.Context, arg UpdateListingCon
 		&i.HiddenBy,
 		&i.RatingSum,
 		&i.RatingCount,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const updateTicketType = `-- name: UpdateTicketType :one
+UPDATE attraction_ticket_types
+SET name = $1, description = $2, audience = $3, price = $4,
+    active = $5, sort_order = $6, updated_at = $7
+WHERE id = $8 AND listing_id = $9
+RETURNING id, listing_id, name, description, audience, price, active, sort_order, created_at, updated_at
+`
+
+type UpdateTicketTypeParams struct {
+	Name        string
+	Description *string
+	Audience    string
+	Price       int64
+	Active      bool
+	SortOrder   int32
+	Now         time.Time
+	ID          uuid.UUID
+	ListingID   uuid.UUID
+}
+
+func (q *Queries) UpdateTicketType(ctx context.Context, arg UpdateTicketTypeParams) (AttractionTicketType, error) {
+	row := q.db.QueryRow(ctx, updateTicketType,
+		arg.Name,
+		arg.Description,
+		arg.Audience,
+		arg.Price,
+		arg.Active,
+		arg.SortOrder,
+		arg.Now,
+		arg.ID,
+		arg.ListingID,
+	)
+	var i AttractionTicketType
+	err := row.Scan(
+		&i.ID,
+		&i.ListingID,
+		&i.Name,
+		&i.Description,
+		&i.Audience,
+		&i.Price,
+		&i.Active,
+		&i.SortOrder,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const updateTimeSlot = `-- name: UpdateTimeSlot :one
+UPDATE attraction_time_slots
+SET start_time = $1, end_time = $2, weekdays = $3, active = $4, updated_at = $5
+WHERE id = $6 AND listing_id = $7
+RETURNING id, listing_id, start_time, end_time, weekdays, active, created_at, updated_at
+`
+
+type UpdateTimeSlotParams struct {
+	StartTime pgtype.Time
+	EndTime   pgtype.Time
+	Weekdays  int16
+	Active    bool
+	Now       time.Time
+	ID        uuid.UUID
+	ListingID uuid.UUID
+}
+
+func (q *Queries) UpdateTimeSlot(ctx context.Context, arg UpdateTimeSlotParams) (AttractionTimeSlot, error) {
+	row := q.db.QueryRow(ctx, updateTimeSlot,
+		arg.StartTime,
+		arg.EndTime,
+		arg.Weekdays,
+		arg.Active,
+		arg.Now,
+		arg.ID,
+		arg.ListingID,
+	)
+	var i AttractionTimeSlot
+	err := row.Scan(
+		&i.ID,
+		&i.ListingID,
+		&i.StartTime,
+		&i.EndTime,
+		&i.Weekdays,
+		&i.Active,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const upsertAttraction = `-- name: UpsertAttraction :one
+INSERT INTO attractions (listing_id, opening_note, checkin_instructions, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $4)
+ON CONFLICT (listing_id) DO UPDATE
+SET opening_note = EXCLUDED.opening_note,
+    checkin_instructions = EXCLUDED.checkin_instructions,
+    updated_at = EXCLUDED.updated_at
+RETURNING listing_id, opening_note, checkin_instructions, created_at, updated_at
+`
+
+type UpsertAttractionParams struct {
+	ListingID           uuid.UUID
+	OpeningNote         *string
+	CheckinInstructions *string
+	Now                 time.Time
+}
+
+func (q *Queries) UpsertAttraction(ctx context.Context, arg UpsertAttractionParams) (Attraction, error) {
+	row := q.db.QueryRow(ctx, upsertAttraction,
+		arg.ListingID,
+		arg.OpeningNote,
+		arg.CheckinInstructions,
+		arg.Now,
+	)
+	var i Attraction
+	err := row.Scan(
+		&i.ListingID,
+		&i.OpeningNote,
+		&i.CheckinInstructions,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)

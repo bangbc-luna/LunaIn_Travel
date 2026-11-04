@@ -3,11 +3,13 @@ package listing
 import (
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/bangbc-luna/lunain-travel/internal/partner"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/auth"
+	"github.com/bangbc-luna/lunain-travel/internal/platform/clock"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/httpx"
 )
 
@@ -157,5 +159,142 @@ func (s *Service) PartnerRoutes(mux httpx.Router, iss *auth.Issuer, requireMembe
 			return
 		}
 		httpx.WriteJSON(w, http.StatusOK, policyBody{tiers})
+	}))
+
+	s.attractionRoutes(mux, withID)
+}
+
+// attractionRoutes registers the attraction detail routes: info, ticket
+// types, time slots and closed dates.
+func (s *Service) attractionRoutes(mux httpx.Router, withID func(h func(w http.ResponseWriter, r *http.Request, partnerID, userID, id uuid.UUID)) http.Handler) {
+	mux.Handle("GET /v1/partner/listings/{id}/attraction", withID(func(w http.ResponseWriter, r *http.Request, partnerID, _, id uuid.UUID) {
+		l, err := s.Get(r.Context(), partnerID, id)
+		if err == nil && l.ServiceType != attractionServiceType {
+			err = ErrWrongServiceType
+		}
+		if err != nil {
+			httpx.WriteError(w, r, err)
+			return
+		}
+		d, err := s.attractionDetail(r.Context(), s.pool, id, true)
+		if err != nil {
+			httpx.WriteError(w, r, err)
+			return
+		}
+		httpx.WriteJSON(w, http.StatusOK, d)
+	}))
+
+	mux.Handle("PUT /v1/partner/listings/{id}/attraction", withID(func(w http.ResponseWriter, r *http.Request, partnerID, userID, id uuid.UUID) {
+		var in AttractionInfo
+		if err := httpx.DecodeJSON(r, &in); err != nil {
+			httpx.WriteError(w, r, err)
+			return
+		}
+		info, err := s.SetAttractionInfo(r.Context(), partnerID, userID, id, in.OpeningNote, in.CheckinInstructions)
+		if err != nil {
+			httpx.WriteError(w, r, err)
+			return
+		}
+		httpx.WriteJSON(w, http.StatusOK, info)
+	}))
+
+	mux.Handle("POST /v1/partner/listings/{id}/ticket-types", withID(func(w http.ResponseWriter, r *http.Request, partnerID, userID, id uuid.UUID) {
+		var in TicketTypeInput
+		if err := httpx.DecodeJSON(r, &in); err != nil {
+			httpx.WriteError(w, r, err)
+			return
+		}
+		tt, err := s.CreateTicketType(r.Context(), partnerID, userID, id, in)
+		if err != nil {
+			httpx.WriteError(w, r, err)
+			return
+		}
+		httpx.WriteJSON(w, http.StatusCreated, tt)
+	}))
+
+	mux.Handle("PATCH /v1/partner/listings/{id}/ticket-types/{ticketTypeID}", withID(func(w http.ResponseWriter, r *http.Request, partnerID, userID, id uuid.UUID) {
+		ttID, err := uuid.Parse(r.PathValue("ticketTypeID"))
+		if err != nil {
+			httpx.WriteError(w, r, httpx.ErrNotFound)
+			return
+		}
+		var in TicketTypePatch
+		if err := httpx.DecodeJSON(r, &in); err != nil {
+			httpx.WriteError(w, r, err)
+			return
+		}
+		tt, err := s.UpdateTicketType(r.Context(), partnerID, userID, id, ttID, in)
+		if err != nil {
+			httpx.WriteError(w, r, err)
+			return
+		}
+		httpx.WriteJSON(w, http.StatusOK, tt)
+	}))
+
+	mux.Handle("POST /v1/partner/listings/{id}/time-slots", withID(func(w http.ResponseWriter, r *http.Request, partnerID, userID, id uuid.UUID) {
+		var in TimeSlotInput
+		if err := httpx.DecodeJSON(r, &in); err != nil {
+			httpx.WriteError(w, r, err)
+			return
+		}
+		slot, err := s.CreateTimeSlot(r.Context(), partnerID, userID, id, in)
+		if err != nil {
+			httpx.WriteError(w, r, err)
+			return
+		}
+		httpx.WriteJSON(w, http.StatusCreated, slot)
+	}))
+
+	mux.Handle("PATCH /v1/partner/listings/{id}/time-slots/{slotID}", withID(func(w http.ResponseWriter, r *http.Request, partnerID, userID, id uuid.UUID) {
+		slotID, err := uuid.Parse(r.PathValue("slotID"))
+		if err != nil {
+			httpx.WriteError(w, r, httpx.ErrNotFound)
+			return
+		}
+		var in TimeSlotPatch
+		if err := httpx.DecodeJSON(r, &in); err != nil {
+			httpx.WriteError(w, r, err)
+			return
+		}
+		slot, err := s.UpdateTimeSlot(r.Context(), partnerID, userID, id, slotID, in)
+		if err != nil {
+			httpx.WriteError(w, r, err)
+			return
+		}
+		httpx.WriteJSON(w, http.StatusOK, slot)
+	}))
+
+	// A path date that is not YYYY-MM-DD names no resource: 404.
+	withDate := func(h func(w http.ResponseWriter, r *http.Request, partnerID, userID, id uuid.UUID, date time.Time)) http.Handler {
+		return withID(func(w http.ResponseWriter, r *http.Request, partnerID, userID, id uuid.UUID) {
+			date, err := time.ParseInLocation(dateLayout, r.PathValue("date"), clock.VN)
+			if err != nil {
+				httpx.WriteError(w, r, httpx.ErrNotFound)
+				return
+			}
+			h(w, r, partnerID, userID, id, date)
+		})
+	}
+	mux.Handle("PUT /v1/partner/listings/{id}/closed-dates/{date}", withDate(func(w http.ResponseWriter, r *http.Request, partnerID, userID, id uuid.UUID, date time.Time) {
+		var in struct {
+			Reason *string `json:"reason"`
+		}
+		if err := httpx.DecodeJSON(r, &in); err != nil {
+			httpx.WriteError(w, r, err)
+			return
+		}
+		if err := s.AddClosedDate(r.Context(), partnerID, userID, id, date, in.Reason); err != nil {
+			httpx.WriteError(w, r, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	mux.Handle("DELETE /v1/partner/listings/{id}/closed-dates/{date}", withDate(func(w http.ResponseWriter, r *http.Request, partnerID, userID, id uuid.UUID, date time.Time) {
+		if err := s.RemoveClosedDate(r.Context(), partnerID, userID, id, date); err != nil {
+			httpx.WriteError(w, r, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 	}))
 }

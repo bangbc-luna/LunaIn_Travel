@@ -182,6 +182,14 @@ var partnerRoutes = []route{
 	{"PUT /v1/partner/listings/{id}/images", "/v1/partner/listings/" + uuid.Nil.String() + "/images"},
 	{"GET /v1/partner/listings/{id}/cancellation-policy", "/v1/partner/listings/" + uuid.Nil.String() + "/cancellation-policy"},
 	{"PUT /v1/partner/listings/{id}/cancellation-policy", "/v1/partner/listings/" + uuid.Nil.String() + "/cancellation-policy"},
+	{"PUT /v1/partner/listings/{id}/attraction", "/v1/partner/listings/" + uuid.Nil.String() + "/attraction"},
+	{"GET /v1/partner/listings/{id}/attraction", "/v1/partner/listings/" + uuid.Nil.String() + "/attraction"},
+	{"POST /v1/partner/listings/{id}/ticket-types", "/v1/partner/listings/" + uuid.Nil.String() + "/ticket-types"},
+	{"PATCH /v1/partner/listings/{id}/ticket-types/{ticketTypeID}", "/v1/partner/listings/" + uuid.Nil.String() + "/ticket-types/" + uuid.Nil.String()},
+	{"POST /v1/partner/listings/{id}/time-slots", "/v1/partner/listings/" + uuid.Nil.String() + "/time-slots"},
+	{"PATCH /v1/partner/listings/{id}/time-slots/{slotID}", "/v1/partner/listings/" + uuid.Nil.String() + "/time-slots/" + uuid.Nil.String()},
+	{"PUT /v1/partner/listings/{id}/closed-dates/{date}", "/v1/partner/listings/" + uuid.Nil.String() + "/closed-dates/2099-01-01"},
+	{"DELETE /v1/partner/listings/{id}/closed-dates/{date}", "/v1/partner/listings/" + uuid.Nil.String() + "/closed-dates/2099-01-01"},
 }
 
 // recordedUnder returns the recorded patterns whose path starts with prefix.

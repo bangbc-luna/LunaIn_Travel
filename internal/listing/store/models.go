@@ -24,6 +24,46 @@ type AdminAuditLog struct {
 	UpdatedAt   time.Time
 }
 
+type Attraction struct {
+	ListingID           uuid.UUID
+	OpeningNote         *string
+	CheckinInstructions *string
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+}
+
+type AttractionClosedDate struct {
+	ListingID uuid.UUID
+	Date      pgtype.Date
+	Reason    *string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+type AttractionTicketType struct {
+	ID          uuid.UUID
+	ListingID   uuid.UUID
+	Name        string
+	Description *string
+	Audience    string
+	Price       int64
+	Active      bool
+	SortOrder   int32
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
+type AttractionTimeSlot struct {
+	ID        uuid.UUID
+	ListingID uuid.UUID
+	StartTime pgtype.Time
+	EndTime   pgtype.Time
+	Weekdays  int16
+	Active    bool
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
 type CommissionRate struct {
 	ID            uuid.UUID
 	ServiceType   string
