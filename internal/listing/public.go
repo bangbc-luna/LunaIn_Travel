@@ -183,12 +183,15 @@ func (s *Service) PublicDetail(ctx context.Context, slug string) (PublicDetail, 
 		if out.CancellationPolicy, err = listTiers(ctx, tx, r.ID); err != nil {
 			return err
 		}
-		if r.ServiceType == attractionServiceType {
+		switch r.ServiceType {
+		case attractionServiceType:
 			d, err := s.attractionDetail(ctx, tx, r.ID, false)
 			if err != nil {
 				return err
 			}
 			out.Attraction = &d
+		default:
+			return ErrServiceTypeNotSupported
 		}
 		return nil
 	})
@@ -235,7 +238,7 @@ func (s *Service) BookableListing(ctx context.Context, tx pgx.Tx, listingID uuid
 	if err != nil {
 		return Listing{}, err
 	}
-	if !enabled {
+	if !enabled || !supportedServiceType(r.ServiceType) {
 		return Listing{}, ErrListingNotBookable
 	}
 	return fromRow(r), nil

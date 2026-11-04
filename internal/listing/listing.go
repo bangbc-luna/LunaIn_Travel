@@ -403,6 +403,9 @@ func (s *Service) Create(ctx context.Context, partnerID, actor uuid.UUID, in Cre
 		if !enabled {
 			return ErrServiceTypeNotEnabled
 		}
+		if !supportedServiceType(serviceType) {
+			return ErrServiceTypeNotSupported
+		}
 		if c.ProvinceCode != nil {
 			if err := s.geo.ValidateLocation(ctx, tx, *c.ProvinceCode, *c.WardCode); err != nil {
 				return err

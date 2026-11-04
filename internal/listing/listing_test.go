@@ -93,6 +93,42 @@ func TestCreate_RejectsUnknownServiceType(t *testing.T) {
 	require.Equal(t, "invalid_service_type", code)
 }
 
+// Ruling 5: only attraction_ticket can be listed for now.
+func TestCreate_UnsupportedServiceType422(t *testing.T) {
+	e := newEnv(t)
+	p := e.partner(t, "Alpha", attraction, "self_drive_rental")
+	_, err := e.Svc.Create(context.Background(), p.ID, p.OwnerUserID, listing.CreateInput{ServiceType: "self_drive_rental", Title: "Xe"})
+	requireErr(t, err, http.StatusUnprocessableEntity, "service_type_not_supported")
+	require.Contains(t, err.Error(), "Loại dịch vụ này chưa hỗ trợ đăng bán")
+	require.Zero(t, e.count(t, `SELECT count(*) FROM listings`))
+	require.Zero(t, e.count(t, `SELECT count(*) FROM listing_audit_log`))
+}
+
+// Ruling 5: a listing of an unsupported type (only reachable by SQL) is never
+// complete, has no admin/public detail and is never bookable.
+func TestUnsupportedServiceType_FailsClosed(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	p := e.partner(t, "Alpha", attraction, "self_drive_rental")
+	id := e.rawListing(t, p, "self_drive_rental", "Xe")
+	_, err := e.Svc.SetImages(ctx, p.ID, p.OwnerUserID, id, []uuid.UUID{e.upload(t, p.OwnerUserID, "listing_image")}, nil)
+	require.NoError(t, err)
+
+	_, err = e.Svc.Submit(ctx, p.ID, p.OwnerUserID, id)
+	requireErr(t, err, http.StatusUnprocessableEntity, "service_type_not_supported")
+	require.Equal(t, 1, e.count(t, `SELECT count(*) FROM listings WHERE id = $1 AND review_status = 'draft'`, id))
+
+	// Even if it were approved and published by hand it stays closed.
+	_, err = e.Pool.Exec(ctx, `UPDATE listings SET review_status = 'approved' WHERE id = $1`, id)
+	require.NoError(t, err)
+	_, err = e.bookable(t, id)
+	requireErr(t, err, http.StatusUnprocessableEntity, "listing_not_bookable")
+	_, err = e.Svc.AdminGet(ctx, id)
+	requireErr(t, err, http.StatusUnprocessableEntity, "service_type_not_supported")
+	_, err = e.Svc.PublicDetail(ctx, "raw-"+id.String())
+	requireErr(t, err, http.StatusUnprocessableEntity, "service_type_not_supported")
+}
+
 func TestCreate_LocationMustMatch(t *testing.T) {
 	e := newEnv(t)
 	p := e.partner(t, "Alpha", attraction)

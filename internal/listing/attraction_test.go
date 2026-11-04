@@ -133,10 +133,10 @@ func TestTicketType_WrongServiceType422(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
 	p := e.partner(t, "Alpha", attraction, "self_drive_rental")
-	l, err := e.Svc.Create(ctx, p.ID, p.OwnerUserID, listing.CreateInput{ServiceType: "self_drive_rental", Title: "Xe"})
-	require.NoError(t, err)
+	// Create refuses unsupported types, so the row is inserted directly.
+	l := listing.Listing{ID: e.rawListing(t, p, "self_drive_rental", "Xe")}
 
-	_, err = e.Svc.CreateTicketType(ctx, p.ID, p.OwnerUserID, l.ID, listing.TicketTypeInput{Name: "A", Audience: "adult", Price: 5000})
+	_, err := e.Svc.CreateTicketType(ctx, p.ID, p.OwnerUserID, l.ID, listing.TicketTypeInput{Name: "A", Audience: "adult", Price: 5000})
 	st, code := appCode(t, err)
 	require.Equal(t, http.StatusUnprocessableEntity, st)
 	require.Equal(t, "wrong_service_type", code)
@@ -153,7 +153,7 @@ func TestTicketType_WrongServiceType422(t *testing.T) {
 	for _, tbl := range []string{"attractions", "attraction_ticket_types", "attraction_time_slots", "attraction_closed_dates"} {
 		require.Zero(t, e.count(t, `SELECT count(*) FROM `+tbl))
 	}
-	require.Len(t, e.audits(t, l.ID), 1) // only the listing's own creation
+	require.Empty(t, e.audits(t, l.ID))
 }
 
 func TestTimeSlot_Overlap422(t *testing.T) {

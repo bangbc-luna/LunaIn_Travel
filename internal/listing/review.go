@@ -144,7 +144,8 @@ func (s *Service) requireComplete(ctx context.Context, tx pgx.Tx, cur store.List
 	if n == 0 {
 		missing = append(missing, "ít nhất 1 ảnh")
 	}
-	if cur.ServiceType == attractionServiceType {
+	switch cur.ServiceType {
+	case attractionServiceType:
 		tickets, err := q.CountActiveTicketTypes(ctx, cur.ID)
 		if err != nil {
 			return fmt.Errorf("count ticket types: %w", err)
@@ -159,6 +160,9 @@ func (s *Service) requireComplete(ctx context.Context, tx pgx.Tx, cur store.List
 		if slots == 0 {
 			missing = append(missing, "ít nhất 1 khung giờ đang hoạt động")
 		}
+	default:
+		// No detail model: never "complete".
+		return ErrServiceTypeNotSupported
 	}
 	if len(missing) > 0 {
 		return incompleteListing("Listing chưa đủ thông tin để gửi duyệt, còn thiếu: " + strings.Join(missing, "; "))
@@ -367,12 +371,15 @@ func (s *Service) AdminGet(ctx context.Context, id uuid.UUID) (AdminListingDetai
 	if out.CancellationPolicy, err = listTiers(ctx, s.pool, id); err != nil {
 		return out, err
 	}
-	if r.ServiceType == attractionServiceType {
+	switch r.ServiceType {
+	case attractionServiceType:
 		d, err := s.attractionDetail(ctx, s.pool, id, true)
 		if err != nil {
 			return out, err
 		}
 		out.Attraction = &d
+	default:
+		return AdminListingDetail{}, ErrServiceTypeNotSupported
 	}
 	logs, err := q.ListRecentAuditLog(ctx, id)
 	if err != nil {

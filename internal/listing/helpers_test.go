@@ -206,3 +206,17 @@ func (e *env) upload(t *testing.T, userID uuid.UUID, purpose string) uuid.UUID {
 	require.NoError(t, err)
 	return f.ID
 }
+
+// rawListing inserts a draft listing of any service type straight into the
+// table (Create refuses unsupported types) with every common field set.
+func (e *env) rawListing(t *testing.T, p partner.Partner, serviceType, title string) uuid.UUID {
+	t.Helper()
+	ctx := context.Background()
+	province, ward, _ := e.location(t)
+	id := uuid.Must(uuid.NewV7())
+	_, err := e.Pool.Exec(ctx, `INSERT INTO listings (id, partner_id, service_type, title, slug, description,
+		province_code, ward_code, address) VALUES ($1, $2, $3, $4, $5, 'Mô tả', $6, $7, '1 Đường A')`,
+		id, p.ID, serviceType, title, "raw-"+id.String(), province, ward)
+	require.NoError(t, err)
+	return id
+}
