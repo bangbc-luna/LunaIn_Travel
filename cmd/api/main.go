@@ -15,6 +15,7 @@ import (
 
 	"github.com/bangbc-luna/lunain-travel/internal/platform/config"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/db"
+	"github.com/bangbc-luna/lunain-travel/internal/platform/httpx"
 )
 
 func main() {
@@ -52,7 +53,7 @@ func run(log *slog.Logger) error {
 
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           mux,
+		Handler:           httpx.Chain(mux, httpx.RequestID, httpx.Logger(log), httpx.Recover),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
