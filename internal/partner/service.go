@@ -342,7 +342,10 @@ func (s *Service) List(ctx context.Context, f ListFilter) ([]Partner, *uuid.UUID
 	return out, next, nil
 }
 
-// lockPartner takes FOR UPDATE on the partners row and returns its status.
+// lockPartner takes FOR NO KEY UPDATE on the partners row and returns its
+// status. FOR NO KEY UPDATE (not FOR UPDATE, DB §1.1) lets concurrent inserts
+// with an FK to partners (which take KEY SHARE) proceed, while still waiting
+// for, and blocking, Status(lock=true)'s FOR SHARE.
 func lockPartner(ctx context.Context, q *store.Queries, id uuid.UUID) (string, error) {
 	st, err := q.LockPartner(ctx, id)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -473,7 +476,10 @@ func (s *Service) Unsuspend(ctx context.Context, actor, partnerID uuid.UUID) err
 }
 
 // IsServiceTypeEnabled reports, inside tx, whether code is currently enabled
-// for the partner.
+// for the partner. It takes no lock itself: call it after
+// Status(ctx, tx, id, true) in the same tx to be race-safe with Suspend and
+// DisableServiceType — both lock the partners row FOR NO KEY UPDATE, so they
+// wait for the caller's FOR SHARE until its tx ends.
 func (s *Service) IsServiceTypeEnabled(ctx context.Context, tx pgx.Tx, partnerID uuid.UUID, code string) (bool, error) {
 	ok, err := store.New(tx).IsServiceTypeEnabled(ctx, store.IsServiceTypeEnabledParams{PartnerID: partnerID, ServiceType: code})
 	if err != nil {
@@ -483,7 +489,8 @@ func (s *Service) IsServiceTypeEnabled(ctx context.Context, tx pgx.Tx, partnerID
 }
 
 // Status returns the partner's status inside tx. With lock it reads the row
-// FOR SHARE (DB §1.1) so a concurrent Suspend waits for the caller's tx.
+// FOR SHARE (DB §1.1) so a concurrent Suspend or DisableServiceType (FOR NO
+// KEY UPDATE on the same row) waits for the caller's tx.
 func (s *Service) Status(ctx context.Context, tx pgx.Tx, partnerID uuid.UUID, lock bool) (string, error) {
 	q := store.New(tx)
 	var st string

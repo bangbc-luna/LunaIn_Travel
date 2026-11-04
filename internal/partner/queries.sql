@@ -9,9 +9,15 @@ VALUES (@partner_id, @user_id, @role, @now, @now);
 -- name: GetPartner :one
 SELECT * FROM partners WHERE id = @id;
 
+-- Writers lock the partners row FOR NO KEY UPDATE (never FOR UPDATE, DB §1.1):
+-- inserts into tables with an FK to partners take KEY SHARE on it implicitly,
+-- which FOR UPDATE would block; FOR NO KEY UPDATE still conflicts with the
+-- FOR SHARE taken by Status(lock=true).
 -- name: LockPartner :one
-SELECT status FROM partners WHERE id = @id FOR UPDATE;
+SELECT status FROM partners WHERE id = @id FOR NO KEY UPDATE;
 
+-- Status(lock=true): blocks Suspend/Disable (FOR NO KEY UPDATE) until the
+-- caller's tx ends, but not other readers or FK inserts.
 -- name: SharePartnerStatus :one
 SELECT status FROM partners WHERE id = @id FOR SHARE;
 
@@ -33,6 +39,9 @@ SELECT DISTINCT ON (partner_id) partner_id, user_id FROM partner_members
 WHERE partner_id = ANY(@ids::uuid[]) AND role = 'owner'
 ORDER BY partner_id, created_at, user_id;
 
+-- The join on catalog's service_types is an accepted read-only cross-module
+-- join (Ruling 12, DB §11): it is used only to order the codes by
+-- service_types.sort_order; partner never writes or locks service_types.
 -- name: EnabledServiceTypesOf :many
 SELECT pst.partner_id, pst.service_type FROM partner_service_types pst
 JOIN service_types st ON st.code = pst.service_type
@@ -77,8 +86,9 @@ WHERE id = @id;
 -- name: MemberPartnerID :one
 SELECT partner_id FROM partner_members WHERE user_id = @user_id;
 
+-- Locks FOR NO KEY UPDATE like LockPartner (DB §1.1).
 -- name: GetPartnerForUpdate :one
-SELECT * FROM partners WHERE id = @id FOR UPDATE;
+SELECT * FROM partners WHERE id = @id FOR NO KEY UPDATE;
 
 -- name: UpdateProfile :exec
 UPDATE partners

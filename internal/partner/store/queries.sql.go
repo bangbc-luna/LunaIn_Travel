@@ -119,6 +119,9 @@ type EnabledServiceTypesOfRow struct {
 	ServiceType string
 }
 
+// The join on catalog's service_types is an accepted read-only cross-module
+// join (Ruling 12, DB §11): it is used only to order the codes by
+// service_types.sort_order; partner never writes or locks service_types.
 func (q *Queries) EnabledServiceTypesOf(ctx context.Context, ids []uuid.UUID) ([]EnabledServiceTypesOfRow, error) {
 	rows, err := q.db.Query(ctx, enabledServiceTypesOf, ids)
 	if err != nil {
@@ -171,9 +174,10 @@ func (q *Queries) GetPartner(ctx context.Context, id uuid.UUID) (Partner, error)
 }
 
 const getPartnerForUpdate = `-- name: GetPartnerForUpdate :one
-SELECT id, legal_name, display_name, tax_code, business_license_file_id, address, province_code, ward_code, contact_name, contact_phone, contact_email, status, suspended_at, suspended_reason, rating_sum, rating_count, created_by, created_at, updated_at FROM partners WHERE id = $1 FOR UPDATE
+SELECT id, legal_name, display_name, tax_code, business_license_file_id, address, province_code, ward_code, contact_name, contact_phone, contact_email, status, suspended_at, suspended_reason, rating_sum, rating_count, created_by, created_at, updated_at FROM partners WHERE id = $1 FOR NO KEY UPDATE
 `
 
+// Locks FOR NO KEY UPDATE like LockPartner (DB §1.1).
 func (q *Queries) GetPartnerForUpdate(ctx context.Context, id uuid.UUID) (Partner, error) {
 	row := q.db.QueryRow(ctx, getPartnerForUpdate, id)
 	var i Partner
@@ -412,9 +416,13 @@ func (q *Queries) ListPartners(ctx context.Context, arg ListPartnersParams) ([]P
 }
 
 const lockPartner = `-- name: LockPartner :one
-SELECT status FROM partners WHERE id = $1 FOR UPDATE
+SELECT status FROM partners WHERE id = $1 FOR NO KEY UPDATE
 `
 
+// Writers lock the partners row FOR NO KEY UPDATE (never FOR UPDATE, DB §1.1):
+// inserts into tables with an FK to partners take KEY SHARE on it implicitly,
+// which FOR UPDATE would block; FOR NO KEY UPDATE still conflicts with the
+// FOR SHARE taken by Status(lock=true).
 func (q *Queries) LockPartner(ctx context.Context, id uuid.UUID) (string, error) {
 	row := q.db.QueryRow(ctx, lockPartner, id)
 	var status string
@@ -528,6 +536,8 @@ const sharePartnerStatus = `-- name: SharePartnerStatus :one
 SELECT status FROM partners WHERE id = $1 FOR SHARE
 `
 
+// Status(lock=true): blocks Suspend/Disable (FOR NO KEY UPDATE) until the
+// caller's tx ends, but not other readers or FK inserts.
 func (q *Queries) SharePartnerStatus(ctx context.Context, id uuid.UUID) (string, error) {
 	row := q.db.QueryRow(ctx, sharePartnerStatus, id)
 	var status string
