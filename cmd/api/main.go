@@ -26,6 +26,7 @@ import (
 	"github.com/bangbc-luna/lunain-travel/internal/platform/httpx"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/jobs"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/mailer"
+	"github.com/bangbc-luna/lunain-travel/internal/settings"
 )
 
 // migrateTimeout bounds db.Migrate, including waiting for the migration lock
@@ -170,6 +171,7 @@ func serve(log *slog.Logger) error {
 
 	mux := http.NewServeMux()
 	idSvc.Routes(mux, issuer, httpx.ClientIPFunc(cfg.TrustedProxyHops))
+	settings.NewService(pool, clock.Real{}).Routes(mux, issuer)
 	mux.HandleFunc("GET /healthz", healthz)
 	mux.HandleFunc("GET /readyz", readyz(pool))
 	mux.HandleFunc("/", httpx.NotFound)

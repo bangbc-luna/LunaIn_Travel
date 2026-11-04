@@ -86,4 +86,15 @@ func truncateAll(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	}
 	_, err = pool.Exec(ctx, "TRUNCATE "+strings.Join(names, ", ")+" RESTART IDENTITY CASCADE")
 	require.NoError(t, err)
+	reseed(t, ctx, pool)
+}
+
+// reseed restores rows that migrations insert and the app expects to exist,
+// because truncateAll wipes them. Add a statement here whenever a migration
+// seeds data.
+func reseed(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+	t.Helper()
+	// platform_settings: the single row (all columns have defaults).
+	_, err := pool.Exec(ctx, `INSERT INTO platform_settings (id) VALUES (1)`)
+	require.NoError(t, err)
 }

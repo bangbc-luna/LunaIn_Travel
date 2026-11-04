@@ -11,6 +11,19 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type AdminAuditLog struct {
+	ID          uuid.UUID
+	ActorUserID uuid.UUID
+	Action      string
+	TargetKind  string
+	TargetID    pgtype.UUID
+	Before      []byte
+	After       []byte
+	Reason      *string
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
 type CustomerProfile struct {
 	UserID      uuid.UUID
 	FullName    *string
@@ -31,6 +44,31 @@ type EmailVerification struct {
 	ConsumedAt   *time.Time
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
+}
+
+type Holiday struct {
+	Date      pgtype.Date
+	Name      string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+type PlatformSetting struct {
+	ID                         int16
+	HoldMinutes                int32
+	HoldGraceMinutes           int32
+	RequestResponseHours       int32
+	RequestPaymentHours        int32
+	CharterLateConfirmMinHours int32
+	RideCheckinWindowMinutes   int32
+	RideNoShowAfterMinutes     int32
+	CharterAutoCompleteHours   int32
+	ReleaseDelayDays           int32
+	MinPayoutAmount            int64
+	RescheduleWindowDays       int32
+	UpdatedBy                  pgtype.UUID
+	CreatedAt                  time.Time
+	UpdatedAt                  time.Time
 }
 
 type RefreshToken struct {
