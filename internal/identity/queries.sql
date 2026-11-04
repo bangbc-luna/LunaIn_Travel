@@ -74,3 +74,10 @@ WHERE family_id = @family_id AND revoked_at IS NULL;
 -- name: RevokeUserRefreshTokens :exec
 UPDATE refresh_tokens SET revoked_at = @now::timestamptz, updated_at = @now::timestamptz
 WHERE user_id = @user_id AND revoked_at IS NULL;
+
+-- name: SetUserPassword :exec
+UPDATE users
+SET password_hash = @password_hash,
+    email_verified_at = COALESCE(email_verified_at, @now::timestamptz),
+    updated_at = @now::timestamptz
+WHERE id = @id;

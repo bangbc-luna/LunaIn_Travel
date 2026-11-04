@@ -402,3 +402,22 @@ func (q *Queries) RevokeUserRefreshTokens(ctx context.Context, arg RevokeUserRef
 	_, err := q.db.Exec(ctx, revokeUserRefreshTokens, arg.Now, arg.UserID)
 	return err
 }
+
+const setUserPassword = `-- name: SetUserPassword :exec
+UPDATE users
+SET password_hash = $1,
+    email_verified_at = COALESCE(email_verified_at, $2::timestamptz),
+    updated_at = $2::timestamptz
+WHERE id = $3
+`
+
+type SetUserPasswordParams struct {
+	PasswordHash *string
+	Now          time.Time
+	ID           uuid.UUID
+}
+
+func (q *Queries) SetUserPassword(ctx context.Context, arg SetUserPasswordParams) error {
+	_, err := q.db.Exec(ctx, setUserPassword, arg.PasswordHash, arg.Now, arg.ID)
+	return err
+}

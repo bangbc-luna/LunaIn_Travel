@@ -14,7 +14,8 @@ const (
 	maxCodeAttempts = 5
 	resendCooldown  = 60 * time.Second
 
-	purposeSignup = "signup"
+	purposeSignup        = "signup"
+	purposePasswordReset = "password_reset"
 )
 
 var codeSpace = big.NewInt(1_000_000)

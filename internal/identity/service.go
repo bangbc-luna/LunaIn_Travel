@@ -30,6 +30,7 @@ const (
 	refreshTokenBytes   = 32
 	uniqueViolation     = "23505"
 	verificationSubject = "Mã xác minh LunaIn Travel"
+	resetSubject        = "Đặt lại mật khẩu LunaIn Travel"
 )
 
 // Deps are the collaborators of Service.
@@ -217,11 +218,11 @@ func (s *Service) VerifyEmail(ctx context.Context, email, code, password string)
 		if err != nil {
 			return fmt.Errorf("get code: %w", err)
 		}
-		if !now.Before(c.ExpiresAt) || c.Attempts >= maxCodeAttempts {
+		if !codeUsable(c, now) {
 			return ErrInvalidCode
 		}
 		// Always evaluate both checks so timing does not reveal which failed.
-		codeOK := hmac.Equal(hashCode(s.pepper, purposeSignup, u.ID.String(), code), c.CodeHash)
+		codeOK := s.codeMatches(c, purposeSignup, u.ID, code)
 		passwordOK := false
 		if c.PasswordHash != nil {
 			ok, err := VerifyPassword(*c.PasswordHash, password)
@@ -264,6 +265,119 @@ func (s *Service) VerifyEmail(ctx context.Context, email, code, password string)
 		return Tokens{}, ErrInvalidCode
 	}
 	return tokens, nil
+}
+
+// RequestPasswordReset emails a password_reset code. It returns nil without
+// sending anything when the email is invalid, unknown, belongs to a locked
+// account, or a code was sent less than resendCooldown ago, so the response
+// never reveals which emails have accounts. It works for any unlocked user,
+// including unverified customers and Google-only users.
+func (s *Service) RequestPasswordReset(ctx context.Context, email string) error {
+	e, err := NormalizeEmail(email)
+	if err != nil {
+		return nil
+	}
+	now := s.clock.Now()
+	return db.InTx(ctx, s.pool, func(tx pgx.Tx) error {
+		q := store.New(tx)
+		u, err := q.GetUserByEmailForUpdate(ctx, e)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("get user: %w", err)
+		}
+		if u.Status == userStatusLocked {
+			return nil
+		}
+		last, err := latestCode(ctx, q, u.ID, purposePasswordReset)
+		if err != nil {
+			return err
+		}
+		if inCooldown(last, now) {
+			return nil
+		}
+		return s.sendCodeTx(ctx, tx, q, u.ID, e, purposePasswordReset, nil, mailer.Message{
+			Subject: resetSubject,
+			Text: "Xin chào,\n\n" +
+				"Mã đặt lại mật khẩu LunaIn Travel của bạn là: %s\n\n" +
+				"Mã có hiệu lực trong 10 phút.\n\n" +
+				"Nếu bạn không yêu cầu đặt lại mật khẩu, hãy bỏ qua email này.\n",
+		}, now)
+	})
+}
+
+// ResetPassword checks the latest password_reset code and, if it matches,
+// sets newPassword, marks the email verified (the code proves ownership) and
+// revokes every session. Any failure after the password is validated is
+// reported as ErrInvalidCode; a wrong guess still counts as an attempt.
+func (s *Service) ResetPassword(ctx context.Context, email, code, newPassword string) error {
+	if err := ValidatePassword(newPassword); err != nil {
+		return err
+	}
+	e, err := NormalizeEmail(email)
+	if err != nil {
+		return ErrInvalidCode
+	}
+	// Hash before taking any lock (argon2 is slow).
+	hash, err := HashPassword(newPassword)
+	if err != nil {
+		return fmt.Errorf("hash password: %w", err)
+	}
+	now := s.clock.Now()
+
+	var wrong bool
+	err = db.InTx(ctx, s.pool, func(tx pgx.Tx) error {
+		q := store.New(tx)
+		// Lock order: user row first, then the code row.
+		u, err := q.GetUserByEmailForUpdate(ctx, e)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrInvalidCode
+		}
+		if err != nil {
+			return fmt.Errorf("get user: %w", err)
+		}
+		c, err := q.GetLatestActiveCodeForUpdate(ctx, store.GetLatestActiveCodeForUpdateParams{
+			UserID: u.ID, Purpose: purposePasswordReset,
+		})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrInvalidCode
+		}
+		if err != nil {
+			return fmt.Errorf("get code: %w", err)
+		}
+		if !codeUsable(c, now) {
+			return ErrInvalidCode
+		}
+		if !s.codeMatches(c, purposePasswordReset, u.ID, code) {
+			// Commit the failed attempt; the error is returned after commit.
+			wrong = true
+			return q.IncrementCodeAttempts(ctx, store.IncrementCodeAttemptsParams{Now: now, ID: c.ID})
+		}
+		if u.Status == userStatusLocked {
+			return ErrInvalidCode
+		}
+		if err := q.ConsumeCode(ctx, store.ConsumeCodeParams{Now: now, ID: c.ID}); err != nil {
+			return fmt.Errorf("consume code: %w", err)
+		}
+		if err := q.SetUserPassword(ctx, store.SetUserPasswordParams{Now: now, PasswordHash: &hash, ID: u.ID}); err != nil {
+			return fmt.Errorf("set password: %w", err)
+		}
+		// A pending signup (and the password bound to it) is superseded.
+		if err := q.InvalidateCodes(ctx, store.InvalidateCodesParams{
+			Now: now, UserID: u.ID, Purpose: purposeSignup,
+		}); err != nil {
+			return fmt.Errorf("invalidate signup codes: %w", err)
+		}
+		return s.RevokeAllSessions(ctx, tx, u.ID)
+	})
+	if err != nil {
+		return err
+	}
+	if wrong {
+		return ErrInvalidCode
+	}
+	return nil
 }
 
 // issueSession creates an access token and a new refresh token in familyID.
@@ -317,7 +431,13 @@ func pendingCustomer(u store.User) bool {
 // latestSignupCode returns the user's most recent signup code (consumed or
 // not), or nil if there is none. Caller must already hold the user row lock.
 func latestSignupCode(ctx context.Context, q *store.Queries, userID uuid.UUID) (*store.EmailVerification, error) {
-	c, err := q.GetLatestCode(ctx, store.GetLatestCodeParams{UserID: userID, Purpose: purposeSignup})
+	return latestCode(ctx, q, userID, purposeSignup)
+}
+
+// latestCode returns the user's most recent code of purpose (consumed or
+// not), or nil if there is none. Caller must already hold the user row lock.
+func latestCode(ctx context.Context, q *store.Queries, userID uuid.UUID, purpose string) (*store.EmailVerification, error) {
+	c, err := q.GetLatestCode(ctx, store.GetLatestCodeParams{UserID: userID, Purpose: purpose})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -325,6 +445,16 @@ func latestSignupCode(ctx context.Context, q *store.Queries, userID uuid.UUID) (
 		return nil, fmt.Errorf("get latest code: %w", err)
 	}
 	return &c, nil
+}
+
+// codeUsable reports whether c is still within its TTL and attempt budget.
+func codeUsable(c store.EmailVerification, now time.Time) bool {
+	return now.Before(c.ExpiresAt) && c.Attempts < maxCodeAttempts
+}
+
+// codeMatches reports whether code is the one stored on c for userID.
+func (s *Service) codeMatches(c store.EmailVerification, purpose string, userID uuid.UUID, code string) bool {
+	return hmac.Equal(hashCode(s.pepper, purpose, userID.String(), code), c.CodeHash)
 }
 
 // inCooldown reports whether last was created less than resendCooldown ago.
@@ -335,8 +465,21 @@ func inCooldown(last *store.EmailVerification, now time.Time) bool {
 // sendSignupCodeTx invalidates older signup codes, stores a new one bound to
 // passwordHash and enqueues its email, all inside tx.
 func (s *Service) sendSignupCodeTx(ctx context.Context, tx pgx.Tx, q *store.Queries, userID uuid.UUID, email, passwordHash string, now time.Time) error {
+	return s.sendCodeTx(ctx, tx, q, userID, email, purposeSignup, &passwordHash, mailer.Message{
+		Subject: verificationSubject,
+		Text: "Xin chào,\n\n" +
+			"Mã xác minh tài khoản LunaIn Travel của bạn là: %s\n\n" +
+			"Mã có hiệu lực trong 10 phút.\n\n" +
+			"Nếu bạn không đăng ký tài khoản, hãy bỏ qua email này.\n",
+	}, now)
+}
+
+// sendCodeTx invalidates older codes of purpose, stores a new one (with the
+// optional pending passwordHash) and enqueues msg to email, all inside tx.
+// msg.Text must contain one %s, which is replaced by the code.
+func (s *Service) sendCodeTx(ctx context.Context, tx pgx.Tx, q *store.Queries, userID uuid.UUID, email, purpose string, passwordHash *string, msg mailer.Message, now time.Time) error {
 	if err := q.InvalidateCodes(ctx, store.InvalidateCodesParams{
-		Now: now, UserID: userID, Purpose: purposeSignup,
+		Now: now, UserID: userID, Purpose: purpose,
 	}); err != nil {
 		return fmt.Errorf("invalidate codes: %w", err)
 	}
@@ -351,22 +494,17 @@ func (s *Service) sendSignupCodeTx(ctx context.Context, tx pgx.Tx, q *store.Quer
 	if err := q.InsertVerification(ctx, store.InsertVerificationParams{
 		ID:           id,
 		UserID:       userID,
-		Purpose:      purposeSignup,
-		CodeHash:     hashCode(s.pepper, purposeSignup, userID.String(), code),
-		PasswordHash: &passwordHash,
+		Purpose:      purpose,
+		CodeHash:     hashCode(s.pepper, purpose, userID.String(), code),
+		PasswordHash: passwordHash,
 		ExpiresAt:    now.Add(codeTTL),
 		Now:          now,
 	}); err != nil {
 		return fmt.Errorf("insert verification: %w", err)
 	}
-	return mailer.EnqueueTx(ctx, tx, s.jobs, mailer.Message{
-		To:      email,
-		Subject: verificationSubject,
-		Text: "Xin chào,\n\n" +
-			"Mã xác minh tài khoản LunaIn Travel của bạn là: " + code + "\n\n" +
-			"Mã có hiệu lực trong 10 phút.\n\n" +
-			"Nếu bạn không đăng ký tài khoản, hãy bỏ qua email này.\n",
-	})
+	msg.To = email
+	msg.Text = fmt.Sprintf(msg.Text, code)
+	return mailer.EnqueueTx(ctx, tx, s.jobs, msg)
 }
 
 func isUniqueViolation(err error, constraint string) bool {
