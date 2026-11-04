@@ -280,10 +280,15 @@ func TestAllPartnerRoutesRequireMembership(t *testing.T) {
 
 func TestPublicRoutes(t *testing.T) {
 	app := newTestApp(t)
-	for _, p := range []string{"/v1/geo/provinces", "/v1/service-types", "/healthz", "/readyz"} {
+	for _, p := range []string{"/v1/geo/provinces", "/v1/service-types", "/v1/listings", "/healthz", "/readyz"} {
 		require.Equal(t, http.StatusOK, app.do("GET", p, "").Code, p)
 	}
-	rec := app.do("GET", "/nope", "")
+	// A public listing detail needs no token: an unknown slug is a JSON 404.
+	rec := app.do("GET", "/v1/listings/khong-ton-tai", "")
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	require.Contains(t, rec.Body.String(), `"not_found"`)
+	require.Equal(t, []string{"GET /v1/listings", "GET /v1/listings/{slug}"}, recordedUnder(app.patterns, "/v1/listings"))
+	rec = app.do("GET", "/nope", "")
 	require.Equal(t, http.StatusNotFound, rec.Code)
 	require.Contains(t, rec.Body.String(), `"error"`)
 }

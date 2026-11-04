@@ -71,6 +71,7 @@ func newEnv(t *testing.T) *env {
 	mux := http.NewServeMux()
 	svc.PartnerRoutes(mux, iss, pSvc.RequireMember())
 	svc.AdminRoutes(mux, iss)
+	svc.PublicRoutes(mux)
 	mux.HandleFunc("/", httpx.NotFound)
 	e := &env{
 		Svc: svc, Files: fileSvc, Partner: pSvc, Identity: idSvc, Issuer: iss, Pool: pool, Clock: clk,

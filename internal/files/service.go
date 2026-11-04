@@ -185,6 +185,28 @@ func (s *Service) URL(ctx context.Context, p auth.Principal, id uuid.UUID) (stri
 	return u, nil
 }
 
+// ErrNotPublic is returned by PublicURL for a missing or private file. It is a
+// plain error (not an AppError): callers only pass ids of public files they
+// store, so hitting it is an internal inconsistency.
+var ErrNotPublic = errors.New("files: not a public file")
+
+// PublicURL returns, inside tx, the fixed URL of a public file. It needs no
+// principal because public files are readable by anyone; a private or missing
+// file is ErrNotPublic, never a URL.
+func (s *Service) PublicURL(ctx context.Context, tx pgx.Tx, id uuid.UUID) (string, error) {
+	row, err := store.New(tx).GetFile(ctx, id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", fmt.Errorf("%w: file %s not found", ErrNotPublic, id)
+	}
+	if err != nil {
+		return "", fmt.Errorf("get file: %w", err)
+	}
+	if row.Visibility != visibilityPublic {
+		return "", fmt.Errorf("%w: file %s is %s", ErrNotPublic, id, row.Visibility)
+	}
+	return s.publicURL(row.StorageKey), nil
+}
+
 // Owned checks, inside tx, that file id exists, was uploaded by uploadedBy and
 // has the given purpose. Callers use it before attaching a file_id to a record.
 func (s *Service) Owned(ctx context.Context, tx pgx.Tx, id, uploadedBy uuid.UUID, purpose string) error {

@@ -264,6 +264,60 @@ func (q *Queries) GetOwnedListing(ctx context.Context, arg GetOwnedListingParams
 	return i, err
 }
 
+const getPublicListingBySlug = `-- name: GetPublicListingBySlug :one
+SELECT l.id, l.partner_id, l.service_type, l.title, l.slug, l.summary, l.description, l.cover_file_id, l.province_code, l.ward_code, l.address, l.latitude, l.longitude, l.review_status, l.rejection_reason, l.submitted_at, l.reviewed_at, l.reviewed_by, l.visibility, l.hidden_reason, l.hidden_at, l.hidden_by, l.rating_sum, l.rating_count, l.created_at, l.updated_at,
+       (SELECT COALESCE(min(tt.price), 0) FROM attraction_ticket_types tt
+        WHERE tt.listing_id = l.id AND tt.active)::bigint AS price_from
+FROM listings l
+JOIN partners p ON p.id = l.partner_id
+WHERE l.slug = $1
+  AND l.review_status = 'approved' AND l.visibility = 'published' AND p.status = 'active'
+  AND EXISTS (SELECT 1 FROM partner_service_types pst
+              WHERE pst.partner_id = l.partner_id AND pst.service_type = l.service_type
+                AND pst.disabled_at IS NULL)
+`
+
+type GetPublicListingBySlugRow struct {
+	Listing   Listing
+	PriceFrom int64
+}
+
+// Same visibility rule as SearchPublicListings (same accepted read-only join).
+func (q *Queries) GetPublicListingBySlug(ctx context.Context, slug string) (GetPublicListingBySlugRow, error) {
+	row := q.db.QueryRow(ctx, getPublicListingBySlug, slug)
+	var i GetPublicListingBySlugRow
+	err := row.Scan(
+		&i.Listing.ID,
+		&i.Listing.PartnerID,
+		&i.Listing.ServiceType,
+		&i.Listing.Title,
+		&i.Listing.Slug,
+		&i.Listing.Summary,
+		&i.Listing.Description,
+		&i.Listing.CoverFileID,
+		&i.Listing.ProvinceCode,
+		&i.Listing.WardCode,
+		&i.Listing.Address,
+		&i.Listing.Latitude,
+		&i.Listing.Longitude,
+		&i.Listing.ReviewStatus,
+		&i.Listing.RejectionReason,
+		&i.Listing.SubmittedAt,
+		&i.Listing.ReviewedAt,
+		&i.Listing.ReviewedBy,
+		&i.Listing.Visibility,
+		&i.Listing.HiddenReason,
+		&i.Listing.HiddenAt,
+		&i.Listing.HiddenBy,
+		&i.Listing.RatingSum,
+		&i.Listing.RatingCount,
+		&i.Listing.CreatedAt,
+		&i.Listing.UpdatedAt,
+		&i.PriceFrom,
+	)
+	return i, err
+}
+
 const getTicketType = `-- name: GetTicketType :one
 SELECT id, listing_id, name, description, audience, price, active, sort_order, created_at, updated_at FROM attraction_ticket_types WHERE id = $1 AND listing_id = $2
 `
@@ -1105,6 +1159,17 @@ func (q *Queries) ListTimeSlots(ctx context.Context, arg ListTimeSlotsParams) ([
 	return items, nil
 }
 
+const listingPartnerID = `-- name: ListingPartnerID :one
+SELECT partner_id FROM listings WHERE id = $1
+`
+
+func (q *Queries) ListingPartnerID(ctx context.Context, id uuid.UUID) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, listingPartnerID, id)
+	var partner_id uuid.UUID
+	err := row.Scan(&partner_id)
+	return partner_id, err
+}
+
 const lockListing = `-- name: LockListing :one
 SELECT id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, rating_sum, rating_count, created_at, updated_at FROM listings WHERE id = $1 FOR NO KEY UPDATE
 `
@@ -1244,6 +1309,106 @@ func (q *Queries) RejectListing(ctx context.Context, arg RejectListingParams) (L
 	return i, err
 }
 
+const searchPublicListings = `-- name: SearchPublicListings :many
+SELECT l.id, l.partner_id, l.service_type, l.title, l.slug, l.summary, l.description, l.cover_file_id, l.province_code, l.ward_code, l.address, l.latitude, l.longitude, l.review_status, l.rejection_reason, l.submitted_at, l.reviewed_at, l.reviewed_by, l.visibility, l.hidden_reason, l.hidden_at, l.hidden_by, l.rating_sum, l.rating_count, l.created_at, l.updated_at,
+       (SELECT COALESCE(min(tt.price), 0) FROM attraction_ticket_types tt
+        WHERE tt.listing_id = l.id AND tt.active)::bigint AS price_from
+FROM listings l
+JOIN partners p ON p.id = l.partner_id
+WHERE l.review_status = 'approved' AND l.visibility = 'published' AND p.status = 'active'
+  AND EXISTS (SELECT 1 FROM partner_service_types pst
+              WHERE pst.partner_id = l.partner_id AND pst.service_type = l.service_type
+                AND pst.disabled_at IS NULL)
+  AND ($1::text IS NULL OR l.service_type = $1)
+  AND ($2::text IS NULL OR l.province_code = $2)
+  AND ($3::text IS NULL
+       OR f_unaccent(lower(l.title)) ILIKE '%' || f_unaccent(lower($4::text)) || '%' ESCAPE '\'
+       OR similarity(f_unaccent(lower(l.title)), f_unaccent(lower($3))) >= 0.3)
+ORDER BY CASE WHEN $3::text IS NULL THEN 0
+              ELSE similarity(f_unaccent(lower(l.title)), f_unaccent(lower($3))) END DESC,
+         l.id DESC
+LIMIT $6 OFFSET $5
+`
+
+type SearchPublicListingsParams struct {
+	ServiceType  *string
+	ProvinceCode *string
+	Q            *string
+	Pattern      *string
+	Off          int32
+	Lim          int32
+}
+
+type SearchPublicListingsRow struct {
+	Listing   Listing
+	PriceFrom int64
+}
+
+// Public visibility (spec §5.4): approved, published, partner active and the
+// listing's service type enabled for the partner. The joins on partner's
+// partners and partner_service_types are an accepted read-only cross-module
+// join (like Ruling 12 of plan 2): search needs the whole rule in one SQL
+// statement to filter and page correctly. listing never writes or locks those
+// tables here; BookableListing locks through PartnerChecker instead.
+// price_from is the cheapest active ticket type, 0 when there is none (prices
+// are > 0 by CHECK; sqlc cannot type a nullable aggregate, so 0 means NULL).
+// With q: ILIKE on the escaped pattern (ESCAPE '\') or trigram similarity
+// >= 0.3, best match first; without q: newest first.
+func (q *Queries) SearchPublicListings(ctx context.Context, arg SearchPublicListingsParams) ([]SearchPublicListingsRow, error) {
+	rows, err := q.db.Query(ctx, searchPublicListings,
+		arg.ServiceType,
+		arg.ProvinceCode,
+		arg.Q,
+		arg.Pattern,
+		arg.Off,
+		arg.Lim,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []SearchPublicListingsRow
+	for rows.Next() {
+		var i SearchPublicListingsRow
+		if err := rows.Scan(
+			&i.Listing.ID,
+			&i.Listing.PartnerID,
+			&i.Listing.ServiceType,
+			&i.Listing.Title,
+			&i.Listing.Slug,
+			&i.Listing.Summary,
+			&i.Listing.Description,
+			&i.Listing.CoverFileID,
+			&i.Listing.ProvinceCode,
+			&i.Listing.WardCode,
+			&i.Listing.Address,
+			&i.Listing.Latitude,
+			&i.Listing.Longitude,
+			&i.Listing.ReviewStatus,
+			&i.Listing.RejectionReason,
+			&i.Listing.SubmittedAt,
+			&i.Listing.ReviewedAt,
+			&i.Listing.ReviewedBy,
+			&i.Listing.Visibility,
+			&i.Listing.HiddenReason,
+			&i.Listing.HiddenAt,
+			&i.Listing.HiddenBy,
+			&i.Listing.RatingSum,
+			&i.Listing.RatingCount,
+			&i.Listing.CreatedAt,
+			&i.Listing.UpdatedAt,
+			&i.PriceFrom,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const setListingCover = `-- name: SetListingCover :one
 UPDATE listings SET cover_file_id = $1, updated_at = $2
 WHERE id = $3 AND partner_id = $4
@@ -1309,6 +1474,46 @@ type SetListingVisibilityParams struct {
 
 func (q *Queries) SetListingVisibility(ctx context.Context, arg SetListingVisibilityParams) (Listing, error) {
 	row := q.db.QueryRow(ctx, setListingVisibility, arg.Visibility, arg.Now, arg.ID)
+	var i Listing
+	err := row.Scan(
+		&i.ID,
+		&i.PartnerID,
+		&i.ServiceType,
+		&i.Title,
+		&i.Slug,
+		&i.Summary,
+		&i.Description,
+		&i.CoverFileID,
+		&i.ProvinceCode,
+		&i.WardCode,
+		&i.Address,
+		&i.Latitude,
+		&i.Longitude,
+		&i.ReviewStatus,
+		&i.RejectionReason,
+		&i.SubmittedAt,
+		&i.ReviewedAt,
+		&i.ReviewedBy,
+		&i.Visibility,
+		&i.HiddenReason,
+		&i.HiddenAt,
+		&i.HiddenBy,
+		&i.RatingSum,
+		&i.RatingCount,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const shareListing = `-- name: ShareListing :one
+SELECT id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, rating_sum, rating_count, created_at, updated_at FROM listings WHERE id = $1 FOR SHARE
+`
+
+// BookableListing: FOR SHARE blocks partner edits (FOR NO KEY UPDATE) until
+// the booking tx ends, but not other bookings. Taken after the partners row.
+func (q *Queries) ShareListing(ctx context.Context, id uuid.UUID) (Listing, error) {
+	row := q.db.QueryRow(ctx, shareListing, id)
 	var i Listing
 	err := row.Scan(
 		&i.ID,

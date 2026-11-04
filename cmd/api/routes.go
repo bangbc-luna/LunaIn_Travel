@@ -47,6 +47,7 @@ func buildMux(d muxDeps) (*http.ServeMux, []string) {
 	d.Partner.AdminRoutes(rr, d.Issuer)
 	d.Listing.PartnerRoutes(rr, d.Issuer, d.Partner.RequireMember())
 	d.Listing.AdminRoutes(rr, d.Issuer)
+	d.Listing.PublicRoutes(rr)
 	rr.HandleFunc("GET /healthz", healthz)
 	rr.HandleFunc("GET /readyz", readyz(d.Pool))
 	rr.HandleFunc("/", httpx.NotFound)

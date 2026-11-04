@@ -34,10 +34,11 @@ type LocationValidator interface {
 	ValidateLocation(ctx context.Context, tx pgx.Tx, provinceCode, wardCode string) error
 }
 
-// FileChecker checks an uploaded file's owner and purpose. Implemented by
-// *files.Service.
+// FileChecker checks an uploaded file's owner and purpose, and resolves the
+// fixed URL of a public file (listing images). Implemented by *files.Service.
 type FileChecker interface {
 	Owned(ctx context.Context, tx pgx.Tx, id, uploadedBy uuid.UUID, purpose string) error
+	PublicURL(ctx context.Context, tx pgx.Tx, id uuid.UUID) (string, error)
 }
 
 // Deps are the collaborators of Service.

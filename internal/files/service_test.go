@@ -201,3 +201,35 @@ func TestOwned_ChecksUploaderAndPurpose(t *testing.T) {
 		require.Equal(t, "invalid_file", code, name)
 	}
 }
+
+func TestPublicURL_PublicOnly(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	a := e.user(t, auth.RolePartner)
+	pub, err := e.Svc.Upload(ctx, a, "listing_image", bytes.NewReader(pngBytes(t)))
+	require.NoError(t, err)
+	priv, err := e.Svc.Upload(ctx, a, "business_license", bytes.NewReader(pngBytes(t)))
+	require.NoError(t, err)
+
+	publicURL := func(id uuid.UUID) (string, error) {
+		var u string
+		err := db.InTx(ctx, e.Pool, func(tx pgx.Tx) error {
+			var err error
+			u, err = e.Svc.PublicURL(ctx, tx, id)
+			return err
+		})
+		return u, err
+	}
+	u, err := publicURL(pub.ID)
+	require.NoError(t, err)
+	require.Equal(t, pub.URL, u)
+	require.True(t, strings.HasPrefix(u, baseURL+"/public/listing_image/"), u)
+
+	// Private and missing files are a plain error, never a URL or an AppError.
+	for _, id := range []uuid.UUID{priv.ID, uuid.Must(uuid.NewV7())} {
+		_, err = publicURL(id)
+		require.ErrorIs(t, err, files.ErrNotPublic)
+		var ae *httpx.AppError
+		require.False(t, errors.As(err, &ae))
+	}
+}
