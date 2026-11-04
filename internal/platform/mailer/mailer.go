@@ -12,6 +12,7 @@ import (
 	"net/smtp"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Message is a plain-text email.
@@ -60,6 +61,8 @@ func (r *Recorder) Messages() []Message {
 	return append([]Message(nil), r.msgs...)
 }
 
+const defaultSMTPTimeout = 30 * time.Second
+
 // SMTPMailer sends via net/smtp, using STARTTLS when the server offers it.
 type SMTPMailer struct {
 	Host     string
@@ -102,38 +105,62 @@ func (s SMTPMailer) Send(ctx context.Context, m Message) error {
 	if err != nil {
 		return fmt.Errorf("mailer: dial: %w", err)
 	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		deadline = time.Now().Add(defaultSMTPTimeout)
+	}
+	_ = conn.SetDeadline(deadline)
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-done:
+		}
+	}()
+	// wrap converts I/O failures caused by cancellation into ctx errors.
+	wrap := func(op string, err error) error {
+		if cerr := ctx.Err(); cerr != nil {
+			return fmt.Errorf("mailer: %s: %w", op, cerr)
+		}
+		return fmt.Errorf("mailer: %s: %w", op, err)
+	}
 	c, err := smtp.NewClient(conn, s.Host)
 	if err != nil {
 		_ = conn.Close()
-		return fmt.Errorf("mailer: smtp client: %w", err)
+		return wrap("smtp client", err)
 	}
 	defer c.Close()
 
 	if ok, _ := c.Extension("STARTTLS"); ok {
 		if err := c.StartTLS(&tls.Config{ServerName: s.Host, MinVersion: tls.VersionTLS12}); err != nil {
-			return fmt.Errorf("mailer: starttls: %w", err)
+			return wrap("starttls", err)
 		}
 	}
 	if s.User != "" {
 		if err := c.Auth(smtp.PlainAuth("", s.User, s.Password, s.Host)); err != nil {
-			return fmt.Errorf("mailer: auth: %w", err)
+			return wrap("auth", err)
 		}
 	}
 	if err := c.Mail(from.Address); err != nil {
-		return fmt.Errorf("mailer: mail from: %w", err)
+		return wrap("mail from", err)
 	}
 	if err := c.Rcpt(to.Address); err != nil {
-		return fmt.Errorf("mailer: rcpt: %w", err)
+		return wrap("rcpt", err)
 	}
 	w, err := c.Data()
 	if err != nil {
-		return fmt.Errorf("mailer: data: %w", err)
+		return wrap("data", err)
 	}
 	if _, err := w.Write(BuildMessage(s.From, m)); err != nil {
-		return fmt.Errorf("mailer: write: %w", err)
+		return wrap("write", err)
 	}
 	if err := w.Close(); err != nil {
-		return fmt.Errorf("mailer: close data: %w", err)
+		return wrap("close data", err)
 	}
-	return c.Quit()
+	if err := c.Quit(); err != nil {
+		return wrap("quit", err)
+	}
+	return nil
 }

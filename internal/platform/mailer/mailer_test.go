@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -67,6 +68,32 @@ func TestEnqueueTx_CommittedJobIsSent(t *testing.T) {
 		t.Fatal("timed out waiting for job completion")
 	}
 	require.Equal(t, []mailer.Message{msg}, rec.Messages())
+}
+
+func TestSMTPMailer_StalledServerIsBoundedByContext(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close()
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		time.Sleep(10 * time.Second) // never writes the greeting
+	}()
+
+	addr := ln.Addr().(*net.TCPAddr)
+	m := mailer.SMTPMailer{Host: "127.0.0.1", Port: addr.Port, From: "LunaIn <no-reply@lunain.vn>"}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	err = m.Send(ctx, mailer.Message{To: "an@gmail.com", Subject: "s", Text: "t"})
+	require.Error(t, err)
+	require.Less(t, time.Since(start), 2*time.Second)
+	var ne net.Error
+	require.True(t, errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &ne) && ne.Timeout()), "got %v", err)
 }
 
 func TestBuildMessage(t *testing.T) {
