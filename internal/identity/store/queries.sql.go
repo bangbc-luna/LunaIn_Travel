@@ -27,6 +27,29 @@ func (q *Queries) ConsumeCode(ctx context.Context, arg ConsumeCodeParams) error 
 	return err
 }
 
+const getIdentity = `-- name: GetIdentity :one
+SELECT id, user_id, provider, provider_subject, created_at, updated_at FROM user_identities WHERE provider = $1 AND provider_subject = $2
+`
+
+type GetIdentityParams struct {
+	Provider        string
+	ProviderSubject string
+}
+
+func (q *Queries) GetIdentity(ctx context.Context, arg GetIdentityParams) (UserIdentity, error) {
+	row := q.db.QueryRow(ctx, getIdentity, arg.Provider, arg.ProviderSubject)
+	var i UserIdentity
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.Provider,
+		&i.ProviderSubject,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getLatestActiveCodeForUpdate = `-- name: GetLatestActiveCodeForUpdate :one
 SELECT id, user_id, purpose, code_hash, password_hash, expires_at, attempts, consumed_at, created_at, updated_at FROM email_verifications
 WHERE user_id = $1 AND purpose = $2 AND consumed_at IS NULL
@@ -219,6 +242,34 @@ func (q *Queries) InsertCustomerProfile(ctx context.Context, arg InsertCustomerP
 	return err
 }
 
+const insertIdentity = `-- name: InsertIdentity :execrows
+INSERT INTO user_identities (id, user_id, provider, provider_subject, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $5)
+ON CONFLICT (provider, provider_subject) DO NOTHING
+`
+
+type InsertIdentityParams struct {
+	ID              uuid.UUID
+	UserID          uuid.UUID
+	Provider        string
+	ProviderSubject string
+	Now             time.Time
+}
+
+func (q *Queries) InsertIdentity(ctx context.Context, arg InsertIdentityParams) (int64, error) {
+	result, err := q.db.Exec(ctx, insertIdentity,
+		arg.ID,
+		arg.UserID,
+		arg.Provider,
+		arg.ProviderSubject,
+		arg.Now,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const insertRefreshToken = `-- name: InsertRefreshToken :exec
 INSERT INTO refresh_tokens (id, user_id, family_id, token_hash, expires_at, created_at, updated_at)
 VALUES ($1, $2, $3, $4, $5, $6, $6)
@@ -400,6 +451,22 @@ type RevokeUserRefreshTokensParams struct {
 
 func (q *Queries) RevokeUserRefreshTokens(ctx context.Context, arg RevokeUserRefreshTokensParams) error {
 	_, err := q.db.Exec(ctx, revokeUserRefreshTokens, arg.Now, arg.UserID)
+	return err
+}
+
+const setEmailVerifiedKeepPassword = `-- name: SetEmailVerifiedKeepPassword :exec
+UPDATE users
+SET email_verified_at = COALESCE(email_verified_at, $1::timestamptz), updated_at = $1::timestamptz
+WHERE id = $2
+`
+
+type SetEmailVerifiedKeepPasswordParams struct {
+	Now time.Time
+	ID  uuid.UUID
+}
+
+func (q *Queries) SetEmailVerifiedKeepPassword(ctx context.Context, arg SetEmailVerifiedKeepPasswordParams) error {
+	_, err := q.db.Exec(ctx, setEmailVerifiedKeepPassword, arg.Now, arg.ID)
 	return err
 }
 

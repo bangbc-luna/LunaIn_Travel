@@ -81,3 +81,16 @@ SET password_hash = @password_hash,
     email_verified_at = COALESCE(email_verified_at, @now::timestamptz),
     updated_at = @now::timestamptz
 WHERE id = @id;
+
+-- name: GetIdentity :one
+SELECT * FROM user_identities WHERE provider = @provider AND provider_subject = @provider_subject;
+
+-- name: InsertIdentity :execrows
+INSERT INTO user_identities (id, user_id, provider, provider_subject, created_at, updated_at)
+VALUES (@id, @user_id, @provider, @provider_subject, @now, @now)
+ON CONFLICT (provider, provider_subject) DO NOTHING;
+
+-- name: SetEmailVerifiedKeepPassword :exec
+UPDATE users
+SET email_verified_at = COALESCE(email_verified_at, @now::timestamptz), updated_at = @now::timestamptz
+WHERE id = @id;
