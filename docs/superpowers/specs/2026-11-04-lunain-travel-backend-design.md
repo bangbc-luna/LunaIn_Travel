@@ -118,7 +118,7 @@ Khóa đối tác **[Chốt]**: mọi Listing của họ ẩn khỏi khách và 
 
 ### 5.4 Listing (lớp chung)
 
-`listings`: `partner_id`, `service_type`, `title`, `description`, `cover_image`, vị trí (`province_code`, `ward_code`, địa chỉ, toạ độ), `review_status`, `visibility`, điểm đánh giá tổng hợp (`rating_avg`, `rating_count`).
+`listings`: `partner_id`, `service_type`, `title`, `description`, `cover_image`, vị trí (`province_code`, `ward_code`, địa chỉ, toạ độ), `review_status`, `visibility`, điểm đánh giá tổng hợp (`rating_sum`, `rating_count`; điểm trung bình = sum/count, không lưu số thực).
 
 - `review_status` ∈ {`draft`, `pending_review`, `approved`, `rejected`} và `rejection_reason`.
   **[Chốt]** Chỉ duyệt lần đầu. Đã `approved` thì đối tác sửa trực tiếp, không quay lại hàng chờ duyệt.
@@ -127,7 +127,7 @@ Khóa đối tác **[Chốt]**: mọi Listing của họ ẩn khỏi khách và 
 - Khách chỉ thấy Listing có `review_status=approved`, `visibility=published` và đối tác đang `active`.
 - `listing_images`: nhiều ảnh, có thứ tự.
 - `listing_audit_log` **[Builder]**: ghi lại mỗi lần đối tác sửa (ai, lúc nào, trường nào, giá trị cũ/mới). Vì sửa không cần duyệt lại, đây là căn cứ để admin xử lý khiếu nại.
-- `cancellation_policies` + `cancellation_policy_tiers`: một Listing có một chính sách, gồm nhiều mốc (`hours_before`, `refund_percent`). **[Chốt]** Đối tác tự đặt, hệ thống tự tính tiền hoàn. **[Builder]** Không có mốc nào khớp thì hoàn 0%.
+- `listing_cancellation_tiers`: một Listing có một chính sách, gồm nhiều mốc (`hours_before`, `refund_bps`, trong đó 10000 = 100%). **[Chốt]** Đối tác tự đặt, hệ thống tự tính tiền hoàn. **[Builder]** Không có mốc nào khớp thì hoàn 0%.
 
 Danh mục địa giới **[Builder]**: bảng `provinces` và `wards` theo đơn vị hành chính sau sáp nhập 2025 (34 tỉnh/thành, bỏ cấp huyện), import từ dữ liệu chính thức. Dùng cho tìm kiếm và lọc theo khu vực.
 
@@ -145,9 +145,9 @@ Chi tiết theo từng Service Type dùng bảng riêng, liên kết 1-1 hoặc 
 ### 5.6 Scheduled Ride
 
 - `ride_routes`: điểm đi, điểm đến (mỗi điểm có tỉnh/phường và địa chỉ hoặc tên bến), thời gian chạy dự kiến, loại xe.
-- `ride_trips`: một chuyến (`route_id`, `departure_at`, `seat_capacity`, `seats_reserved`, `price_per_seat`, `status`). **[Builder]** Đối tác tạo chuyến theo lịch lặp (ví dụ mỗi ngày 7h, 13h) và hệ thống sinh sẵn các Trip cho N ngày tới. Đối tác vẫn sửa hoặc hủy được từng chuyến.
+- `ride_trips`: một chuyến (`listing_id`, `departure_at`, `seat_capacity`, `seats_reserved`, `price_per_seat`, `status`). Mỗi Listing xe tuyến là một tuyến một chiều. **[Builder]** Đối tác tạo chuyến theo lịch lặp (ví dụ mỗi ngày 7h, 13h) và hệ thống sinh sẵn các Trip cho N ngày tới. Đối tác sửa hoặc hủy được chuyến **chưa có ai đặt**. Chuyến đã có ghế được giữ thì không đổi được giờ và giá (DB có trigger chặn), và chỉ Super Admin mới hủy được (mục 6.1).
 - **[Chốt]** Khách chọn số ghế, nhà xe tự xếp chỗ. Không lưu sơ đồ ghế.
-- **[Chốt]** Có khứ hồi. **[Builder]** Khứ hồi là **hai Booking riêng** (chiều đi, chiều về) thuộc cùng một `checkout`, thanh toán chung một lần. Mỗi chiều có QR, trạng thái, check-in, No-show và chính sách hủy riêng, tính theo giờ khởi hành của chiều đó. Khách hủy được từng chiều. Như vậy máy trạng thái Booking không phải xử lý trường hợp "một nửa đơn".
+- **[Chốt]** Có khứ hồi. **[Builder]** Khứ hồi là **hai Booking riêng** (chiều đi, chiều về) thuộc cùng một `checkout`, thanh toán chung một lần. Mỗi chiều có QR, trạng thái, check-in và No-show riêng. **[Chốt]** Vé khứ hồi được **hủy cùng nhau**: khách hủy hay Super Admin hủy (kể cả hủy chuyến của một chiều) thì cả hai chiều đều bị hủy. **[Builder]** Khách chỉ hủy được khi chưa đi chiều nào. % hoàn của từng chiều tính theo chính sách hủy với giờ khởi hành của chính chiều đó. Super Admin hủy thì hoàn 100% cả hai chiều.
 
 Ràng buộc: `CHECK (seats_reserved BETWEEN 0 AND seat_capacity)`. Cách giữ ghế xem mục 7.
 
@@ -189,7 +189,7 @@ Số xe trống **[Builder]**: tính theo khoảng thời gian, không dùng b�
 - `cancellation_policy_snapshot` (JSON): **[Builder]** chụp lại các mốc tại thời điểm đặt, để đối tác đổi chính sách sau này không ảnh hưởng đơn cũ.
 - Thông tin liên hệ khách nhập lúc đặt (tên, SĐT, email).
 - `hold_expires_at`, `payment_due_at`, `confirmed_at`, `checked_in_at`, `completed_at`, `cancelled_at`, `cancel_reason`, `cancelled_by`.
-- `reschedule_count` (0 hoặc 1) **[Chốt]**, `original_service_start_at` (giờ sử dụng ban đầu, dùng để tính % hoàn sau khi đã đổi lịch).
+- Đổi lịch tối đa 1 lần **[Chốt]**, được DB tự chặn bằng bảng `booking_reschedules` có `booking_id UNIQUE`. `original_service_start_at` (giờ sử dụng ban đầu, dùng để tính % hoàn sau khi đã đổi lịch).
 - `qr_token`: token ngẫu nhiên đủ dài, chỉ server tra được. Mã QR hiển thị token này.
 
 `booking_items`: các dòng của Booking, mỗi dòng có `unit_price` chụp lại, `quantity`, `line_total` và tham chiếu chi tiết theo loại:
@@ -231,7 +231,8 @@ requested ──đối tác chấp nhận──▶ awaiting_payment ──thanh 
 ```
 
 - **[Chốt]** Đối tác xác nhận trước, hệ thống báo khách, rồi khách mới thanh toán.
-- **[Chốt]** Đối tác chỉ được từ chối ở bước `requested`. Đã chấp nhận (`awaiting_payment`) thì đối tác **không rút lại được** trên hệ thống. Nếu sau đó xe có vấn đề (hỏng, đã cho người khác thuê), đối tác tự chịu trách nhiệm với khách ngoài sàn: bồi thường, hoặc giao xe cùng phân khúc hoặc cao hơn. Booking vẫn giữ nguyên mẫu xe và giá ban đầu. Khách vẫn có thể không thanh toán để đơn tự hết hạn.
+- **[Chốt]** Đối tác chỉ được từ chối ở bước `requested`. Đã chấp nhận (`awaiting_payment`) thì đối tác **không rút lại được** trên hệ thống. Nếu sau đó xe có vấn đề (hỏng, đã cho người khác thuê), đối tác tự chịu trách nhiệm với khách ngoài sàn: bồi thường, hoặc giao xe cùng phân khúc hoặc cao hơn. Booking vẫn giữ nguyên mẫu xe và giá ban đầu.
+- **[Chốt]** Khách được **tự rút yêu cầu miễn phí** khi đơn đang `requested` hoặc `awaiting_payment` (chưa trả tiền). Đơn chuyển `cancelled` với `cancel_kind = customer_withdraw`, xe được nhả ngay, không có tiền hay bút toán nào.
 - **[Builder]** Đối tác có 12 giờ để phản hồi (không quá giờ bắt đầu dịch vụ). Khách có 2 giờ để thanh toán sau khi được chấp nhận. Super Admin chỉnh được cả hai.
 - **[Builder]** Self-Drive Rental: xe được giữ ngay từ `requested` cho đến khi đơn kết thúc, để đối tác không chấp nhận hai đơn cho cùng một chiếc xe. Private Charter không giữ sức chứa nào, việc nhận chuyến là quyết định của đối tác.
 - `in_service`: Rental khi đối tác quét QR lúc giao xe. Charter khi đối tác quét QR lúc đón khách.
@@ -281,7 +282,7 @@ Chịu tải **[Builder]**: rate limit theo IP và theo tài khoản cho các en
 
 ## 8. Thanh toán (PayOS)
 
-- Khi một `checkout` cần thanh toán, `payment` tạo một payment link trên PayOS với `orderCode` (số nguyên unique do hệ thống sinh, ánh xạ 1-1 với một lần thanh toán), số tiền bằng `checkouts.total_amount` và hạn bằng hạn Hold hoặc `payment_due_at`. Bảng `payments` lưu `checkout_id`, `provider_order_code`, `amount`, `status` ∈ {`pending`, `paid`, `expired`, `cancelled`} và payload thô.
+- Khi một `checkout` cần thanh toán, `payment` tạo một payment link trên PayOS với `orderCode` (số nguyên unique do hệ thống sinh, ánh xạ 1-1 với một lần thanh toán), số tiền bằng `checkouts.total_amount` và hạn bằng hạn Hold hoặc `payment_due_at`. Bảng `payments` lưu `checkout_id`, `provider_order_code`, `amount`, `status` ∈ {`pending`, `paid`, `expired`, `cancelled`, `needs_review`} và payload thô. `needs_review` dùng khi số tiền không khớp.
 - **Webhook** **[Builder]**:
   1. Xác minh chữ ký bằng checksum key. Sai chữ ký thì từ chối.
   2. Ghi `payment_events` với unique trên mã sự kiện/giao dịch. Sự kiện trùng thì bỏ qua và vẫn trả 200 (idempotent).
@@ -337,7 +338,7 @@ Payout:
 
 - **[Chốt]** Chỉ Booking `completed` mới được đánh giá, mỗi Booking tối đa một Review. Khách đánh giá từ màn lịch sử đơn.
 - `reviews`: `booking_id` (unique), `listing_id`, `partner_id`, `rating` 1–5, `comment`, ảnh, `status` ∈ {`visible`, `hidden_by_admin`}. **[Builder]** Booking `no_show` không đánh giá được. Đối tác được trả lời một lần cho mỗi Review.
-- `listings.rating_avg`/`rating_count` và chỉ số tương ứng của đối tác được cập nhật khi Review được tạo hoặc bị ẩn.
+- `listings.rating_sum`/`rating_count` và chỉ số tương ứng của đối tác được cập nhật khi Review được tạo hoặc bị ẩn.
 - `complaints`: khách gửi về một Booking của mình (**[Builder]** chỉ Booking đã thanh toán), có loại, nội dung, ảnh, `status` ∈ {`open`, `in_progress`, `resolved`, `rejected`}, ghi chú xử lý. **[Chốt]** Khiếu nại **không** tạo hoàn tiền trên sàn. Đối tác tự giải quyết với khách. **[Builder]** Đối tác thấy và trả lời khiếu nại về đơn của mình. Super Admin theo dõi, đóng khiếu nại, và dùng số khiếu nại để quyết định ẩn Listing. Màn admin hiển thị số khiếu nại theo Listing kèm `listing_audit_log`.
 
 ## 12. Thông báo
