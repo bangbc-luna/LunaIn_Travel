@@ -35,7 +35,9 @@ users → partners → listings
 ```
 
 - Dòng `users` khóa bằng `FOR NO KEY UPDATE`, để không chặn việc insert các bảng có FK trỏ về `users`.
+- Dòng `partners` cũng khóa bằng `FOR NO KEY UPDATE` (giống `users`), không dùng `FOR UPDATE`: mỗi lệnh insert vào bảng có FK trỏ về `partners` (`partner_members`, `partner_service_types`, `partner_bank_accounts`, sau này `listings`, `bookings`, ...) ngầm lấy `KEY SHARE` trên dòng đối tác, và `FOR UPDATE` sẽ chặn nó. `FOR NO KEY UPDATE` vẫn xung đột với `FOR SHARE` nên vẫn xếp hàng được với booking.
 - Khi tạo booking hoặc xác nhận lại do tiền về trễ, transaction phải lấy `FOR SHARE` trên dòng `partners` và `listings`. Nhờ vậy, một lệnh đình chỉ đối tác hoặc ẩn Listing commit cùng lúc sẽ được xếp hàng, không bị lọt booking.
+- **Hợp đồng `Status(lock)` trước `IsServiceTypeEnabled`**: `partner.IsServiceTypeEnabled` tự nó không khóa gì. Muốn an toàn với `Suspend` và `DisableServiceType` (cả hai đều khóa dòng `partners` `FOR NO KEY UPDATE`), phải gọi `partner.Status(ctx, tx, id, true)` (lấy `FOR SHARE`) **trước**, trong cùng transaction. Có test khóa hợp đồng này (`internal/partner/lock_test.go`).
 - Dòng sức chứa đứng **trước** booking. Hủy chuyến, job hết hạn và tạo booking mới đều khóa chuyến hoặc mẫu xe trước. Nếu chỉ biết id booking thì đọc id của chuyến hoặc mẫu xe mà không khóa, khóa chuyến hoặc mẫu xe, rồi mới khóa booking và kiểm tra lại trạng thái.
 - Dòng con của booking (`booking_settlements`, `refunds`, ...) chỉ được khóa sau khi đã khóa dòng `bookings`. Job giải phóng tiền cũng phải khóa booking trước.
 - Các dòng khác khóa bằng `FOR UPDATE`.
@@ -157,10 +159,10 @@ Dữ liệu là 34 tỉnh/thành sau sáp nhập 2025, không còn cấp huyện
 | `display_name` | text NOT NULL | tên hiển thị cho khách |
 | `tax_code` | text NULL UNIQUE | đối tác tự cập nhật |
 | `business_license_file_id` | uuid NULL FK files | file `private` |
-| `address`, `province_code`, `ward_code` | | FK sang danh mục địa giới |
+| `address`, `province_code`, `ward_code` | | `province_code` FK `provinces`; FK kép `(ward_code, province_code) → wards(code, province_code)` (`wards` có `UNIQUE(code, province_code)`); CHECK tỉnh và phường cùng NULL hoặc cùng có |
 | `contact_name`, `contact_phone`, `contact_email` | text | |
 | `status` | `active` \| `suspended` | **[Chốt]** spec §5.2 |
-| `suspended_at`, `suspended_reason` | | |
+| `suspended_at`, `suspended_reason` | | CHECK `(status = 'suspended') = (suspended_at IS NOT NULL)`; đang đình chỉ thì `suspended_reason` NOT NULL |
 | `rating_sum int`, `rating_count int` | ≥ 0 | điểm trung bình = sum/count, không lưu số thực |
 | `created_by` | uuid FK users | Super Admin tạo |
 
@@ -433,4 +435,5 @@ Những bất biến DB không tự giữ được (tổng các dòng = `gross_a
 
 - Mọi migration nằm ở `internal/platform/db/migrations`, đánh số liên tục. Mỗi plan thêm file mới và không sửa file cũ.
 - **[Builder]** Mỗi module có một mục riêng trong `sqlc.yaml`. Schema vẫn trỏ vào toàn bộ thư mục migration (sqlc cần đủ schema để kiểm tra FK), nhưng code chỉ được gọi query của chính module mình. Quy tắc này nằm trong code review vì sqlc không tự chặn được.
+  - Ngoại lệ đã chấp nhận (Ruling 12): query `EnabledServiceTypesOf` của module partner `JOIN` chỉ-đọc sang bảng `service_types` của catalog, chỉ để sắp xếp mã loại dịch vụ theo `service_types.sort_order`. Partner không ghi và không khóa `service_types`. Join chỉ-đọc kiểu này (chỉ để sắp xếp/hiển thị) được phép; mọi kiểm tra nghiệp vụ vẫn đi qua service của module sở hữu.
 - Seed (danh mục địa giới, `service_types`, `platform_settings`, `commission_rates` ban đầu) đi bằng migration, để môi trường nào cũng giống nhau.
