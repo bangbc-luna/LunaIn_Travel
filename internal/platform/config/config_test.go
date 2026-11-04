@@ -57,6 +57,16 @@ func TestLoad_ProdRequiresSMTP(t *testing.T) {
 	}
 }
 
+func TestLoad_RejectsNegativeTrustedProxyHops(t *testing.T) {
+	setRequired(t)
+	t.Setenv("TRUSTED_PROXY_HOPS", "-1")
+
+	_, err := config.Load()
+	if err == nil || !strings.Contains(err.Error(), "TRUSTED_PROXY_HOPS") {
+		t.Fatalf("err = %v, want error mentioning TRUSTED_PROXY_HOPS", err)
+	}
+}
+
 func TestLoad_RejectsUnknownEnv(t *testing.T) {
 	setRequired(t)
 	t.Setenv("APP_ENV", "staging")

@@ -107,20 +107,35 @@ func Recover(next http.Handler) http.Handler {
 	})
 }
 
-// ClientIP returns the first X-Forwarded-For entry, else the host of RemoteAddr.
-// Only trustworthy behind a single trusted proxy (phase 1: one instance).
-func ClientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		first, _, _ := strings.Cut(xff, ",")
-		if ip := strings.TrimSpace(first); ip != "" {
-			return ip
+// ClientIPFunc returns a client-IP extractor for use as a RateLimit key.
+//
+// Trust model: clients can put anything in X-Forwarded-For, but each trusted
+// proxy appends the address it saw to the right end. With trustedProxyHops == 0
+// the header is ignored and the TCP peer (RemoteAddr host) is used. With N > 0
+// the N-th entry from the right is used, i.e. the address seen by the outermost
+// trusted proxy; anything the client forged sits further left and is ignored.
+// If the header has fewer than N entries, it falls back to RemoteAddr.
+func ClientIPFunc(trustedProxyHops int) func(*http.Request) string {
+	return func(r *http.Request) string {
+		if trustedProxyHops > 0 {
+			var entries []string
+			for _, v := range r.Header.Values("X-Forwarded-For") {
+				for _, part := range strings.Split(v, ",") {
+					if p := strings.TrimSpace(part); p != "" {
+						entries = append(entries, p)
+					}
+				}
+			}
+			if len(entries) >= trustedProxyHops {
+				return entries[len(entries)-trustedProxyHops]
+			}
 		}
+		host, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			return r.RemoteAddr
+		}
+		return host
 	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
 }
 
 const (

@@ -86,10 +86,35 @@ func TestRateLimit(t *testing.T) {
 	require.NotEmpty(t, last.Header().Get("Retry-After"))
 }
 
-func TestClientIP(t *testing.T) {
+func xffReq(lines ...string) *http.Request {
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	r.RemoteAddr = "1.2.3.4:5555"
-	require.Equal(t, "1.2.3.4", httpx.ClientIP(r))
-	r.Header.Set("X-Forwarded-For", "9.9.9.9, 8.8.8.8")
-	require.Equal(t, "9.9.9.9", httpx.ClientIP(r))
+	for _, l := range lines {
+		r.Header.Add("X-Forwarded-For", l)
+	}
+	return r
+}
+
+func TestClientIPFunc(t *testing.T) {
+	t.Run("hops 0 ignores spoofed XFF", func(t *testing.T) {
+		require.Equal(t, "1.2.3.4", httpx.ClientIPFunc(0)(xffReq("9.9.9.9")))
+	})
+	t.Run("hops 1 takes last", func(t *testing.T) {
+		require.Equal(t, "2.2.2.2", httpx.ClientIPFunc(1)(xffReq("1.1.1.1, 2.2.2.2")))
+	})
+	t.Run("hops 2 takes second from right", func(t *testing.T) {
+		require.Equal(t, "1.1.1.1", httpx.ClientIPFunc(2)(xffReq("1.1.1.1, 2.2.2.2")))
+	})
+	t.Run("too few entries falls back to RemoteAddr", func(t *testing.T) {
+		require.Equal(t, "1.2.3.4", httpx.ClientIPFunc(3)(xffReq("1.1.1.1, 2.2.2.2")))
+	})
+	t.Run("multiple header lines combined in order", func(t *testing.T) {
+		require.Equal(t, "1.1.1.1", httpx.ClientIPFunc(2)(xffReq("1.1.1.1", "2.2.2.2")))
+		require.Equal(t, "2.2.2.2", httpx.ClientIPFunc(1)(xffReq("1.1.1.1", "2.2.2.2")))
+	})
+	t.Run("RemoteAddr without port", func(t *testing.T) {
+		r := xffReq()
+		r.RemoteAddr = "5.6.7.8"
+		require.Equal(t, "5.6.7.8", httpx.ClientIPFunc(0)(r))
+	})
 }
