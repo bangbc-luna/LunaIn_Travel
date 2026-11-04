@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -50,6 +51,7 @@ func TestLoad_RejectsShortSecret(t *testing.T) {
 func TestLoad_ProdRequiresSMTP(t *testing.T) {
 	setRequired(t)
 	t.Setenv("APP_ENV", "prod")
+	t.Setenv("TRUSTED_PROXY_HOPS", "1")
 
 	_, err := config.Load()
 	if err == nil || !strings.Contains(err.Error(), "SMTP_HOST") {
@@ -73,5 +75,27 @@ func TestLoad_RejectsUnknownEnv(t *testing.T) {
 
 	if _, err := config.Load(); err == nil {
 		t.Fatal("want error for APP_ENV=staging")
+	}
+}
+
+func TestLoad_ProdRequiresExplicitTrustedProxyHops(t *testing.T) {
+	setRequired(t)
+	t.Setenv("APP_ENV", "prod")
+	t.Setenv("SMTP_HOST", "smtp.example.com")
+	t.Setenv("TRUSTED_PROXY_HOPS", "") // registers restore
+	os.Unsetenv("TRUSTED_PROXY_HOPS")
+
+	_, err := config.Load()
+	if err == nil || !strings.Contains(err.Error(), "TRUSTED_PROXY_HOPS") {
+		t.Fatalf("err = %v, want error mentioning TRUSTED_PROXY_HOPS", err)
+	}
+
+	t.Setenv("TRUSTED_PROXY_HOPS", "0")
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load with explicit 0: %v", err)
+	}
+	if cfg.TrustedProxyHops != 0 {
+		t.Errorf("TrustedProxyHops = %d, want 0", cfg.TrustedProxyHops)
 	}
 }

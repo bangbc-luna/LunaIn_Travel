@@ -4,6 +4,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"os"
 
 	"github.com/caarlos0/env/v11"
 )
@@ -24,8 +25,12 @@ type Config struct {
 	SMTPUser       string
 	SMTPPassword   string
 	// TrustedProxyHops is how many reverse proxies sit in front of the API
-	// (0 = none; X-Forwarded-For is ignored).
+	// (0 = none; X-Forwarded-For is ignored). In prod it must be set
+	// explicitly: a wrong 0 behind a load balancer makes every client share
+	// the load balancer's rate-limit bucket.
 	TrustedProxyHops int
+
+	trustedProxyHopsSet bool
 }
 
 // rawEnv mirrors the environment; secrets are strings because env would
@@ -65,6 +70,7 @@ func Load() (Config, error) {
 		SMTPPassword:     raw.SMTPPassword,
 		TrustedProxyHops: raw.TrustedProxyHops,
 	}
+	_, cfg.trustedProxyHopsSet = os.LookupEnv("TRUSTED_PROXY_HOPS")
 	if err := cfg.validate(); err != nil {
 		return Config{}, fmt.Errorf("config: %w", err)
 	}
@@ -85,6 +91,9 @@ func (c Config) validate() error {
 	}
 	if c.TrustedProxyHops < 0 {
 		return errors.New("TRUSTED_PROXY_HOPS must not be negative")
+	}
+	if c.AppEnv == "prod" && !c.trustedProxyHopsSet {
+		return errors.New("TRUSTED_PROXY_HOPS must be set explicitly when APP_ENV=prod (0 if no reverse proxy)")
 	}
 	if c.AppEnv == "prod" && c.SMTPHost == "" {
 		return errors.New("SMTP_HOST is required when APP_ENV=prod")
