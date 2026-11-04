@@ -151,6 +151,51 @@ func TestCreateRate_Audited(t *testing.T) {
 	require.Equal(t, 1000, bps)
 }
 
+func TestCreateRate_ConcurrentDuplicate(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	errs := make(chan error, 2)
+	start := make(chan struct{})
+	for _, bps := range []int{1000, 1100} {
+		go func() {
+			<-start
+			_, err := e.Svc.CreateCommissionRate(ctx, e.Admin, "attraction_ticket", bps, nil)
+			errs <- err
+		}()
+	}
+	close(start)
+	var ok, dup int
+	for range 2 {
+		err := <-errs
+		switch {
+		case err == nil:
+			ok++
+		case errors.Is(err, catalog.ErrCommissionRateExists):
+			dup++
+		default:
+			t.Errorf("unexpected error: %v", err)
+		}
+	}
+	require.Equal(t, 1, ok)
+	require.Equal(t, 1, dup)
+}
+
+func TestCreateRate_TruncatesToMicroseconds(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	f1 := now.Add(time.Hour + 123*time.Nanosecond)
+	f2 := now.Add(time.Hour + 456*time.Nanosecond)
+	cr, err := e.Svc.CreateCommissionRate(ctx, e.Admin, "attraction_ticket", 1000, &f1)
+	require.NoError(t, err)
+	require.Equal(t, now.Add(time.Hour), cr.EffectiveFrom)
+	_, err = e.Svc.CreateCommissionRate(ctx, e.Admin, "attraction_ticket", 1100, &f2)
+	require.ErrorIs(t, err, catalog.ErrCommissionRateExists)
+
+	hist, err := e.Svc.CommissionHistory(ctx, "attraction_ticket")
+	require.NoError(t, err)
+	require.Equal(t, cr.EffectiveFrom, hist[0].EffectiveFrom.UTC())
+}
+
 func TestCreateRate_UnknownServiceType(t *testing.T) {
 	e := newEnv(t)
 	_, err := e.Svc.CreateCommissionRate(context.Background(), e.Admin, "nope", 1000, nil)

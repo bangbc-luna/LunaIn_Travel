@@ -44,6 +44,9 @@ func (s *Service) CreateCommissionRate(ctx context.Context, actor uuid.UUID, ser
 	if effectiveFrom != nil {
 		from = *effectiveFrom
 	}
+	// Postgres timestamptz has microsecond precision: truncate so the returned
+	// value equals what is stored and sub-microsecond differences collide.
+	from = from.UTC().Truncate(time.Microsecond)
 	if rateBps < 0 || rateBps > maxRateBps || from.Before(now.Add(-backdateTolerance)) {
 		return CommissionRate{}, ErrInvalidCommission
 	}
@@ -51,7 +54,7 @@ func (s *Service) CreateCommissionRate(ctx context.Context, actor uuid.UUID, ser
 	if err != nil {
 		return CommissionRate{}, fmt.Errorf("commission rate id: %w", err)
 	}
-	cr := CommissionRate{ID: id, ServiceType: serviceType, RateBps: rateBps, EffectiveFrom: from.UTC(), CreatedBy: actor}
+	cr := CommissionRate{ID: id, ServiceType: serviceType, RateBps: rateBps, EffectiveFrom: from, CreatedBy: actor}
 	err = db.InTx(ctx, s.pool, func(tx pgx.Tx) error {
 		if _, err := s.ServiceType(ctx, tx, serviceType); err != nil {
 			return err

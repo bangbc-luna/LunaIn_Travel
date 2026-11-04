@@ -1,6 +1,7 @@
 package catalog_test
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -64,6 +65,29 @@ func TestHTTP_ServiceTypesPublic(t *testing.T) {
 	require.Equal(t, "Vé tham quan", list[0].Name)
 	require.Equal(t, "instant", list[0].BookingMode)
 	require.Equal(t, "request", list[3].BookingMode)
+}
+
+func TestHTTP_CreateRateRequiresFields(t *testing.T) {
+	e := newEnv(t)
+	srv, adminTok, _ := newServer(t, e)
+	for _, c := range []struct{ body, code string }{
+		{`{"service_type":"attraction_ticket"}`, "invalid_commission_rate"},
+		{`{"service_type":"attraction_ticket","rate_bps":null}`, "invalid_commission_rate"},
+		{`{"rate_bps":1000}`, "invalid_service_type"},
+	} {
+		s, body := do(t, srv, "POST", "/v1/admin/commission-rates", adminTok, c.body)
+		require.Equal(t, http.StatusUnprocessableEntity, s, c.body)
+		require.Contains(t, string(body), c.code, c.body)
+	}
+	var rates, audits int
+	require.NoError(t, e.Pool.QueryRow(context.Background(), `SELECT count(*) FROM commission_rates`).Scan(&rates))
+	require.NoError(t, e.Pool.QueryRow(context.Background(), `SELECT count(*) FROM admin_audit_log WHERE action = 'commission_rate.create'`).Scan(&audits))
+	require.Zero(t, rates)
+	require.Zero(t, audits)
+
+	// An explicit 0 is still accepted.
+	s, _ := do(t, srv, "POST", "/v1/admin/commission-rates", adminTok, `{"service_type":"attraction_ticket","rate_bps":0}`)
+	require.Equal(t, http.StatusCreated, s)
 }
 
 func TestHTTP_CommissionAdminOnly(t *testing.T) {

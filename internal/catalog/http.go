@@ -10,9 +10,13 @@ import (
 
 type createRateReq struct {
 	ServiceType   string     `json:"service_type"`
-	RateBps       int        `json:"rate_bps"`
+	RateBps       *int       `json:"rate_bps"`
 	EffectiveFrom *time.Time `json:"effective_from"`
 }
+
+// errMissingRate is returned when rate_bps is absent, so a forgotten field
+// never silently becomes a 0% commission.
+var errMissingRate = httpx.NewError(http.StatusUnprocessableEntity, "invalid_commission_rate", "Thiếu trường rate_bps (tỷ lệ hoa hồng)")
 
 type scheduledRate struct {
 	RateBps       int       `json:"rate_bps"`
@@ -95,8 +99,16 @@ func (s *Service) Routes(mux *http.ServeMux, iss *auth.Issuer) {
 			httpx.WriteError(w, r, err)
 			return
 		}
+		if req.ServiceType == "" {
+			httpx.WriteError(w, r, ErrInvalidServiceType)
+			return
+		}
+		if req.RateBps == nil {
+			httpx.WriteError(w, r, errMissingRate)
+			return
+		}
 		pr, _ := auth.PrincipalFrom(r.Context())
-		cr, err := s.CreateCommissionRate(r.Context(), pr.UserID, req.ServiceType, req.RateBps, req.EffectiveFrom)
+		cr, err := s.CreateCommissionRate(r.Context(), pr.UserID, req.ServiceType, *req.RateBps, req.EffectiveFrom)
 		if err != nil {
 			httpx.WriteError(w, r, err)
 			return
