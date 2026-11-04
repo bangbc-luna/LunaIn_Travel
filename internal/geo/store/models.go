@@ -24,6 +24,16 @@ type AdminAuditLog struct {
 	UpdatedAt   time.Time
 }
 
+type CommissionRate struct {
+	ID            uuid.UUID
+	ServiceType   string
+	RateBps       int32
+	EffectiveFrom time.Time
+	CreatedBy     uuid.UUID
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+}
+
 type CustomerProfile struct {
 	UserID      uuid.UUID
 	FullName    *string
@@ -102,6 +112,15 @@ type RefreshToken struct {
 	RevokedAt *time.Time
 	CreatedAt time.Time
 	UpdatedAt time.Time
+}
+
+type ServiceType struct {
+	Code        string
+	Name        string
+	BookingMode string
+	SortOrder   int32
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
 }
 
 type User struct {
