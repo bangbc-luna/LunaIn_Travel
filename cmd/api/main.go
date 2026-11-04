@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -15,7 +14,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river"
 
 	"github.com/bangbc-luna/lunain-travel/internal/catalog"
@@ -192,16 +190,11 @@ func serve(log *slog.Logger) error {
 		Pool: pool, Clock: clock.Real{}, Users: idSvc, Catalog: catSvc, Geo: geoSvc, Files: fileSvc,
 	})
 
-	mux := http.NewServeMux()
-	idSvc.Routes(mux, issuer, httpx.ClientIPFunc(cfg.TrustedProxyHops))
-	settings.NewService(pool, clock.Real{}).Routes(mux, issuer)
-	fileSvc.Routes(mux, issuer, httpx.ClientIPFunc(cfg.TrustedProxyHops))
-	geoSvc.Routes(mux)
-	catSvc.Routes(mux, issuer)
-	partnerSvc.Routes(mux, issuer)
-	mux.HandleFunc("GET /healthz", healthz)
-	mux.HandleFunc("GET /readyz", readyz(pool))
-	mux.HandleFunc("/", httpx.NotFound)
+	mux := buildMux(muxDeps{
+		Pool: pool, Issuer: issuer, ClientIP: httpx.ClientIPFunc(cfg.TrustedProxyHops),
+		Identity: idSvc, Settings: settings.NewService(pool, clock.Real{}), Files: fileSvc,
+		Geo: geoSvc, Catalog: catSvc, Partner: partnerSvc,
+	})
 
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
@@ -237,23 +230,4 @@ func serve(log *slog.Logger) error {
 		return err
 	}
 	return nil
-}
-
-func healthz(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-}
-
-func readyz(pool *pgxpool.Pool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
-		defer cancel()
-		w.Header().Set("Content-Type", "application/json")
-		if err := pool.Ping(ctx); err != nil {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			_ = json.NewEncoder(w).Encode(map[string]string{"status": "unavailable"})
-			return
-		}
-		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ready"})
-	}
 }

@@ -87,8 +87,14 @@ func NewService(d Deps) *Service {
 
 // CreateInput is what a Super Admin supplies to create a partner.
 type CreateInput struct {
-	LegalName, DisplayName, ContactName, ContactPhone, ContactEmail, OwnerEmail, OwnerPassword string
-	ServiceTypes                                                                               []string
+	LegalName     string   `json:"legal_name"`
+	DisplayName   string   `json:"display_name"`
+	ContactName   string   `json:"contact_name"`
+	ContactPhone  string   `json:"contact_phone"`
+	ContactEmail  string   `json:"contact_email"`
+	OwnerEmail    string   `json:"owner_email"`
+	OwnerPassword string   `json:"owner_password"`
+	ServiceTypes  []string `json:"service_types"`
 }
 
 // Partner is a business selling on the platform. ServiceTypes lists only the

@@ -36,6 +36,7 @@ func (e *env) server(t *testing.T) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
 	e.Svc.Routes(mux, e.issuer())
+	e.Svc.AdminRoutes(mux, e.issuer())
 	mux.HandleFunc("/", httpx.NotFound)
 	srv := httptest.NewServer(httpx.Chain(mux, httpx.RequestID, httpx.Recover))
 	t.Cleanup(srv.Close)
