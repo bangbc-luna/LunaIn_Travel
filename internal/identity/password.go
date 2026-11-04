@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/mail"
+	"runtime"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -29,6 +30,18 @@ const (
 
 var errMalformedHash = errors.New("identity: malformed password hash")
 
+// argonSem bounds concurrent argon2id computations (64 MiB each), so a burst
+// of logins cannot exhaust memory: at most cap(argonSem) run at once and the
+// rest wait their turn.
+var argonSem = make(chan struct{}, max(2, 2*runtime.GOMAXPROCS(0)))
+
+// argonIDKey is argon2.IDKey gated by argonSem.
+func argonIDKey(pw, salt []byte, t, m uint32, p uint8, keyLen uint32) []byte {
+	argonSem <- struct{}{}
+	defer func() { <-argonSem }()
+	return argon2.IDKey(pw, salt, t, m, p, keyLen)
+}
+
 // HashPassword hashes pw with argon2id and returns a PHC string
 // "$argon2id$v=19$m=65536,t=3,p=2$<salt>$<hash>".
 func HashPassword(pw string) (string, error) {
@@ -36,7 +49,7 @@ func HashPassword(pw string) (string, error) {
 	if _, err := rand.Read(salt); err != nil {
 		return "", err
 	}
-	key := argon2.IDKey([]byte(pw), salt, argonTime, argonMemory, argonThreads, argonKeyLen)
+	key := argonIDKey([]byte(pw), salt, argonTime, argonMemory, argonThreads, argonKeyLen)
 	b64 := base64.RawStdEncoding
 	return fmt.Sprintf("$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s",
 		argon2.Version, argonMemory, argonTime, argonThreads,
@@ -70,7 +83,7 @@ func VerifyPassword(encoded, pw string) (bool, error) {
 	if err != nil || len(want) == 0 {
 		return false, errMalformedHash
 	}
-	got := argon2.IDKey([]byte(pw), salt, t, m, p, uint32(len(want)))
+	got := argonIDKey([]byte(pw), salt, t, m, p, uint32(len(want)))
 	return subtle.ConstantTimeCompare(got, want) == 1, nil
 }
 

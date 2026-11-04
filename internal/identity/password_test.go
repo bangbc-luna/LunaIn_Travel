@@ -2,6 +2,7 @@ package identity
 
 import (
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -61,4 +62,28 @@ func TestNormalizeEmail(t *testing.T) {
 
 	_, err = NormalizeEmail("")
 	require.ErrorIs(t, err, ErrInvalidEmail)
+}
+
+func TestArgonSemaphore_BoundsAndAllowsConcurrentVerify(t *testing.T) {
+	require.GreaterOrEqual(t, cap(argonSem), 2)
+
+	h, err := HashPassword("abc12345")
+	require.NoError(t, err)
+	const n = 16
+	results := make([]bool, n)
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results[i], errs[i] = VerifyPassword(h, "abc12345")
+		}()
+	}
+	wg.Wait()
+	for i := range n {
+		require.NoError(t, errs[i])
+		require.True(t, results[i], "goroutine %d", i)
+	}
+	require.Zero(t, len(argonSem), "all slots released")
 }
