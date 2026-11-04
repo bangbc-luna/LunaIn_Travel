@@ -13,16 +13,22 @@ var (
 	ErrInvalidSuspendReason  = httpx.NewError(http.StatusUnprocessableEntity, "invalid_suspend_reason", "Vui lòng nhập lý do đình chỉ (tối đa 500 ký tự)")
 	ErrAlreadySuspended      = httpx.NewError(http.StatusConflict, "partner_already_suspended", "Đối tác đang bị đình chỉ")
 	ErrNotSuspended          = httpx.NewError(http.StatusConflict, "partner_not_suspended", "Đối tác không bị đình chỉ")
+	ErrTaxCodeTaken          = httpx.NewError(http.StatusConflict, "tax_code_taken", "Mã số thuế đã được đối tác khác sử dụng")
+	ErrInvalidBankAccount    = httpx.NewError(http.StatusUnprocessableEntity, "invalid_bank_account", "Thông tin tài khoản ngân hàng không hợp lệ")
 )
 
-// invalidPartnerError carries a field-specific Vietnamese message while still
-// matching ErrInvalidPartner with errors.Is.
-type invalidPartnerError struct{ app *httpx.AppError }
+// fieldError carries a field-specific Vietnamese message while still matching
+// its sentinel (ErrInvalidPartner, ErrInvalidBankAccount) with errors.Is.
+type fieldError struct{ app, sentinel *httpx.AppError }
 
-func (e *invalidPartnerError) Error() string        { return e.app.Error() }
-func (e *invalidPartnerError) Unwrap() error        { return e.app }
-func (e *invalidPartnerError) Is(target error) bool { return target == ErrInvalidPartner }
+func (e *fieldError) Error() string        { return e.app.Error() }
+func (e *fieldError) Unwrap() error        { return e.app }
+func (e *fieldError) Is(target error) bool { return target == e.sentinel }
 
-func invalidPartner(msg string) error {
-	return &invalidPartnerError{app: httpx.NewError(ErrInvalidPartner.Status, ErrInvalidPartner.Code, msg)}
+func fieldErr(sentinel *httpx.AppError, msg string) error {
+	return &fieldError{app: httpx.NewError(sentinel.Status, sentinel.Code, msg), sentinel: sentinel}
 }
+
+func invalidPartner(msg string) error { return fieldErr(ErrInvalidPartner, msg) }
+
+func invalidBankAccount(msg string) error { return fieldErr(ErrInvalidBankAccount, msg) }

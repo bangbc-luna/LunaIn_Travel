@@ -13,6 +13,42 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const clearCurrentBankAccount = `-- name: ClearCurrentBankAccount :exec
+UPDATE partner_bank_accounts SET is_current = false, updated_at = $1
+WHERE partner_id = $2 AND is_current
+`
+
+type ClearCurrentBankAccountParams struct {
+	Now       time.Time
+	PartnerID uuid.UUID
+}
+
+func (q *Queries) ClearCurrentBankAccount(ctx context.Context, arg ClearCurrentBankAccountParams) error {
+	_, err := q.db.Exec(ctx, clearCurrentBankAccount, arg.Now, arg.PartnerID)
+	return err
+}
+
+const currentBankAccount = `-- name: CurrentBankAccount :one
+SELECT id, partner_id, bank_bin, bank_name, account_number, account_holder, is_current, created_at, updated_at FROM partner_bank_accounts WHERE partner_id = $1 AND is_current
+`
+
+func (q *Queries) CurrentBankAccount(ctx context.Context, partnerID uuid.UUID) (PartnerBankAccount, error) {
+	row := q.db.QueryRow(ctx, currentBankAccount, partnerID)
+	var i PartnerBankAccount
+	err := row.Scan(
+		&i.ID,
+		&i.PartnerID,
+		&i.BankBin,
+		&i.BankName,
+		&i.AccountNumber,
+		&i.AccountHolder,
+		&i.IsCurrent,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const disableServiceType = `-- name: DisableServiceType :execrows
 UPDATE partner_service_types
 SET disabled_at = $1::timestamptz, disabled_by = $2::uuid, updated_at = $1
@@ -134,6 +170,78 @@ func (q *Queries) GetPartner(ctx context.Context, id uuid.UUID) (Partner, error)
 	return i, err
 }
 
+const getPartnerForUpdate = `-- name: GetPartnerForUpdate :one
+SELECT id, legal_name, display_name, tax_code, business_license_file_id, address, province_code, ward_code, contact_name, contact_phone, contact_email, status, suspended_at, suspended_reason, rating_sum, rating_count, created_by, created_at, updated_at FROM partners WHERE id = $1 FOR UPDATE
+`
+
+func (q *Queries) GetPartnerForUpdate(ctx context.Context, id uuid.UUID) (Partner, error) {
+	row := q.db.QueryRow(ctx, getPartnerForUpdate, id)
+	var i Partner
+	err := row.Scan(
+		&i.ID,
+		&i.LegalName,
+		&i.DisplayName,
+		&i.TaxCode,
+		&i.BusinessLicenseFileID,
+		&i.Address,
+		&i.ProvinceCode,
+		&i.WardCode,
+		&i.ContactName,
+		&i.ContactPhone,
+		&i.ContactEmail,
+		&i.Status,
+		&i.SuspendedAt,
+		&i.SuspendedReason,
+		&i.RatingSum,
+		&i.RatingCount,
+		&i.CreatedBy,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const insertBankAccount = `-- name: InsertBankAccount :one
+INSERT INTO partner_bank_accounts (id, partner_id, bank_bin, bank_name, account_number, account_holder, is_current, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, true, $7, $7)
+RETURNING id, partner_id, bank_bin, bank_name, account_number, account_holder, is_current, created_at, updated_at
+`
+
+type InsertBankAccountParams struct {
+	ID            uuid.UUID
+	PartnerID     uuid.UUID
+	BankBin       string
+	BankName      string
+	AccountNumber string
+	AccountHolder string
+	Now           time.Time
+}
+
+func (q *Queries) InsertBankAccount(ctx context.Context, arg InsertBankAccountParams) (PartnerBankAccount, error) {
+	row := q.db.QueryRow(ctx, insertBankAccount,
+		arg.ID,
+		arg.PartnerID,
+		arg.BankBin,
+		arg.BankName,
+		arg.AccountNumber,
+		arg.AccountHolder,
+		arg.Now,
+	)
+	var i PartnerBankAccount
+	err := row.Scan(
+		&i.ID,
+		&i.PartnerID,
+		&i.BankBin,
+		&i.BankName,
+		&i.AccountNumber,
+		&i.AccountHolder,
+		&i.IsCurrent,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const insertMember = `-- name: InsertMember :exec
 INSERT INTO partner_members (partner_id, user_id, role, created_at, updated_at)
 VALUES ($1, $2, $3, $4, $4)
@@ -203,6 +311,41 @@ func (q *Queries) IsServiceTypeEnabled(ctx context.Context, arg IsServiceTypeEna
 	var exists bool
 	err := row.Scan(&exists)
 	return exists, err
+}
+
+const listBankAccounts = `-- name: ListBankAccounts :many
+SELECT id, partner_id, bank_bin, bank_name, account_number, account_holder, is_current, created_at, updated_at FROM partner_bank_accounts WHERE partner_id = $1
+ORDER BY created_at DESC, id DESC
+`
+
+func (q *Queries) ListBankAccounts(ctx context.Context, partnerID uuid.UUID) ([]PartnerBankAccount, error) {
+	rows, err := q.db.Query(ctx, listBankAccounts, partnerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []PartnerBankAccount
+	for rows.Next() {
+		var i PartnerBankAccount
+		if err := rows.Scan(
+			&i.ID,
+			&i.PartnerID,
+			&i.BankBin,
+			&i.BankName,
+			&i.AccountNumber,
+			&i.AccountHolder,
+			&i.IsCurrent,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listPartners = `-- name: ListPartners :many
@@ -277,6 +420,17 @@ func (q *Queries) LockPartner(ctx context.Context, id uuid.UUID) (string, error)
 	var status string
 	err := row.Scan(&status)
 	return status, err
+}
+
+const memberPartnerID = `-- name: MemberPartnerID :one
+SELECT partner_id FROM partner_members WHERE user_id = $1
+`
+
+func (q *Queries) MemberPartnerID(ctx context.Context, userID uuid.UUID) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, memberPartnerID, userID)
+	var partner_id uuid.UUID
+	err := row.Scan(&partner_id)
+	return partner_id, err
 }
 
 const ownersOf = `-- name: OwnersOf :many
@@ -379,4 +533,50 @@ func (q *Queries) SharePartnerStatus(ctx context.Context, id uuid.UUID) (string,
 	var status string
 	err := row.Scan(&status)
 	return status, err
+}
+
+const updateProfile = `-- name: UpdateProfile :exec
+UPDATE partners
+SET display_name = $1,
+    tax_code = $2,
+    business_license_file_id = $3,
+    address = $4,
+    province_code = $5,
+    ward_code = $6,
+    contact_name = $7,
+    contact_phone = $8,
+    contact_email = $9,
+    updated_at = $10
+WHERE id = $11
+`
+
+type UpdateProfileParams struct {
+	DisplayName           string
+	TaxCode               *string
+	BusinessLicenseFileID pgtype.UUID
+	Address               *string
+	ProvinceCode          *string
+	WardCode              *string
+	ContactName           string
+	ContactPhone          string
+	ContactEmail          string
+	Now                   time.Time
+	ID                    uuid.UUID
+}
+
+func (q *Queries) UpdateProfile(ctx context.Context, arg UpdateProfileParams) error {
+	_, err := q.db.Exec(ctx, updateProfile,
+		arg.DisplayName,
+		arg.TaxCode,
+		arg.BusinessLicenseFileID,
+		arg.Address,
+		arg.ProvinceCode,
+		arg.WardCode,
+		arg.ContactName,
+		arg.ContactPhone,
+		arg.ContactEmail,
+		arg.Now,
+		arg.ID,
+	)
+	return err
 }

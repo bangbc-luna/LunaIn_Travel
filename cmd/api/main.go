@@ -22,6 +22,7 @@ import (
 	"github.com/bangbc-luna/lunain-travel/internal/files"
 	"github.com/bangbc-luna/lunain-travel/internal/geo"
 	"github.com/bangbc-luna/lunain-travel/internal/identity"
+	"github.com/bangbc-luna/lunain-travel/internal/partner"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/auth"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/clock"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/config"
@@ -184,12 +185,20 @@ func serve(log *slog.Logger) error {
 		return err
 	}
 
+	fileSvc := files.NewService(pool, objects, clock.Real{}, cfg.PublicFileBaseURL)
+	geoSvc := geo.NewService(pool)
+	catSvc := catalog.NewService(pool, clock.Real{})
+	partnerSvc := partner.NewService(partner.Deps{
+		Pool: pool, Clock: clock.Real{}, Users: idSvc, Catalog: catSvc, Geo: geoSvc, Files: fileSvc,
+	})
+
 	mux := http.NewServeMux()
 	idSvc.Routes(mux, issuer, httpx.ClientIPFunc(cfg.TrustedProxyHops))
 	settings.NewService(pool, clock.Real{}).Routes(mux, issuer)
-	files.NewService(pool, objects, clock.Real{}, cfg.PublicFileBaseURL).Routes(mux, issuer, httpx.ClientIPFunc(cfg.TrustedProxyHops))
-	geo.NewService(pool).Routes(mux)
-	catalog.NewService(pool, clock.Real{}).Routes(mux, issuer)
+	fileSvc.Routes(mux, issuer, httpx.ClientIPFunc(cfg.TrustedProxyHops))
+	geoSvc.Routes(mux)
+	catSvc.Routes(mux, issuer)
+	partnerSvc.Routes(mux, issuer)
 	mux.HandleFunc("GET /healthz", healthz)
 	mux.HandleFunc("GET /readyz", readyz(pool))
 	mux.HandleFunc("/", httpx.NotFound)

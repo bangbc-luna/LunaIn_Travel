@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"regexp"
 	"strings"
 	"time"
 	_ "time/tzdata" // Asia/Ho_Chi_Minh must resolve on minimal hosts
@@ -18,6 +17,7 @@ import (
 	"github.com/bangbc-luna/lunain-travel/internal/identity/store"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/db"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/httpx"
+	"github.com/bangbc-luna/lunain-travel/internal/platform/validate"
 )
 
 const (
@@ -25,11 +25,7 @@ const (
 	dateLayout       = "2006-01-02"
 )
 
-var (
-	phoneRe    = regexp.MustCompile(`^0\d{9}$`)
-	phoneStrip = strings.NewReplacer(" ", "", ".", "", "-", "")
-	vnLocation = mustLoadLocation("Asia/Ho_Chi_Minh")
-)
+var vnLocation = mustLoadLocation("Asia/Ho_Chi_Minh")
 
 func mustLoadLocation(name string) *time.Location {
 	loc, err := time.LoadLocation(name)
@@ -80,14 +76,11 @@ func normalizeFullName(s string) (string, error) {
 }
 
 func normalizePhone(s string) (string, error) {
-	s = phoneStrip.Replace(strings.TrimSpace(s))
-	if rest, ok := strings.CutPrefix(s, "+84"); ok {
-		s = "0" + rest
-	}
-	if !phoneRe.MatchString(s) {
+	v, ok := validate.NormalizePhone(s)
+	if !ok {
 		return "", invalidProfile("phone phải gồm 10 chữ số và bắt đầu bằng 0 (hoặc +84)")
 	}
-	return s, nil
+	return v, nil
 }
 
 func (s *Service) parseDOB(v string) (time.Time, error) {

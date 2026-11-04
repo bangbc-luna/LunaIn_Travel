@@ -146,16 +146,11 @@ func (in CreateInput) normalize() (CreateInput, error) {
 	if out.ContactName, err = normalizeText(in.ContactName, "contact_name", false, maxTextLen); err != nil {
 		return out, err
 	}
-	if out.ContactPhone, err = normalizeText(in.ContactPhone, "contact_phone", false, maxTextLen); err != nil {
+	if out.ContactPhone, err = normalizeContactPhone(in.ContactPhone); err != nil {
 		return out, err
 	}
-	if out.ContactEmail, err = normalizeText(in.ContactEmail, "contact_email", false, maxTextLen); err != nil {
+	if out.ContactEmail, err = normalizeContactEmail(in.ContactEmail); err != nil {
 		return out, err
-	}
-	if out.ContactEmail != "" {
-		if out.ContactEmail, err = identity.NormalizeEmail(out.ContactEmail); err != nil {
-			return out, invalidPartner("contact_email không hợp lệ")
-		}
 	}
 	// The owner email is validated by identity; normalized here only so the
 	// audit entry records the stored form.

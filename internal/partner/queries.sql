@@ -73,3 +73,39 @@ WHERE id = @id;
 UPDATE partners
 SET status = 'active', suspended_at = NULL, suspended_reason = NULL, updated_at = @now
 WHERE id = @id;
+
+-- name: MemberPartnerID :one
+SELECT partner_id FROM partner_members WHERE user_id = @user_id;
+
+-- name: GetPartnerForUpdate :one
+SELECT * FROM partners WHERE id = @id FOR UPDATE;
+
+-- name: UpdateProfile :exec
+UPDATE partners
+SET display_name = @display_name,
+    tax_code = sqlc.narg(tax_code),
+    business_license_file_id = sqlc.narg(business_license_file_id),
+    address = sqlc.narg(address),
+    province_code = sqlc.narg(province_code),
+    ward_code = sqlc.narg(ward_code),
+    contact_name = @contact_name,
+    contact_phone = @contact_phone,
+    contact_email = @contact_email,
+    updated_at = @now
+WHERE id = @id;
+
+-- name: ClearCurrentBankAccount :exec
+UPDATE partner_bank_accounts SET is_current = false, updated_at = @now
+WHERE partner_id = @partner_id AND is_current;
+
+-- name: InsertBankAccount :one
+INSERT INTO partner_bank_accounts (id, partner_id, bank_bin, bank_name, account_number, account_holder, is_current, created_at, updated_at)
+VALUES (@id, @partner_id, @bank_bin, @bank_name, @account_number, @account_holder, true, @now, @now)
+RETURNING *;
+
+-- name: ListBankAccounts :many
+SELECT * FROM partner_bank_accounts WHERE partner_id = @partner_id
+ORDER BY created_at DESC, id DESC;
+
+-- name: CurrentBankAccount :one
+SELECT * FROM partner_bank_accounts WHERE partner_id = @partner_id AND is_current;
