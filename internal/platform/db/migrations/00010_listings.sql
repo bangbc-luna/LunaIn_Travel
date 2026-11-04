@@ -53,7 +53,7 @@ CREATE TABLE listings (
     CHECK (visibility <> 'hidden_by_admin' OR hidden_reason IS NOT NULL)
 );
 
-CREATE INDEX listings_partner_idx ON listings (partner_id, created_at DESC);
+CREATE INDEX listings_partner_idx ON listings (partner_id, id DESC);
 CREATE INDEX listings_public_idx ON listings (service_type, province_code)
     WHERE review_status = 'approved' AND visibility = 'published';
 CREATE INDEX listings_title_trgm_idx ON listings USING gin (f_unaccent(lower(title)) gin_trgm_ops);
@@ -71,7 +71,32 @@ CREATE TABLE listing_audit_log (
 
 CREATE INDEX listing_audit_log_listing_idx ON listing_audit_log (listing_id, created_at DESC);
 
+-- Gallery of a listing; sort_order is the position in the partner's list.
+CREATE TABLE listing_images (
+    id         uuid PRIMARY KEY,
+    listing_id uuid NOT NULL REFERENCES listings (id),
+    file_id    uuid NOT NULL REFERENCES files (id),
+    sort_order int  NOT NULL CHECK (sort_order >= 0),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (listing_id, sort_order),
+    UNIQUE (listing_id, file_id)
+);
+
+-- Refund tiers: cancelling at least hours_before hours ahead refunds refund_bps/10000.
+CREATE TABLE listing_cancellation_tiers (
+    id           uuid PRIMARY KEY,
+    listing_id   uuid NOT NULL REFERENCES listings (id),
+    hours_before int  NOT NULL CHECK (hours_before BETWEEN 0 AND 8760),
+    refund_bps   int  NOT NULL CHECK (refund_bps BETWEEN 0 AND 10000),
+    created_at   timestamptz NOT NULL DEFAULT now(),
+    updated_at   timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (listing_id, hours_before)
+);
+
 -- +goose Down
+DROP TABLE listing_cancellation_tiers;
+DROP TABLE listing_images;
 DROP TABLE listing_audit_log;
 DROP TABLE listings;
 DROP FUNCTION f_unaccent(text);

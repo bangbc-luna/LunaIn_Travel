@@ -12,6 +12,24 @@ import (
 	"github.com/google/uuid"
 )
 
+const deleteCancellationTiers = `-- name: DeleteCancellationTiers :exec
+DELETE FROM listing_cancellation_tiers WHERE listing_id = $1
+`
+
+func (q *Queries) DeleteCancellationTiers(ctx context.Context, listingID uuid.UUID) error {
+	_, err := q.db.Exec(ctx, deleteCancellationTiers, listingID)
+	return err
+}
+
+const deleteListingImages = `-- name: DeleteListingImages :exec
+DELETE FROM listing_images WHERE listing_id = $1
+`
+
+func (q *Queries) DeleteListingImages(ctx context.Context, listingID uuid.UUID) error {
+	_, err := q.db.Exec(ctx, deleteListingImages, listingID)
+	return err
+}
+
 const getOwnedListing = `-- name: GetOwnedListing :one
 SELECT id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, rating_sum, rating_count, created_at, updated_at FROM listings WHERE id = $1 AND partner_id = $2
 `
@@ -76,6 +94,30 @@ func (q *Queries) InsertAuditLog(ctx context.Context, arg InsertAuditLogParams) 
 		arg.ActorUserID,
 		arg.Action,
 		arg.Changes,
+		arg.Now,
+	)
+	return err
+}
+
+const insertCancellationTier = `-- name: InsertCancellationTier :exec
+INSERT INTO listing_cancellation_tiers (id, listing_id, hours_before, refund_bps, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $5)
+`
+
+type InsertCancellationTierParams struct {
+	ID          uuid.UUID
+	ListingID   uuid.UUID
+	HoursBefore int32
+	RefundBps   int32
+	Now         time.Time
+}
+
+func (q *Queries) InsertCancellationTier(ctx context.Context, arg InsertCancellationTierParams) error {
+	_, err := q.db.Exec(ctx, insertCancellationTier,
+		arg.ID,
+		arg.ListingID,
+		arg.HoursBefore,
+		arg.RefundBps,
 		arg.Now,
 	)
 	return err
@@ -158,6 +200,92 @@ func (q *Queries) InsertListing(ctx context.Context, arg InsertListingParams) (L
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const insertListingImage = `-- name: InsertListingImage :exec
+INSERT INTO listing_images (id, listing_id, file_id, sort_order, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $5)
+`
+
+type InsertListingImageParams struct {
+	ID        uuid.UUID
+	ListingID uuid.UUID
+	FileID    uuid.UUID
+	SortOrder int32
+	Now       time.Time
+}
+
+func (q *Queries) InsertListingImage(ctx context.Context, arg InsertListingImageParams) error {
+	_, err := q.db.Exec(ctx, insertListingImage,
+		arg.ID,
+		arg.ListingID,
+		arg.FileID,
+		arg.SortOrder,
+		arg.Now,
+	)
+	return err
+}
+
+const listCancellationTiers = `-- name: ListCancellationTiers :many
+SELECT id, listing_id, hours_before, refund_bps, created_at, updated_at FROM listing_cancellation_tiers WHERE listing_id = $1 ORDER BY hours_before DESC
+`
+
+func (q *Queries) ListCancellationTiers(ctx context.Context, listingID uuid.UUID) ([]ListingCancellationTier, error) {
+	rows, err := q.db.Query(ctx, listCancellationTiers, listingID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListingCancellationTier
+	for rows.Next() {
+		var i ListingCancellationTier
+		if err := rows.Scan(
+			&i.ID,
+			&i.ListingID,
+			&i.HoursBefore,
+			&i.RefundBps,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listListingImages = `-- name: ListListingImages :many
+SELECT id, listing_id, file_id, sort_order, created_at, updated_at FROM listing_images WHERE listing_id = $1 ORDER BY sort_order
+`
+
+func (q *Queries) ListListingImages(ctx context.Context, listingID uuid.UUID) ([]ListingImage, error) {
+	rows, err := q.db.Query(ctx, listListingImages, listingID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListingImage
+	for rows.Next() {
+		var i ListingImage
+		if err := rows.Scan(
+			&i.ID,
+			&i.ListingID,
+			&i.FileID,
+			&i.SortOrder,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listOwnListings = `-- name: ListOwnListings :many
@@ -274,6 +402,58 @@ func (q *Queries) LockOwnedListing(ctx context.Context, arg LockOwnedListingPara
 	return i, err
 }
 
+const setListingCover = `-- name: SetListingCover :one
+UPDATE listings SET cover_file_id = $1, updated_at = $2
+WHERE id = $3 AND partner_id = $4
+RETURNING id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, rating_sum, rating_count, created_at, updated_at
+`
+
+type SetListingCoverParams struct {
+	CoverFileID *uuid.UUID
+	Now         time.Time
+	ID          uuid.UUID
+	PartnerID   uuid.UUID
+}
+
+func (q *Queries) SetListingCover(ctx context.Context, arg SetListingCoverParams) (Listing, error) {
+	row := q.db.QueryRow(ctx, setListingCover,
+		arg.CoverFileID,
+		arg.Now,
+		arg.ID,
+		arg.PartnerID,
+	)
+	var i Listing
+	err := row.Scan(
+		&i.ID,
+		&i.PartnerID,
+		&i.ServiceType,
+		&i.Title,
+		&i.Slug,
+		&i.Summary,
+		&i.Description,
+		&i.CoverFileID,
+		&i.ProvinceCode,
+		&i.WardCode,
+		&i.Address,
+		&i.Latitude,
+		&i.Longitude,
+		&i.ReviewStatus,
+		&i.RejectionReason,
+		&i.SubmittedAt,
+		&i.ReviewedAt,
+		&i.ReviewedBy,
+		&i.Visibility,
+		&i.HiddenReason,
+		&i.HiddenAt,
+		&i.HiddenBy,
+		&i.RatingSum,
+		&i.RatingCount,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const updateListingContent = `-- name: UpdateListingContent :one
 UPDATE listings
 SET title = $1,
@@ -285,7 +465,7 @@ SET title = $1,
     latitude = $7,
     longitude = $8,
     updated_at = $9
-WHERE id = $10
+WHERE id = $10 AND partner_id = $11
 RETURNING id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, rating_sum, rating_count, created_at, updated_at
 `
 
@@ -300,6 +480,7 @@ type UpdateListingContentParams struct {
 	Longitude    *float64
 	Now          time.Time
 	ID           uuid.UUID
+	PartnerID    uuid.UUID
 }
 
 func (q *Queries) UpdateListingContent(ctx context.Context, arg UpdateListingContentParams) (Listing, error) {
@@ -314,6 +495,7 @@ func (q *Queries) UpdateListingContent(ctx context.Context, arg UpdateListingCon
 		arg.Longitude,
 		arg.Now,
 		arg.ID,
+		arg.PartnerID,
 	)
 	var i Listing
 	err := row.Scan(

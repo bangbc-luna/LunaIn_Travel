@@ -103,4 +103,59 @@ func (s *Service) PartnerRoutes(mux httpx.Router, iss *auth.Issuer, requireMembe
 		l, err := s.Update(r.Context(), partnerID, userID, id, in)
 		reply(w, r, http.StatusOK, l, err)
 	}))
+
+	mux.Handle("PUT /v1/partner/listings/{id}/images", withID(func(w http.ResponseWriter, r *http.Request, partnerID, userID, id uuid.UUID) {
+		var in struct {
+			FileIDs     []uuid.UUID `json:"file_ids"`
+			CoverFileID *uuid.UUID  `json:"cover_file_id"`
+		}
+		if err := httpx.DecodeJSON(r, &in); err != nil {
+			httpx.WriteError(w, r, err)
+			return
+		}
+		l, err := s.SetImages(r.Context(), partnerID, userID, id, in.FileIDs, in.CoverFileID)
+		if err != nil {
+			httpx.WriteError(w, r, err)
+			return
+		}
+		images, err := listImages(r.Context(), s.pool, id)
+		if err != nil {
+			httpx.WriteError(w, r, err)
+			return
+		}
+		httpx.WriteJSON(w, http.StatusOK, struct {
+			Images      []Image    `json:"images"`
+			CoverFileID *uuid.UUID `json:"cover_file_id"`
+		}{images, l.CoverFileID})
+	}))
+
+	type policyBody struct {
+		Tiers []CancellationTier `json:"tiers"`
+	}
+	mux.Handle("GET /v1/partner/listings/{id}/cancellation-policy", withID(func(w http.ResponseWriter, r *http.Request, partnerID, _, id uuid.UUID) {
+		if _, err := s.Get(r.Context(), partnerID, id); err != nil {
+			httpx.WriteError(w, r, err)
+			return
+		}
+		tiers, err := listTiers(r.Context(), s.pool, id)
+		if err != nil {
+			httpx.WriteError(w, r, err)
+			return
+		}
+		httpx.WriteJSON(w, http.StatusOK, policyBody{tiers})
+	}))
+
+	mux.Handle("PUT /v1/partner/listings/{id}/cancellation-policy", withID(func(w http.ResponseWriter, r *http.Request, partnerID, userID, id uuid.UUID) {
+		var in policyBody
+		if err := httpx.DecodeJSON(r, &in); err != nil {
+			httpx.WriteError(w, r, err)
+			return
+		}
+		tiers, err := s.SetCancellationPolicy(r.Context(), partnerID, userID, id, in.Tiers)
+		if err != nil {
+			httpx.WriteError(w, r, err)
+			return
+		}
+		httpx.WriteJSON(w, http.StatusOK, policyBody{tiers})
+	}))
 }

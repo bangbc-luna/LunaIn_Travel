@@ -179,6 +179,9 @@ var partnerRoutes = []route{
 	{"GET /v1/partner/listings", "/v1/partner/listings"},
 	{"GET /v1/partner/listings/{id}", "/v1/partner/listings/" + uuid.Nil.String()},
 	{"PATCH /v1/partner/listings/{id}", "/v1/partner/listings/" + uuid.Nil.String()},
+	{"PUT /v1/partner/listings/{id}/images", "/v1/partner/listings/" + uuid.Nil.String() + "/images"},
+	{"GET /v1/partner/listings/{id}/cancellation-policy", "/v1/partner/listings/" + uuid.Nil.String() + "/cancellation-policy"},
+	{"PUT /v1/partner/listings/{id}/cancellation-policy", "/v1/partner/listings/" + uuid.Nil.String() + "/cancellation-policy"},
 }
 
 // recordedUnder returns the recorded patterns whose path starts with prefix.

@@ -114,6 +114,24 @@ type ListingAuditLog struct {
 	UpdatedAt   time.Time
 }
 
+type ListingCancellationTier struct {
+	ID          uuid.UUID
+	ListingID   uuid.UUID
+	HoursBefore int32
+	RefundBps   int32
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
+type ListingImage struct {
+	ID        uuid.UUID
+	ListingID uuid.UUID
+	FileID    uuid.UUID
+	SortOrder int32
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
 type Partner struct {
 	ID                    uuid.UUID
 	LegalName             string

@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"image"
+	"image/png"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -42,6 +44,7 @@ type env struct {
 	Identity *identity.Service
 	Issuer   *auth.Issuer
 	Pool     *pgxpool.Pool
+	Files    *files.Service
 	Clock    *clock.Fixed
 	Admin    uuid.UUID
 	Handler  http.Handler
@@ -69,7 +72,7 @@ func newEnv(t *testing.T) *env {
 	svc.PartnerRoutes(mux, iss, pSvc.RequireMember())
 	mux.HandleFunc("/", httpx.NotFound)
 	e := &env{
-		Svc: svc, Partner: pSvc, Identity: idSvc, Issuer: iss, Pool: pool, Clock: clk,
+		Svc: svc, Files: fileSvc, Partner: pSvc, Identity: idSvc, Issuer: iss, Pool: pool, Clock: clk,
 		Handler: httpx.Chain(mux, httpx.RequestID, httpx.Recover),
 	}
 	require.NoError(t, db.InTx(context.Background(), pool, func(tx pgx.Tx) error {
@@ -191,3 +194,13 @@ func appCode(t *testing.T, err error) (int, string) {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+// upload stores a 1x1 png uploaded by userID with the given purpose.
+func (e *env) upload(t *testing.T, userID uuid.UUID, purpose string) uuid.UUID {
+	t.Helper()
+	var buf bytes.Buffer
+	require.NoError(t, png.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 1, 1))))
+	f, err := e.Files.Upload(context.Background(), auth.Principal{UserID: userID, Role: auth.RolePartner}, purpose, &buf)
+	require.NoError(t, err)
+	return f.ID
+}

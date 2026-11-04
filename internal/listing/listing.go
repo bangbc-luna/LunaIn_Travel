@@ -529,7 +529,7 @@ func (s *Service) Update(ctx context.Context, partnerID, actor, id uuid.UUID, in
 			}
 		}
 		out, err = store.New(tx).UpdateListingContent(ctx, store.UpdateListingContentParams{
-			ID: id, Title: c.Title, Summary: c.Summary, Description: c.Description, Address: c.Address,
+			ID: id, PartnerID: partnerID, Title: c.Title, Summary: c.Summary, Description: c.Description, Address: c.Address,
 			ProvinceCode: c.ProvinceCode, WardCode: c.WardCode,
 			Latitude: c.Latitude, Longitude: c.Longitude, Now: now,
 		})

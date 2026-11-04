@@ -40,9 +40,34 @@ SET title = @title,
     latitude = sqlc.narg(latitude),
     longitude = sqlc.narg(longitude),
     updated_at = @now
-WHERE id = @id
+WHERE id = @id AND partner_id = @partner_id
 RETURNING *;
 
 -- name: InsertAuditLog :exec
 INSERT INTO listing_audit_log (id, listing_id, actor_user_id, action, changes, created_at, updated_at)
 VALUES (@id, @listing_id, @actor_user_id, @action, @changes, @now, @now);
+
+-- name: DeleteListingImages :exec
+DELETE FROM listing_images WHERE listing_id = @listing_id;
+
+-- name: InsertListingImage :exec
+INSERT INTO listing_images (id, listing_id, file_id, sort_order, created_at, updated_at)
+VALUES (@id, @listing_id, @file_id, @sort_order, @now, @now);
+
+-- name: ListListingImages :many
+SELECT * FROM listing_images WHERE listing_id = @listing_id ORDER BY sort_order;
+
+-- name: SetListingCover :one
+UPDATE listings SET cover_file_id = sqlc.narg(cover_file_id), updated_at = @now
+WHERE id = @id AND partner_id = @partner_id
+RETURNING *;
+
+-- name: DeleteCancellationTiers :exec
+DELETE FROM listing_cancellation_tiers WHERE listing_id = @listing_id;
+
+-- name: InsertCancellationTier :exec
+INSERT INTO listing_cancellation_tiers (id, listing_id, hours_before, refund_bps, created_at, updated_at)
+VALUES (@id, @listing_id, @hours_before, @refund_bps, @now, @now);
+
+-- name: ListCancellationTiers :many
+SELECT * FROM listing_cancellation_tiers WHERE listing_id = @listing_id ORDER BY hours_before DESC;
