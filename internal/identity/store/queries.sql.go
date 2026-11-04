@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const consumeCode = `-- name: ConsumeCode :exec
@@ -25,6 +26,76 @@ type ConsumeCodeParams struct {
 func (q *Queries) ConsumeCode(ctx context.Context, arg ConsumeCodeParams) error {
 	_, err := q.db.Exec(ctx, consumeCode, arg.Now, arg.ID)
 	return err
+}
+
+const fillCustomerProfileIfEmpty = `-- name: FillCustomerProfileIfEmpty :exec
+UPDATE customer_profiles
+SET full_name = COALESCE(full_name, $1),
+    phone = COALESCE(phone, $2),
+    updated_at = $3
+WHERE user_id = $4
+`
+
+type FillCustomerProfileIfEmptyParams struct {
+	FullName *string
+	Phone    *string
+	Now      time.Time
+	UserID   uuid.UUID
+}
+
+func (q *Queries) FillCustomerProfileIfEmpty(ctx context.Context, arg FillCustomerProfileIfEmptyParams) error {
+	_, err := q.db.Exec(ctx, fillCustomerProfileIfEmpty,
+		arg.FullName,
+		arg.Phone,
+		arg.Now,
+		arg.UserID,
+	)
+	return err
+}
+
+const getCustomerProfile = `-- name: GetCustomerProfile :one
+SELECT p.user_id, u.email, p.full_name, p.phone, p.date_of_birth
+FROM customer_profiles p JOIN users u ON u.id = p.user_id
+WHERE p.user_id = $1
+`
+
+type GetCustomerProfileRow struct {
+	UserID      uuid.UUID
+	Email       string
+	FullName    *string
+	Phone       *string
+	DateOfBirth pgtype.Date
+}
+
+func (q *Queries) GetCustomerProfile(ctx context.Context, userID uuid.UUID) (GetCustomerProfileRow, error) {
+	row := q.db.QueryRow(ctx, getCustomerProfile, userID)
+	var i GetCustomerProfileRow
+	err := row.Scan(
+		&i.UserID,
+		&i.Email,
+		&i.FullName,
+		&i.Phone,
+		&i.DateOfBirth,
+	)
+	return i, err
+}
+
+const getCustomerProfileForUpdate = `-- name: GetCustomerProfileForUpdate :one
+SELECT user_id, full_name, phone, date_of_birth, created_at, updated_at FROM customer_profiles WHERE user_id = $1 FOR UPDATE
+`
+
+func (q *Queries) GetCustomerProfileForUpdate(ctx context.Context, userID uuid.UUID) (CustomerProfile, error) {
+	row := q.db.QueryRow(ctx, getCustomerProfileForUpdate, userID)
+	var i CustomerProfile
+	err := row.Scan(
+		&i.UserID,
+		&i.FullName,
+		&i.Phone,
+		&i.DateOfBirth,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }
 
 const getIdentity = `-- name: GetIdentity :one
@@ -486,5 +557,30 @@ type SetUserPasswordParams struct {
 
 func (q *Queries) SetUserPassword(ctx context.Context, arg SetUserPasswordParams) error {
 	_, err := q.db.Exec(ctx, setUserPassword, arg.PasswordHash, arg.Now, arg.ID)
+	return err
+}
+
+const updateCustomerProfile = `-- name: UpdateCustomerProfile :exec
+UPDATE customer_profiles
+SET full_name = $1, phone = $2, date_of_birth = $3, updated_at = $4
+WHERE user_id = $5
+`
+
+type UpdateCustomerProfileParams struct {
+	FullName    *string
+	Phone       *string
+	DateOfBirth pgtype.Date
+	Now         time.Time
+	UserID      uuid.UUID
+}
+
+func (q *Queries) UpdateCustomerProfile(ctx context.Context, arg UpdateCustomerProfileParams) error {
+	_, err := q.db.Exec(ctx, updateCustomerProfile,
+		arg.FullName,
+		arg.Phone,
+		arg.DateOfBirth,
+		arg.Now,
+		arg.UserID,
+	)
 	return err
 }

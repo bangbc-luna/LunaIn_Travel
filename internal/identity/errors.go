@@ -22,4 +22,7 @@ var (
 	// (not @gmail.com and no hosted domain).
 	ErrGoogleLinkRequiresPassword = httpx.NewError(http.StatusConflict, "google_link_requires_password", "Email này đã có tài khoản. Vui lòng đăng nhập bằng mật khẩu.")
 	ErrGoogleTokenInvalid         = httpx.NewError(http.StatusUnauthorized, "google_token_invalid", "Đăng nhập Google không hợp lệ")
+	// ErrInvalidProfile is the sentinel for profile validation failures; the
+	// returned errors carry a field-specific message (see invalidProfile).
+	ErrInvalidProfile = httpx.NewError(http.StatusUnprocessableEntity, "invalid_profile", "Thông tin hồ sơ không hợp lệ")
 )

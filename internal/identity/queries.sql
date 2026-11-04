@@ -94,3 +94,23 @@ ON CONFLICT (provider, provider_subject) DO NOTHING;
 UPDATE users
 SET email_verified_at = COALESCE(email_verified_at, @now::timestamptz), updated_at = @now::timestamptz
 WHERE id = @id;
+
+-- name: GetCustomerProfile :one
+SELECT p.user_id, u.email, p.full_name, p.phone, p.date_of_birth
+FROM customer_profiles p JOIN users u ON u.id = p.user_id
+WHERE p.user_id = @user_id;
+
+-- name: GetCustomerProfileForUpdate :one
+SELECT * FROM customer_profiles WHERE user_id = @user_id FOR UPDATE;
+
+-- name: UpdateCustomerProfile :exec
+UPDATE customer_profiles
+SET full_name = @full_name, phone = @phone, date_of_birth = @date_of_birth, updated_at = @now
+WHERE user_id = @user_id;
+
+-- name: FillCustomerProfileIfEmpty :exec
+UPDATE customer_profiles
+SET full_name = COALESCE(full_name, sqlc.narg('full_name')),
+    phone = COALESCE(phone, sqlc.narg('phone')),
+    updated_at = @now
+WHERE user_id = @user_id;
