@@ -75,6 +75,59 @@ type Holiday struct {
 	UpdatedAt time.Time
 }
 
+type Partner struct {
+	ID                    uuid.UUID
+	LegalName             string
+	DisplayName           string
+	TaxCode               *string
+	BusinessLicenseFileID pgtype.UUID
+	Address               *string
+	ProvinceCode          *string
+	WardCode              *string
+	ContactName           string
+	ContactPhone          string
+	ContactEmail          string
+	Status                string
+	SuspendedAt           *time.Time
+	SuspendedReason       *string
+	RatingSum             int32
+	RatingCount           int32
+	CreatedBy             uuid.UUID
+	CreatedAt             time.Time
+	UpdatedAt             time.Time
+}
+
+type PartnerBankAccount struct {
+	ID            uuid.UUID
+	PartnerID     uuid.UUID
+	BankBin       string
+	BankName      string
+	AccountNumber string
+	AccountHolder string
+	IsCurrent     bool
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+}
+
+type PartnerMember struct {
+	PartnerID uuid.UUID
+	UserID    uuid.UUID
+	Role      string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+type PartnerServiceType struct {
+	PartnerID   uuid.UUID
+	ServiceType string
+	EnabledBy   uuid.UUID
+	EnabledAt   time.Time
+	DisabledAt  *time.Time
+	DisabledBy  pgtype.UUID
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
 type PlatformSetting struct {
 	ID                         int16
 	HoldMinutes                int32
