@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -256,6 +257,68 @@ func TestGoogle_NewNonGmailUserStillCreated(t *testing.T) {
 	require.NoError(t, err)
 	id := userIDByEmail(t, env, "bo@company.vn")
 	require.Equal(t, 1, count(t, env, `SELECT count(*) FROM user_identities WHERE user_id = $1`, id))
+}
+
+// A Google login that read the identity before a password reset detached it
+// must not issue a session once it gets the user row lock.
+func TestGoogle_LoginRacingResetDoesNotIssueSession(t *testing.T) {
+	env := newTestEnv(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	googleTok(env, "t1", "sub-1", "bo@company.vn")
+	_, err := env.Svc.LoginWithGoogle(ctx, "t1")
+	require.NoError(t, err)
+	id := userIDByEmail(t, env, "bo@company.vn")
+	before := count(t, env, `SELECT count(*) FROM refresh_tokens WHERE user_id = $1`, id)
+
+	// R stands in for ResetPassword: it holds the user row lock.
+	r, err := env.Pool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = r.Rollback(context.Background()) }()
+	_, err = r.Exec(ctx, `SELECT 1 FROM users WHERE id = $1 FOR UPDATE`, id)
+	require.NoError(t, err)
+	var rPID int
+	require.NoError(t, r.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&rPID))
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := env.Svc.LoginWithGoogle(ctx, "t1")
+		done <- err
+	}()
+
+	// Wait (bounded) until the login is blocked behind R's lock, i.e. it has
+	// already read the identity.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var waiting int
+		require.NoError(t, env.Pool.QueryRow(ctx,
+			`SELECT count(*) FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))`, rPID).Scan(&waiting))
+		if waiting > 0 {
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("login finished before blocking on the user lock: %v", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for login to block on the user row lock")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	_, err = r.Exec(ctx, `DELETE FROM user_identities WHERE user_id = $1`, id)
+	require.NoError(t, err)
+	require.NoError(t, r.Commit(ctx))
+
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, ErrGoogleLinkRequiresPassword)
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for login to return")
+	}
+	require.Equal(t, before, count(t, env, `SELECT count(*) FROM refresh_tokens WHERE user_id = $1`, id))
+	require.Equal(t, 0, count(t, env, `SELECT count(*) FROM user_identities WHERE user_id = $1`, id))
 }
 
 func TestIdentityFromClaims(t *testing.T) {

@@ -99,7 +99,8 @@ func identityFromClaims(subject string, rawClaims []byte) (GoogleIdentity, error
 }
 
 // errRetryGoogle aborts a LoginWithGoogle transaction that lost a race
-// against a concurrent first login; the lookup is then repeated.
+// against a concurrent first login, or whose identity was detached (password
+// reset) while it waited for the user row lock; the lookup is then repeated.
 var errRetryGoogle = errors.New("identity: concurrent google login, retry")
 
 // LoginWithGoogle verifies a Google ID token and starts a new session (a new
@@ -158,10 +159,22 @@ func (s *Service) googleLoginTx(ctx context.Context, tx pgx.Tx, gid GoogleIdenti
 	ident, err := q.GetIdentity(ctx, store.GetIdentityParams{Provider: providerGoogle, ProviderSubject: gid.Subject})
 	switch {
 	case err == nil:
-		// The identity wins over the email Google reports today.
+		// The identity wins over the email Google reports today. The first
+		// read was unlocked (we did not know the user yet); lock the user row
+		// (lock order: user first, then dependents) and re-read the identity,
+		// since a ResetPassword that held the lock may have detached it in
+		// the meantime. If it is gone or moved, rerun the whole lookup so the
+		// by-email policy applies.
 		u, err = q.GetUserByIDForUpdate(ctx, ident.UserID)
 		if err != nil {
 			return Tokens{}, fmt.Errorf("lock user: %w", err)
+		}
+		again, err := q.GetIdentity(ctx, store.GetIdentityParams{Provider: providerGoogle, ProviderSubject: gid.Subject})
+		if errors.Is(err, pgx.ErrNoRows) || (err == nil && again.UserID != ident.UserID) {
+			return Tokens{}, errRetryGoogle
+		}
+		if err != nil {
+			return Tokens{}, fmt.Errorf("recheck identity: %w", err)
 		}
 	case errors.Is(err, pgx.ErrNoRows):
 		u, err = q.GetUserByEmailForUpdate(ctx, email)
