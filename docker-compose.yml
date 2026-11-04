@@ -6,7 +6,7 @@ services:
       POSTGRES_PASSWORD: lunain
       POSTGRES_DB: lunain
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5434:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
 
