@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -9,6 +11,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bangbc-luna/lunain-travel/internal/catalog"
@@ -18,6 +22,7 @@ import (
 	"github.com/bangbc-luna/lunain-travel/internal/partner"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/auth"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/clock"
+	"github.com/bangbc-luna/lunain-travel/internal/platform/db"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/httpx"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/storage"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/testutil"
@@ -27,8 +32,11 @@ import (
 var testNow = time.Date(2026, 11, 4, 9, 0, 0, 0, time.FixedZone("ICT", 7*3600))
 
 type testApp struct {
-	handler http.Handler
-	issuer  *auth.Issuer
+	handler  http.Handler
+	issuer   *auth.Issuer
+	pool     *pgxpool.Pool
+	identity *identity.Service
+	partner  *partner.Service
 	// patterns are all patterns recorded at registration time.
 	patterns []string
 }
@@ -55,14 +63,50 @@ func newTestApp(t *testing.T) *testApp {
 		Identity: idSvc, Settings: settings.NewService(pool, clk), Files: fileSvc,
 		Geo: geoSvc, Catalog: catSvc, Partner: partnerSvc,
 	})
-	return &testApp{handler: httpx.Chain(mux, httpx.RequestID, httpx.Recover), issuer: issuer, patterns: patterns}
+	return &testApp{
+		handler: httpx.Chain(mux, httpx.RequestID, httpx.Recover), issuer: issuer,
+		pool: pool, identity: idSvc, partner: partnerSvc, patterns: patterns,
+	}
 }
 
+// token issues an access token for role with a random user id (no DB row).
 func (a *testApp) token(t *testing.T, role auth.Role) string {
 	t.Helper()
-	s, _, err := a.issuer.Issue(auth.Principal{UserID: uuid.New(), Role: role})
+	return a.tokenFor(t, uuid.New(), role)
+}
+
+func (a *testApp) tokenFor(t *testing.T, userID uuid.UUID, role auth.Role) string {
+	t.Helper()
+	s, _, err := a.issuer.Issue(auth.Principal{UserID: userID, Role: role})
 	require.NoError(t, err)
 	return s
+}
+
+// superAdmin creates a real super_admin user and returns its id.
+func (a *testApp) superAdmin(t *testing.T) uuid.UUID {
+	t.Helper()
+	ctx := context.Background()
+	var id uuid.UUID
+	require.NoError(t, db.InTx(ctx, a.pool, func(tx pgx.Tx) error {
+		var err error
+		id, err = a.identity.CreateInternalUser(ctx, tx, "admin@lunain.vn", "adminpass123", auth.RoleSuperAdmin)
+		return err
+	}))
+	return id
+}
+
+// partnerMember creates a real partner through the services and returns the
+// owner's user id (role partner, member of the partner).
+func (a *testApp) partnerMember(t *testing.T, adminID uuid.UUID) uuid.UUID {
+	t.Helper()
+	p, err := a.partner.Create(context.Background(), adminID, partner.CreateInput{
+		LegalName: "Công ty Alpha", DisplayName: "Alpha",
+		OwnerEmail: "owner@alpha.vn", OwnerPassword: "matkhau123",
+		ServiceTypes: []string{"attraction_ticket"},
+	})
+	require.NoError(t, err)
+	require.NotEqual(t, uuid.Nil, p.OwnerUserID)
+	return p.OwnerUserID
 }
 
 func (a *testApp) do(method, path, tok string) *httptest.ResponseRecorder {
@@ -75,10 +119,35 @@ func (a *testApp) do(method, path, tok string) *httptest.ResponseRecorder {
 	return rec
 }
 
+// requireError asserts the response status and JSON error code.
+func requireError(t *testing.T, rec *httptest.ResponseRecorder, status int, code, msg string) {
+	t.Helper()
+	require.Equal(t, status, rec.Code, "%s: %s", msg, rec.Body.String())
+	var eb struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &eb), "%s: %s", msg, rec.Body.String())
+	require.Equal(t, code, eb.Error.Code, msg)
+}
+
+// requireAuthorized asserts the request got past authentication and
+// authorization (any status but 401/403).
+func requireAuthorized(t *testing.T, rec *httptest.ResponseRecorder, msg string) {
+	t.Helper()
+	require.NotEqual(t, http.StatusUnauthorized, rec.Code, "%s: %s", msg, rec.Body.String())
+	require.NotEqual(t, http.StatusForbidden, rec.Code, "%s: %s", msg, rec.Body.String())
+}
+
+type route struct{ pattern, sample string }
+
+func (r route) method() string { return strings.SplitN(r.pattern, " ", 2)[0] }
+
 // adminRoutes lists every /v1/admin/* route: the registered pattern and a
-// sample request path. TestAdminRouteListIsComplete fails when a route is
-// added or removed in a module without updating this list.
-var adminRoutes = []struct{ pattern, sample string }{
+// sample request path. TestRouteListsAreComplete fails when a route is added
+// or removed in a module without updating this list.
+var adminRoutes = []route{
 	{"GET /v1/admin/settings", "/v1/admin/settings"},
 	{"PATCH /v1/admin/settings", "/v1/admin/settings"},
 	{"GET /v1/admin/holidays", "/v1/admin/holidays?year=2026"},
@@ -96,34 +165,87 @@ var adminRoutes = []struct{ pattern, sample string }{
 	{"POST /v1/admin/partners/{id}/unsuspend", "/v1/admin/partners/" + uuid.Nil.String() + "/unsuspend"},
 }
 
-func TestAdminRouteListIsComplete(t *testing.T) {
-	declared := make([]string, 0, len(adminRoutes))
-	for _, r := range adminRoutes {
-		declared = append(declared, r.pattern)
-	}
-	sort.Strings(declared)
-	var registered []string
-	for _, p := range (newTestApp(t)).patterns {
-		if _, path, _ := strings.Cut(p, " "); strings.HasPrefix(path, "/v1/admin/") {
-			registered = append(registered, p)
-		}
-	}
-	sort.Strings(registered)
-	require.Equal(t, registered, declared,
-		"adminRoutes in routes_test.go must list every /v1/admin route registered by the modules")
+// partnerRoutes lists every /v1/partner/* route, like adminRoutes.
+var partnerRoutes = []route{
+	{"GET /v1/partner/profile", "/v1/partner/profile"},
+	{"PATCH /v1/partner/profile", "/v1/partner/profile"},
+	{"GET /v1/partner/bank-accounts", "/v1/partner/bank-accounts"},
+	{"PUT /v1/partner/bank-account", "/v1/partner/bank-account"},
 }
 
-func TestAllAdminRoutesRejectNonAdmins(t *testing.T) {
+// recordedUnder returns the recorded patterns whose path starts with prefix.
+// A pattern without a method (no space) is a path on its own.
+func recordedUnder(patterns []string, prefix string) []string {
+	var out []string
+	for _, p := range patterns {
+		path := p
+		if _, after, ok := strings.Cut(p, " "); ok {
+			path = after
+		}
+		if strings.HasPrefix(path, prefix) {
+			out = append(out, p)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func declaredPatterns(rs []route) []string {
+	out := make([]string, 0, len(rs))
+	for _, r := range rs {
+		out = append(out, r.pattern)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func TestRouteListsAreComplete(t *testing.T) {
+	patterns := newTestApp(t).patterns
+	require.Equal(t, recordedUnder(patterns, "/v1/admin/"), declaredPatterns(adminRoutes),
+		"adminRoutes in routes_test.go must list every /v1/admin route registered by the modules")
+	require.Equal(t, recordedUnder(patterns, "/v1/partner/"), declaredPatterns(partnerRoutes),
+		"partnerRoutes in routes_test.go must list every /v1/partner route registered by the modules")
+}
+
+func TestRecordedUnder_MethodlessPattern(t *testing.T) {
+	got := recordedUnder([]string{"/v1/admin/x", "GET /v1/admin/y", "/v1/public", "POST /v1/partner/z"}, "/v1/admin/")
+	require.Equal(t, []string{"/v1/admin/x", "GET /v1/admin/y"}, got)
+}
+
+func TestAllAdminRoutesRequireSuperAdmin(t *testing.T) {
 	app := newTestApp(t)
+	adminID := app.superAdmin(t)
+	adminTok := app.tokenFor(t, adminID, auth.RoleSuperAdmin)
 	customer := app.token(t, auth.RoleCustomer)
-	partnerTok := app.token(t, auth.RolePartner)
+	member := app.tokenFor(t, app.partnerMember(t, adminID), auth.RolePartner)
 	for _, r := range adminRoutes {
-		method := strings.SplitN(r.pattern, " ", 2)[0]
 		t.Run(r.pattern, func(t *testing.T) {
-			require.Equal(t, http.StatusUnauthorized, app.do(method, r.sample, "").Code, "no token")
-			require.Equal(t, http.StatusUnauthorized, app.do(method, r.sample, "garbage").Code, "bad token")
-			require.Equal(t, http.StatusForbidden, app.do(method, r.sample, customer).Code, "customer")
-			require.Equal(t, http.StatusForbidden, app.do(method, r.sample, partnerTok).Code, "partner")
+			m := r.method()
+			requireError(t, app.do(m, r.sample, ""), http.StatusUnauthorized, "unauthorized", "no token")
+			requireError(t, app.do(m, r.sample, "garbage"), http.StatusUnauthorized, "unauthorized", "bad token")
+			requireError(t, app.do(m, r.sample, customer), http.StatusForbidden, "forbidden", "customer")
+			requireError(t, app.do(m, r.sample, member), http.StatusForbidden, "forbidden", "partner member")
+			requireAuthorized(t, app.do(m, r.sample, adminTok), "super_admin")
+		})
+	}
+}
+
+func TestAllPartnerRoutesRequireMembership(t *testing.T) {
+	app := newTestApp(t)
+	adminID := app.superAdmin(t)
+	adminTok := app.tokenFor(t, adminID, auth.RoleSuperAdmin)
+	customer := app.token(t, auth.RoleCustomer)
+	nonMember := app.token(t, auth.RolePartner)
+	member := app.tokenFor(t, app.partnerMember(t, adminID), auth.RolePartner)
+	for _, r := range partnerRoutes {
+		t.Run(r.pattern, func(t *testing.T) {
+			m := r.method()
+			requireError(t, app.do(m, r.sample, ""), http.StatusUnauthorized, "unauthorized", "no token")
+			requireError(t, app.do(m, r.sample, "garbage"), http.StatusUnauthorized, "unauthorized", "bad token")
+			requireError(t, app.do(m, r.sample, customer), http.StatusForbidden, "forbidden", "customer")
+			requireError(t, app.do(m, r.sample, adminTok), http.StatusForbidden, "forbidden", "super_admin")
+			requireError(t, app.do(m, r.sample, nonMember), http.StatusForbidden, "forbidden", "partner without membership")
+			requireAuthorized(t, app.do(m, r.sample, member), "partner member")
 		})
 	}
 }
