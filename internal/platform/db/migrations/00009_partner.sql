@@ -7,7 +7,7 @@ CREATE TABLE partners (
     business_license_file_id uuid NULL REFERENCES files (id),
     address                  text NULL,
     province_code            text NULL REFERENCES provinces (code),
-    ward_code                text NULL REFERENCES wards (code),
+    ward_code                text NULL,
     contact_name             text NOT NULL DEFAULT '',
     contact_phone            text NOT NULL DEFAULT '',
     contact_email            text NOT NULL DEFAULT '',
@@ -20,7 +20,13 @@ CREATE TABLE partners (
     created_by               uuid NOT NULL REFERENCES users (id),
     created_at               timestamptz NOT NULL DEFAULT now(),
     updated_at               timestamptz NOT NULL DEFAULT now(),
-    CHECK (status <> 'suspended' OR suspended_at IS NOT NULL)
+    -- The ward must belong to the province; province and ward are set or
+    -- cleared together (so MATCH SIMPLE never skips a half-null pair).
+    FOREIGN KEY (ward_code, province_code) REFERENCES wards (code, province_code),
+    CHECK ((province_code IS NULL) = (ward_code IS NULL)),
+    -- suspended_at is set exactly while suspended; a suspension has a reason.
+    CHECK ((status = 'suspended') = (suspended_at IS NOT NULL)),
+    CHECK (status <> 'suspended' OR suspended_reason IS NOT NULL)
 );
 
 -- A user belongs to at most one partner (UNIQUE user_id).

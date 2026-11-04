@@ -1,6 +1,7 @@
 package catalog
 
 import (
+	"errors"
 	"net/http"
 	"time"
 
@@ -86,6 +87,11 @@ func (s *Service) Routes(mux httpx.Router, iss *auth.Issuer) {
 
 	mux.Handle("GET /v1/admin/commission-rates/{service_type}/history", admin(func(w http.ResponseWriter, r *http.Request) {
 		list, err := s.CommissionHistory(r.Context(), r.PathValue("service_type"))
+		// An unknown code in the path names no resource: 404, not 422
+		// (Ruling 11). A bad service_type in a body stays 422.
+		if errors.Is(err, ErrInvalidServiceType) {
+			err = httpx.ErrNotFound
+		}
 		if err != nil {
 			httpx.WriteError(w, r, err)
 			return

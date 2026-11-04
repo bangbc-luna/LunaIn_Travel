@@ -69,6 +69,12 @@ func TestHTTP_SettingsRequireSuperAdmin(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, do("GET", "/v1/admin/holidays?year=abc", adminTok, ""))
 	require.Equal(t, http.StatusNoContent, do("DELETE", "/v1/admin/holidays/2026-09-02", adminTok, ""))
 	require.Equal(t, http.StatusNotFound, do("DELETE", "/v1/admin/holidays/2026-09-02", adminTok, ""))
+	// A malformed {date} cannot name a holiday → 404 (Ruling 11).
+	require.Equal(t, http.StatusNotFound, do("DELETE", "/v1/admin/holidays/2026-13-45", adminTok, ""))
+	require.Equal(t, http.StatusNotFound, do("DELETE", "/v1/admin/holidays/nope", adminTok, ""))
+	// Holiday name over 100 characters → 422.
+	require.Equal(t, http.StatusUnprocessableEntity,
+		do("POST", "/v1/admin/holidays", adminTok, `{"date":"2026-09-03","name":"`+strings.Repeat("a", 101)+`"}`))
 }
 
 func issue(t *testing.T, iss *auth.Issuer, id uuid.UUID, role auth.Role) string {

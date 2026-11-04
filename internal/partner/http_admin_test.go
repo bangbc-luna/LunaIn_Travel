@@ -91,8 +91,13 @@ func TestHTTP_AdminPartnerLifecycle(t *testing.T) {
 	require.Equal(t, http.StatusNoContent, status)
 	status, _ = do(t, srv, "DELETE", base+"/service-types/attraction_ticket", tok, "")
 	require.Equal(t, http.StatusNoContent, status)
+	// Unknown code in the path → 404 not_found (Ruling 11).
 	status, raw = do(t, srv, "PUT", base+"/service-types/nope", tok, "")
-	require.Equal(t, http.StatusUnprocessableEntity, status, string(raw))
+	require.Equal(t, http.StatusNotFound, status, string(raw))
+	require.Equal(t, "not_found", errCode(t, raw))
+	status, raw = do(t, srv, "DELETE", base+"/service-types/nope", tok, "")
+	require.Equal(t, http.StatusNotFound, status, string(raw))
+	require.Equal(t, "not_found", errCode(t, raw))
 
 	// suspend / unsuspend
 	status, raw = do(t, srv, "POST", base+"/suspend", tok, `{"reason":"Vi phạm","x":1}`)

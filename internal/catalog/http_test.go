@@ -74,6 +74,8 @@ func TestHTTP_CreateRateRequiresFields(t *testing.T) {
 		{`{"service_type":"attraction_ticket"}`, "invalid_commission_rate"},
 		{`{"service_type":"attraction_ticket","rate_bps":null}`, "invalid_commission_rate"},
 		{`{"rate_bps":1000}`, "invalid_service_type"},
+		// An unknown code in the body is a field error: stays 422 (Ruling 11).
+		{`{"service_type":"nope","rate_bps":1000}`, "invalid_service_type"},
 	} {
 		s, body := do(t, srv, "POST", "/v1/admin/commission-rates", adminTok, c.body)
 		require.Equal(t, http.StatusUnprocessableEntity, s, c.body)
@@ -143,6 +145,8 @@ func TestHTTP_CommissionAdminOnly(t *testing.T) {
 	require.Len(t, hist, 2)
 	require.Equal(t, 1500, hist[0].RateBps)
 
-	s, _ = do(t, srv, "GET", "/v1/admin/commission-rates/nope/history", adminTok, "")
-	require.Equal(t, http.StatusUnprocessableEntity, s)
+	// Unknown code in the path → 404 not_found (Ruling 11).
+	s, body = do(t, srv, "GET", "/v1/admin/commission-rates/nope/history", adminTok, "")
+	require.Equal(t, http.StatusNotFound, s)
+	require.Contains(t, string(body), `"code":"not_found"`)
 }

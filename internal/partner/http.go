@@ -1,11 +1,13 @@
 package partner
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 
 	"github.com/google/uuid"
 
+	"github.com/bangbc-luna/lunain-travel/internal/catalog"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/auth"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/httpx"
 )
@@ -70,6 +72,16 @@ func (s *Service) Routes(mux httpx.Router, iss *auth.Issuer) {
 		}
 		httpx.WriteJSON(w, http.StatusOK, ba)
 	}))
+}
+
+// pathCodeNotFound maps an unknown service-type code taken from the URL path
+// to 404 not_found (Ruling 11): a path identifier that cannot name an
+// existing resource is "not found", not a 422 field error.
+func pathCodeNotFound(err error) error {
+	if errors.Is(err, catalog.ErrInvalidServiceType) {
+		return httpx.ErrNotFound
+	}
+	return err
 }
 
 // AdminRoutes registers the Super Admin partner API. Every route is
@@ -161,11 +173,11 @@ func (s *Service) AdminRoutes(mux httpx.Router, iss *auth.Issuer) {
 	}))
 
 	mux.Handle("PUT /v1/admin/partners/{id}/service-types/{code}", withID(func(w http.ResponseWriter, r *http.Request, actor, id uuid.UUID) {
-		noContent(w, r, s.EnableServiceType(r.Context(), actor, id, r.PathValue("code")))
+		noContent(w, r, pathCodeNotFound(s.EnableServiceType(r.Context(), actor, id, r.PathValue("code"))))
 	}))
 
 	mux.Handle("DELETE /v1/admin/partners/{id}/service-types/{code}", withID(func(w http.ResponseWriter, r *http.Request, actor, id uuid.UUID) {
-		noContent(w, r, s.DisableServiceType(r.Context(), actor, id, r.PathValue("code")))
+		noContent(w, r, pathCodeNotFound(s.DisableServiceType(r.Context(), actor, id, r.PathValue("code"))))
 	}))
 
 	mux.Handle("POST /v1/admin/partners/{id}/suspend", withID(func(w http.ResponseWriter, r *http.Request, actor, id uuid.UUID) {

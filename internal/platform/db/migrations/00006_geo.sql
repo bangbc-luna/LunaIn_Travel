@@ -18,7 +18,10 @@ CREATE TABLE wards (
     slug          text NOT NULL,
     created_at    timestamptz NOT NULL DEFAULT now(),
     updated_at    timestamptz NOT NULL DEFAULT now(),
-    UNIQUE (province_code, slug)
+    UNIQUE (province_code, slug),
+    -- Target of composite FKs (ward_code, province_code) so referencing rows
+    -- cannot pair a ward with another province.
+    UNIQUE (code, province_code)
 );
 
 CREATE INDEX wards_province_code_idx ON wards (province_code);

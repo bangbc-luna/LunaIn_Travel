@@ -78,9 +78,10 @@ func (s *Service) Routes(mux httpx.Router, iss *auth.Issuer) {
 	}))
 
 	mux.Handle("DELETE /v1/admin/holidays/{date}", admin(func(w http.ResponseWriter, r *http.Request) {
+		// A malformed {date} cannot name a holiday: 404 (Ruling 11).
 		date, err := time.Parse(dateLayout, r.PathValue("date"))
 		if err != nil {
-			httpx.WriteError(w, r, httpx.ErrInvalidRequest)
+			httpx.WriteError(w, r, httpx.ErrNotFound)
 			return
 		}
 		pr, _ := auth.PrincipalFrom(r.Context())
