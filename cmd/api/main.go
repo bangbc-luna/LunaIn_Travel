@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -11,9 +13,14 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river"
 
+	"github.com/bangbc-luna/lunain-travel/internal/identity"
+	"github.com/bangbc-luna/lunain-travel/internal/platform/auth"
+	"github.com/bangbc-luna/lunain-travel/internal/platform/clock"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/config"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/db"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/httpx"
@@ -25,13 +32,74 @@ func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(log)
 
-	if err := run(log); err != nil {
+	if err := dispatch(log, os.Args[1:]); err != nil {
 		log.Error("fatal", "err", err)
 		os.Exit(1)
 	}
 }
 
-func run(log *slog.Logger) error {
+// dispatch runs the subcommand named by args[0]; no subcommand means serve.
+func dispatch(log *slog.Logger, args []string) error {
+	if len(args) == 0 {
+		return serve(log)
+	}
+	switch args[0] {
+	case "serve":
+		return serve(log)
+	case "create-admin":
+		return createAdmin(args[1:])
+	default:
+		return fmt.Errorf("unknown command %q (want serve or create-admin)", args[0])
+	}
+}
+
+// createAdmin creates a verified super_admin account and prints its id.
+func createAdmin(args []string) error {
+	fs := flag.NewFlagSet("create-admin", flag.ContinueOnError)
+	email := fs.String("email", "", "admin email")
+	password := fs.String("password", "", "admin password")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *email == "" || *password == "" {
+		return errors.New("create-admin: --email and --password are required")
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	pool, err := db.Connect(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	if err := db.Migrate(ctx, pool); err != nil {
+		return err
+	}
+	svc := identity.NewService(identity.Deps{Pool: pool, Clock: clock.Real{}, CodePepper: cfg.CodePepper})
+	var id uuid.UUID
+	err = db.InTx(ctx, pool, func(tx pgx.Tx) error {
+		var err error
+		id, err = svc.CreateInternalUser(ctx, tx, *email, *password, auth.RoleSuperAdmin)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Println(id)
+	return nil
+}
+
+// rejectingGoogle is used when GOOGLE_CLIENT_ID is not configured.
+type rejectingGoogle struct{}
+
+func (rejectingGoogle) Verify(context.Context, string) (identity.GoogleIdentity, error) {
+	return identity.GoogleIdentity{}, identity.ErrGoogleTokenInvalid
+}
+
+func serve(log *slog.Logger) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return err
@@ -74,7 +142,23 @@ func run(log *slog.Logger) error {
 		}
 	}()
 
+	var google identity.GoogleVerifier = rejectingGoogle{}
+	if cfg.GoogleClientID == "" {
+		log.Warn("GOOGLE_CLIENT_ID is empty: Google sign-in is disabled")
+	} else {
+		google, err = identity.NewGoogleVerifier(context.Background(), cfg.GoogleClientID)
+		if err != nil {
+			return err
+		}
+	}
+	issuer := auth.NewIssuer(cfg.JWTSecret, 15*time.Minute, clock.Real{})
+	idSvc := identity.NewService(identity.Deps{
+		Pool: pool, Jobs: jobClient, Issuer: issuer, Clock: clock.Real{},
+		CodePepper: cfg.CodePepper, Google: google, RefreshTTL: 30 * 24 * time.Hour,
+	})
+
 	mux := http.NewServeMux()
+	idSvc.Routes(mux, issuer, httpx.ClientIPFunc(cfg.TrustedProxyHops))
 	mux.HandleFunc("GET /healthz", healthz)
 	mux.HandleFunc("GET /readyz", readyz(pool))
 

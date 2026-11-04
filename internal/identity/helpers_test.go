@@ -27,6 +27,7 @@ type testEnv struct {
 	Clock  *clock.Fixed
 	Mail   *mailer.Recorder
 	Google *fakeGoogle
+	Issuer *auth.Issuer
 
 	// seenMail is how many emails lastCode has already consumed.
 	seenMail int
@@ -51,16 +52,17 @@ func newTestEnv(t *testing.T) *testEnv {
 
 	clk := &clock.Fixed{T: testStart}
 	google := &fakeGoogle{Tokens: map[string]GoogleIdentity{}}
+	issuer := auth.NewIssuer([]byte("test-secret-test-secret-test-secret"), 15*time.Minute, clk)
 	svc := NewService(Deps{
 		Pool:       pool,
 		Jobs:       client,
-		Issuer:     auth.NewIssuer([]byte("test-secret-test-secret-test-secret"), 15*time.Minute, clk),
+		Issuer:     issuer,
 		Clock:      clk,
 		CodePepper: []byte("test-pepper"),
 		Google:     google,
 		RefreshTTL: 30 * 24 * time.Hour,
 	})
-	return &testEnv{Svc: svc, Pool: pool, Clock: clk, Mail: rec, Google: google}
+	return &testEnv{Svc: svc, Pool: pool, Clock: clk, Mail: rec, Google: google, Issuer: issuer}
 }
 
 var codeRe = regexp.MustCompile(`\b\d{6}\b`)
