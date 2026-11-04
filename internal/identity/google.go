@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
@@ -116,7 +117,12 @@ var errRetryGoogle = errors.New("identity: concurrent google login, retry")
 // token loses on a unique constraint and re-reads the winner's rows.
 func (s *Service) LoginWithGoogle(ctx context.Context, idToken string) (Tokens, error) {
 	gid, err := s.google.Verify(ctx, idToken)
-	if err != nil || !gid.EmailVerified || gid.Subject == "" {
+	if err != nil {
+		// Log the cause (never the token) to diagnose config/clock issues.
+		slog.Default().Warn("google token verify failed", "err", err)
+		return Tokens{}, ErrGoogleTokenInvalid
+	}
+	if !gid.EmailVerified || gid.Subject == "" {
 		return Tokens{}, ErrGoogleTokenInvalid
 	}
 	email, err := NormalizeEmail(gid.Email)

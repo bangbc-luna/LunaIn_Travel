@@ -31,6 +31,8 @@ func TestRequestPasswordReset_SendsCodeWithSubject(t *testing.T) {
 	msgs := env.Mail.Messages()
 	require.Equal(t, "Đặt lại mật khẩu LunaIn Travel", msgs[len(msgs)-1].Subject)
 	require.Equal(t, "an@gmail.com", msgs[len(msgs)-1].To)
+	// Code emails (signup + reset) retry briefly: the code expires anyway.
+	require.Equal(t, 2, count(t, env, `SELECT count(*) FROM river_job WHERE kind = 'send_email' AND max_attempts = 3`))
 }
 
 func TestRequestPasswordReset_CooldownSilent(t *testing.T) {
@@ -188,4 +190,68 @@ func TestResetPassword_LockedUserRejected(t *testing.T) {
 	require.NoError(t, err)
 
 	require.ErrorIs(t, env.Svc.ResetPassword(ctx, "an@gmail.com", code, newPassword), ErrInvalidCode)
+}
+
+// mailsWithSubject waits up to 5s for at least want emails with subject,
+// then a little longer to catch extras, and returns how many arrived.
+func mailsWithSubject(t *testing.T, env *testEnv, subject string, want int) int {
+	t.Helper()
+	n := func() int {
+		c := 0
+		for _, m := range env.Mail.Messages() {
+			if m.Subject == subject {
+				c++
+			}
+		}
+		return c
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for n() < want && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	time.Sleep(300 * time.Millisecond) // give any stray extra email a chance
+	env.seenMail = len(env.Mail.Messages())
+	return n()
+}
+
+func TestRequestPasswordReset_DailyCap(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+	registerVerified(t, env, "an@gmail.com")
+
+	for range 6 {
+		env.Clock.Advance(61 * time.Second)
+		require.NoError(t, env.Svc.RequestPasswordReset(ctx, "an@gmail.com"))
+	}
+	require.Equal(t, 5, mailsWithSubject(t, env, resetSubject, 5))
+	require.Equal(t, 5, count(t, env, `SELECT count(*) FROM email_verifications WHERE purpose = 'password_reset'`))
+
+	// The window slides: a day later a new code is allowed again.
+	env.Clock.Advance(24 * time.Hour)
+	require.NoError(t, env.Svc.RequestPasswordReset(ctx, "an@gmail.com"))
+	require.Equal(t, 6, mailsWithSubject(t, env, resetSubject, 6))
+}
+
+func TestResetPassword_DetachesGoogleIdentity(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+	// An attacker's Google account creates bo@company.vn (no hd claim).
+	env.Google.Tokens["gt"] = GoogleIdentity{Subject: "attacker-sub", Email: "bo@company.vn", EmailVerified: true}
+	attacker, err := env.Svc.LoginWithGoogle(ctx, "gt")
+	require.NoError(t, err)
+	id := userIDByEmail(t, env, "bo@company.vn")
+
+	// The real owner proves control of the mailbox and sets a password.
+	require.NoError(t, env.Svc.RequestPasswordReset(ctx, "bo@company.vn"))
+	code := lastCode(t, env)
+	require.NoError(t, env.Svc.ResetPassword(ctx, "bo@company.vn", code, newPassword))
+
+	require.Equal(t, 0, count(t, env, `SELECT count(*) FROM user_identities WHERE user_id = $1`, id))
+	_, err = env.Svc.Refresh(ctx, attacker.RefreshToken)
+	require.ErrorIs(t, err, ErrInvalidRefreshToken)
+	// The same Google token no longer logs into the account.
+	_, err = env.Svc.LoginWithGoogle(ctx, "gt")
+	require.ErrorIs(t, err, ErrGoogleLinkRequiresPassword)
+	_, err = env.Svc.Login(ctx, "bo@company.vn", newPassword)
+	require.NoError(t, err)
 }

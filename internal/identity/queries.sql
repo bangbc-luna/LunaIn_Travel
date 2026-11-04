@@ -10,7 +10,7 @@ VALUES (@user_id, @now, @now);
 SELECT * FROM users WHERE email = @email;
 
 -- name: GetUserByEmailForUpdate :one
-SELECT * FROM users WHERE email = @email FOR UPDATE;
+SELECT * FROM users WHERE email = @email FOR NO KEY UPDATE;
 
 -- name: MarkEmailVerified :exec
 UPDATE users
@@ -34,6 +34,10 @@ ORDER BY created_at DESC, id DESC
 LIMIT 1
 FOR UPDATE;
 
+-- name: CountCodesSince :one
+SELECT count(*) FROM email_verifications
+WHERE user_id = @user_id AND purpose = @purpose AND created_at > @since;
+
 -- name: IncrementCodeAttempts :exec
 UPDATE email_verifications SET attempts = attempts + 1, updated_at = @now WHERE id = @id;
 
@@ -50,7 +54,7 @@ INSERT INTO refresh_tokens (id, user_id, family_id, token_hash, expires_at, crea
 VALUES (@id, @user_id, @family_id, @token_hash, @expires_at, @now, @now);
 
 -- name: GetUserByIDForUpdate :one
-SELECT * FROM users WHERE id = @id FOR UPDATE;
+SELECT * FROM users WHERE id = @id FOR NO KEY UPDATE;
 
 -- name: InsertVerifiedUser :execrows
 INSERT INTO users (id, email, password_hash, email_verified_at, role, created_at, updated_at)
@@ -114,3 +118,6 @@ SET full_name = COALESCE(full_name, sqlc.narg('full_name')),
     phone = COALESCE(phone, sqlc.narg('phone')),
     updated_at = @now
 WHERE user_id = @user_id;
+
+-- name: DeleteUserIdentities :exec
+DELETE FROM user_identities WHERE user_id = @user_id;

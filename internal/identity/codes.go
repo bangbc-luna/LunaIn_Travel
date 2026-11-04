@@ -13,6 +13,12 @@ const (
 	codeTTL         = 10 * time.Minute
 	maxCodeAttempts = 5
 	resendCooldown  = 60 * time.Second
+	// maxCodesPer24h caps new codes per user and purpose within codeCapWindow,
+	// so an attacker gets at most maxCodesPer24h*maxCodeAttempts guesses/day.
+	maxCodesPer24h = 5
+	codeCapWindow  = 24 * time.Hour
+	// otpMailMaxAttempts is the River delivery attempts for code emails.
+	otpMailMaxAttempts = 3
 
 	purposeSignup        = "signup"
 	purposePasswordReset = "password_reset"

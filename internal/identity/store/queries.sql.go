@@ -28,6 +28,33 @@ func (q *Queries) ConsumeCode(ctx context.Context, arg ConsumeCodeParams) error 
 	return err
 }
 
+const countCodesSince = `-- name: CountCodesSince :one
+SELECT count(*) FROM email_verifications
+WHERE user_id = $1 AND purpose = $2 AND created_at > $3
+`
+
+type CountCodesSinceParams struct {
+	UserID  uuid.UUID
+	Purpose string
+	Since   time.Time
+}
+
+func (q *Queries) CountCodesSince(ctx context.Context, arg CountCodesSinceParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countCodesSince, arg.UserID, arg.Purpose, arg.Since)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const deleteUserIdentities = `-- name: DeleteUserIdentities :exec
+DELETE FROM user_identities WHERE user_id = $1
+`
+
+func (q *Queries) DeleteUserIdentities(ctx context.Context, userID uuid.UUID) error {
+	_, err := q.db.Exec(ctx, deleteUserIdentities, userID)
+	return err
+}
+
 const fillCustomerProfileIfEmpty = `-- name: FillCustomerProfileIfEmpty :exec
 UPDATE customer_profiles
 SET full_name = COALESCE(full_name, $1),
@@ -245,7 +272,7 @@ func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error
 }
 
 const getUserByEmailForUpdate = `-- name: GetUserByEmailForUpdate :one
-SELECT id, email, password_hash, email_verified_at, role, status, created_at, updated_at FROM users WHERE email = $1 FOR UPDATE
+SELECT id, email, password_hash, email_verified_at, role, status, created_at, updated_at FROM users WHERE email = $1 FOR NO KEY UPDATE
 `
 
 func (q *Queries) GetUserByEmailForUpdate(ctx context.Context, email string) (User, error) {
@@ -265,7 +292,7 @@ func (q *Queries) GetUserByEmailForUpdate(ctx context.Context, email string) (Us
 }
 
 const getUserByIDForUpdate = `-- name: GetUserByIDForUpdate :one
-SELECT id, email, password_hash, email_verified_at, role, status, created_at, updated_at FROM users WHERE id = $1 FOR UPDATE
+SELECT id, email, password_hash, email_verified_at, role, status, created_at, updated_at FROM users WHERE id = $1 FOR NO KEY UPDATE
 `
 
 func (q *Queries) GetUserByIDForUpdate(ctx context.Context, id uuid.UUID) (User, error) {

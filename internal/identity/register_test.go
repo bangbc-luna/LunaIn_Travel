@@ -146,6 +146,24 @@ func TestResendVerification_UnknownEmailSilent(t *testing.T) {
 	require.Equal(t, 1, jobs)
 }
 
+func TestResendVerification_DailyCap(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+
+	// Register sends code 1; four resends send codes 2-5.
+	require.NoError(t, env.Svc.Register(ctx, "an@gmail.com", testPassword))
+	for range 4 {
+		env.Clock.Advance(61 * time.Second)
+		require.NoError(t, env.Svc.ResendVerification(ctx, "an@gmail.com"))
+	}
+	// The 6th code request in 24h is refused, by resend and re-register alike.
+	env.Clock.Advance(61 * time.Second)
+	require.ErrorIs(t, env.Svc.ResendVerification(ctx, "an@gmail.com"), ErrResendTooSoon)
+	require.ErrorIs(t, env.Svc.Register(ctx, "an@gmail.com", testPassword), ErrResendTooSoon)
+	require.Equal(t, 5, mailsWithSubject(t, env, verificationSubject, 5))
+	require.Equal(t, 5, count(t, env, `SELECT count(*) FROM email_verifications WHERE purpose = 'signup'`))
+}
+
 func TestResendVerification_Cooldown(t *testing.T) {
 	env := newTestEnv(t)
 	ctx := context.Background()

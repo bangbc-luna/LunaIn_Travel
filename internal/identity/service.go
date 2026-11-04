@@ -77,10 +77,13 @@ type Tokens struct {
 	Role             auth.Role `json:"role"`
 }
 
-// Lock order rule: every transaction that touches both a user and its
-// verification codes locks the users row (FOR UPDATE) first and only then
-// reads/locks/updates email_verifications rows. Keep it user → code to avoid
-// deadlocks between Register, ResendVerification and VerifyEmail.
+// Lock order rule: every identity transaction locks the users row first
+// (SELECT ... FOR NO KEY UPDATE) and only then reads/locks/updates dependent
+// rows (email_verifications, refresh_tokens, user_identities, profiles). Keep
+// it user → dependents to avoid deadlocks between Register,
+// ResendVerification, VerifyEmail, Refresh and friends. FOR NO KEY UPDATE
+// still serializes identity transactions on the same user but, unlike FOR
+// UPDATE, does not block other modules inserting rows that reference users.
 //
 // The password submitted with a signup is stored (as argon2id) on the signup
 // code row, not on the user. It becomes users.password_hash only when that
@@ -137,7 +140,7 @@ func (s *Service) Register(ctx context.Context, email, password string) error {
 		if inCooldown(last, now) {
 			return ErrResendTooSoon
 		}
-		return s.sendSignupCodeTx(ctx, tx, q, u.ID, e, hash, now)
+		return capAsTooSoon(s.sendSignupCodeTx(ctx, tx, q, u.ID, e, hash, now))
 	})
 	if isUniqueViolation(err, "users_email_key") {
 		// A concurrent signup for the same email just created the user and
@@ -179,7 +182,7 @@ func (s *Service) ResendVerification(ctx context.Context, email string) error {
 		if inCooldown(last, now) {
 			return ErrResendTooSoon
 		}
-		return s.sendSignupCodeTx(ctx, tx, q, u.ID, e, *last.PasswordHash, now)
+		return capAsTooSoon(s.sendSignupCodeTx(ctx, tx, q, u.ID, e, *last.PasswordHash, now))
 	})
 }
 
@@ -269,7 +272,8 @@ func (s *Service) VerifyEmail(ctx context.Context, email, code, password string)
 
 // RequestPasswordReset emails a password_reset code. It returns nil without
 // sending anything when the email is invalid, unknown, belongs to a locked
-// account, or a code was sent less than resendCooldown ago, so the response
+// account, a code was sent less than resendCooldown ago, or maxCodesPer24h
+// reset codes were already sent in the last 24 hours, so the response
 // never reveals which emails have accounts. It works for any unlocked user,
 // including unverified customers and Google-only users.
 func (s *Service) RequestPasswordReset(ctx context.Context, email string) error {
@@ -297,19 +301,24 @@ func (s *Service) RequestPasswordReset(ctx context.Context, email string) error 
 		if inCooldown(last, now) {
 			return nil
 		}
-		return s.sendCodeTx(ctx, tx, q, u.ID, e, purposePasswordReset, nil, mailer.Message{
+		err = s.sendCodeTx(ctx, tx, q, u.ID, e, purposePasswordReset, nil, mailer.Message{
 			Subject: resetSubject,
 			Text: "Xin chào,\n\n" +
 				"Mã đặt lại mật khẩu LunaIn Travel của bạn là: %s\n\n" +
 				"Mã có hiệu lực trong 10 phút.\n\n" +
 				"Nếu bạn không yêu cầu đặt lại mật khẩu, hãy bỏ qua email này.\n",
 		}, now)
+		if errors.Is(err, errCodeCapReached) {
+			return nil // silent, like the cooldown
+		}
+		return err
 	})
 }
 
 // ResetPassword checks the latest password_reset code and, if it matches,
-// sets newPassword, marks the email verified (the code proves ownership) and
-// revokes every session. Any failure after the password is validated is
+// sets newPassword, marks the email verified (the code proves ownership),
+// detaches every external identity (e.g. a Google account that created this
+// user before the email owner proved control) and revokes every session. Any failure after the password is validated is
 // reported as ErrInvalidCode; a wrong guess still counts as an attempt.
 func (s *Service) ResetPassword(ctx context.Context, email, code, newPassword string) error {
 	if err := ValidatePassword(newPassword); err != nil {
@@ -368,6 +377,11 @@ func (s *Service) ResetPassword(ctx context.Context, email, code, newPassword st
 			Now: now, UserID: u.ID, Purpose: purposeSignup,
 		}); err != nil {
 			return fmt.Errorf("invalidate signup codes: %w", err)
+		}
+		// The email owner just proved control; a linked external identity
+		// may belong to someone else, so it must sign in again and re-link.
+		if err := q.DeleteUserIdentities(ctx, u.ID); err != nil {
+			return fmt.Errorf("detach identities: %w", err)
 		}
 		return s.RevokeAllSessions(ctx, tx, u.ID)
 	})
@@ -474,10 +488,34 @@ func (s *Service) sendSignupCodeTx(ctx context.Context, tx pgx.Tx, q *store.Quer
 	}, now)
 }
 
+// errCodeCapReached is returned by sendCodeTx when the user already got
+// maxCodesPer24h codes of that purpose in the last 24 hours.
+var errCodeCapReached = errors.New("identity: daily verification code cap reached")
+
+// capAsTooSoon reports the daily code cap to signup callers as ErrResendTooSoon.
+func capAsTooSoon(err error) error {
+	if errors.Is(err, errCodeCapReached) {
+		return ErrResendTooSoon
+	}
+	return err
+}
+
 // sendCodeTx invalidates older codes of purpose, stores a new one (with the
 // optional pending passwordHash) and enqueues msg to email, all inside tx.
-// msg.Text must contain one %s, which is replaced by the code.
+// msg.Text must contain one %s, which is replaced by the code. The caller
+// must hold the user row lock. It returns errCodeCapReached, writing nothing,
+// when maxCodesPer24h codes of purpose were created in the last 24 hours:
+// together with maxCodeAttempts this bounds guesses per account per day.
 func (s *Service) sendCodeTx(ctx context.Context, tx pgx.Tx, q *store.Queries, userID uuid.UUID, email, purpose string, passwordHash *string, msg mailer.Message, now time.Time) error {
+	n, err := q.CountCodesSince(ctx, store.CountCodesSinceParams{
+		UserID: userID, Purpose: purpose, Since: now.Add(-codeCapWindow),
+	})
+	if err != nil {
+		return fmt.Errorf("count codes: %w", err)
+	}
+	if n >= maxCodesPer24h {
+		return errCodeCapReached
+	}
 	if err := q.InvalidateCodes(ctx, store.InvalidateCodesParams{
 		Now: now, UserID: userID, Purpose: purpose,
 	}); err != nil {
@@ -504,6 +542,8 @@ func (s *Service) sendCodeTx(ctx context.Context, tx pgx.Tx, q *store.Queries, u
 	}
 	msg.To = email
 	msg.Text = fmt.Sprintf(msg.Text, code)
+	// A code expires in codeTTL, so retrying its email for long is useless.
+	msg.MaxAttempts = otpMailMaxAttempts
 	return mailer.EnqueueTx(ctx, tx, s.jobs, msg)
 }
 
