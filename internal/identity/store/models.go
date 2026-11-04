@@ -21,15 +21,16 @@ type CustomerProfile struct {
 }
 
 type EmailVerification struct {
-	ID         uuid.UUID
-	UserID     uuid.UUID
-	Purpose    string
-	CodeHash   []byte
-	ExpiresAt  time.Time
-	Attempts   int32
-	ConsumedAt *time.Time
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
+	ID           uuid.UUID
+	UserID       uuid.UUID
+	Purpose      string
+	CodeHash     []byte
+	PasswordHash *string
+	ExpiresAt    time.Time
+	Attempts     int32
+	ConsumedAt   *time.Time
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
 }
 
 type RefreshToken struct {

@@ -12,19 +12,17 @@ SELECT * FROM users WHERE email = @email;
 -- name: GetUserByEmailForUpdate :one
 SELECT * FROM users WHERE email = @email FOR UPDATE;
 
--- name: UpdateUserPassword :exec
-UPDATE users SET password_hash = @password_hash, updated_at = @now WHERE id = @id;
-
 -- name: MarkEmailVerified :exec
-UPDATE users SET email_verified_at = @now::timestamptz, updated_at = @now::timestamptz
+UPDATE users
+SET email_verified_at = @now::timestamptz, password_hash = @password_hash, updated_at = @now::timestamptz
 WHERE id = @id AND email_verified_at IS NULL;
 
 -- name: InsertVerification :exec
-INSERT INTO email_verifications (id, user_id, purpose, code_hash, expires_at, created_at, updated_at)
-VALUES (@id, @user_id, @purpose, @code_hash, @expires_at, @now, @now);
+INSERT INTO email_verifications (id, user_id, purpose, code_hash, password_hash, expires_at, created_at, updated_at)
+VALUES (@id, @user_id, @purpose, @code_hash, @password_hash, @expires_at, @now, @now);
 
--- name: GetLatestCodeCreatedAt :one
-SELECT created_at FROM email_verifications
+-- name: GetLatestCode :one
+SELECT * FROM email_verifications
 WHERE user_id = @user_id AND purpose = @purpose
 ORDER BY created_at DESC, id DESC
 LIMIT 1;

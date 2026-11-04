@@ -73,7 +73,7 @@ func TestRegister_VerifiedEmailTaken(t *testing.T) {
 	ctx := context.Background()
 
 	require.NoError(t, env.Svc.Register(ctx, "an@gmail.com", testPassword))
-	_, err := env.Svc.VerifyEmail(ctx, "an@gmail.com", lastCode(t, env))
+	_, err := env.Svc.VerifyEmail(ctx, "an@gmail.com", lastCode(t, env), testPassword)
 	require.NoError(t, err)
 
 	env.Clock.Advance(time.Hour)
@@ -94,7 +94,7 @@ func TestRegister_UnverifiedReRegisterRespectsCooldown(t *testing.T) {
 	newCode := lastCode(t, env)
 
 	if oldCode != newCode {
-		_, err := env.Svc.VerifyEmail(ctx, "an@gmail.com", oldCode)
+		_, err := env.Svc.VerifyEmail(ctx, "an@gmail.com", oldCode, "newpass123")
 		require.ErrorIs(t, err, ErrInvalidCode)
 	}
 	// The old code row is invalidated regardless of the random values.
@@ -103,13 +103,24 @@ func TestRegister_UnverifiedReRegisterRespectsCooldown(t *testing.T) {
 		`SELECT count(*) FROM email_verifications WHERE consumed_at IS NULL`).Scan(&active))
 	require.Equal(t, 1, active)
 
-	_, err := env.Svc.VerifyEmail(ctx, "an@gmail.com", newCode)
+	// The new code row carries the new password; the user row has none yet.
+	var pending string
+	var userHash *string
+	require.NoError(t, env.Pool.QueryRow(ctx,
+		`SELECT password_hash FROM email_verifications WHERE consumed_at IS NULL`).Scan(&pending))
+	ok, err := VerifyPassword(pending, "newpass123")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.NoError(t, env.Pool.QueryRow(ctx, `SELECT password_hash FROM users`).Scan(&userHash))
+	require.Nil(t, userHash)
+
+	_, err = env.Svc.VerifyEmail(ctx, "an@gmail.com", newCode, "newpass123")
 	require.NoError(t, err)
 
-	// The newest password is the one stored.
+	// After verification the newest password is the account password.
 	var hash string
 	require.NoError(t, env.Pool.QueryRow(ctx, `SELECT password_hash FROM users`).Scan(&hash))
-	ok, err := VerifyPassword(hash, "newpass123")
+	ok, err = VerifyPassword(hash, "newpass123")
 	require.NoError(t, err)
 	require.True(t, ok)
 }
@@ -123,7 +134,7 @@ func TestResendVerification_UnknownEmailSilent(t *testing.T) {
 
 	// Already verified: silent as well.
 	require.NoError(t, env.Svc.Register(ctx, "an@gmail.com", testPassword))
-	_, err := env.Svc.VerifyEmail(ctx, "an@gmail.com", lastCode(t, env))
+	_, err := env.Svc.VerifyEmail(ctx, "an@gmail.com", lastCode(t, env), testPassword)
 	require.NoError(t, err)
 	env.Clock.Advance(time.Hour)
 	require.NoError(t, env.Svc.ResendVerification(ctx, "an@gmail.com"))
@@ -154,10 +165,10 @@ func TestResendVerification_Cooldown(t *testing.T) {
 	require.ErrorIs(t, env.Svc.ResendVerification(ctx, "an@gmail.com"), ErrResendTooSoon)
 
 	if oldCode != newCode {
-		_, err := env.Svc.VerifyEmail(ctx, "an@gmail.com", oldCode)
+		_, err := env.Svc.VerifyEmail(ctx, "an@gmail.com", oldCode, testPassword)
 		require.ErrorIs(t, err, ErrInvalidCode)
 	}
-	_, err := env.Svc.VerifyEmail(ctx, "an@gmail.com", newCode)
+	_, err := env.Svc.VerifyEmail(ctx, "an@gmail.com", newCode, testPassword)
 	require.NoError(t, err)
 }
 
@@ -169,7 +180,7 @@ func TestVerifyEmail_Success(t *testing.T) {
 	code := lastCode(t, env)
 	env.Clock.Advance(3 * time.Minute)
 
-	tok, err := env.Svc.VerifyEmail(ctx, " An@gmail.com", code)
+	tok, err := env.Svc.VerifyEmail(ctx, " An@gmail.com", code, testPassword)
 	require.NoError(t, err)
 	require.NotEmpty(t, tok.AccessToken)
 	require.NotEmpty(t, tok.RefreshToken)
@@ -196,7 +207,7 @@ func TestVerifyEmail_Expired(t *testing.T) {
 	code := lastCode(t, env)
 
 	env.Clock.Advance(10*time.Minute + time.Second)
-	_, err := env.Svc.VerifyEmail(ctx, "an@gmail.com", code)
+	_, err := env.Svc.VerifyEmail(ctx, "an@gmail.com", code, testPassword)
 	require.ErrorIs(t, err, ErrInvalidCode)
 }
 
@@ -209,14 +220,14 @@ func TestVerifyEmail_LockedAfterFiveWrong(t *testing.T) {
 	wrong := wrongCode(code)
 
 	for i := range 5 {
-		_, err := env.Svc.VerifyEmail(ctx, "an@gmail.com", wrong)
+		_, err := env.Svc.VerifyEmail(ctx, "an@gmail.com", wrong, testPassword)
 		require.ErrorIs(t, err, ErrInvalidCode, "attempt %d", i+1)
 	}
 	var attempts int
 	require.NoError(t, env.Pool.QueryRow(ctx, `SELECT attempts FROM email_verifications`).Scan(&attempts))
 	require.Equal(t, 5, attempts)
 
-	_, err := env.Svc.VerifyEmail(ctx, "an@gmail.com", code)
+	_, err := env.Svc.VerifyEmail(ctx, "an@gmail.com", code, testPassword)
 	require.ErrorIs(t, err, ErrInvalidCode)
 }
 
@@ -227,16 +238,132 @@ func TestVerifyEmail_CodeSingleUse(t *testing.T) {
 	require.NoError(t, env.Svc.Register(ctx, "an@gmail.com", testPassword))
 	code := lastCode(t, env)
 
-	_, err := env.Svc.VerifyEmail(ctx, "an@gmail.com", code)
+	_, err := env.Svc.VerifyEmail(ctx, "an@gmail.com", code, testPassword)
 	require.NoError(t, err)
-	_, err = env.Svc.VerifyEmail(ctx, "an@gmail.com", code)
+	_, err = env.Svc.VerifyEmail(ctx, "an@gmail.com", code, testPassword)
 	require.ErrorIs(t, err, ErrInvalidCode)
 }
 
 func TestVerifyEmail_UnknownEmail(t *testing.T) {
 	env := newTestEnv(t)
-	_, err := env.Svc.VerifyEmail(context.Background(), "nobody@gmail.com", "123456")
+	_, err := env.Svc.VerifyEmail(context.Background(), "nobody@gmail.com", "123456", testPassword)
 	require.ErrorIs(t, err, ErrInvalidCode)
+}
+
+func TestVerifyEmail_RequiresSignupPassword(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+
+	require.NoError(t, env.Svc.Register(ctx, "an@gmail.com", testPassword))
+	code := lastCode(t, env)
+
+	_, err := env.Svc.VerifyEmail(ctx, "an@gmail.com", code, "other1234")
+	require.ErrorIs(t, err, ErrInvalidCode)
+	require.Equal(t, 1, codeAttempts(t, env))
+	requireUserUnverified(t, env)
+
+	_, err = env.Svc.VerifyEmail(ctx, "an@gmail.com", code, testPassword)
+	require.NoError(t, err)
+}
+
+func TestRegister_ReRegisterCannotHijack(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+	const victimPw, attackerPw = "victim123", "attacker123"
+
+	require.NoError(t, env.Svc.Register(ctx, "an@gmail.com", victimPw))
+	lastCode(t, env)
+
+	env.Clock.Advance(61 * time.Second)
+	require.NoError(t, env.Svc.Register(ctx, "an@gmail.com", attackerPw))
+	attackerCode := lastCode(t, env) // mailed to the victim, not the attacker
+
+	// The re-registration does not touch the account password.
+	var userHash *string
+	require.NoError(t, env.Pool.QueryRow(ctx, `SELECT password_hash FROM users`).Scan(&userHash))
+	require.Nil(t, userHash)
+
+	// Victim uses the newest code with their own password: rejected.
+	_, err := env.Svc.VerifyEmail(ctx, "an@gmail.com", attackerCode, victimPw)
+	require.ErrorIs(t, err, ErrInvalidCode)
+	// Attacker without the code cannot verify.
+	_, err = env.Svc.VerifyEmail(ctx, "an@gmail.com", wrongCode(attackerCode), attackerPw)
+	require.ErrorIs(t, err, ErrInvalidCode)
+	requireUserUnverified(t, env)
+
+	// Victim re-registers after the cooldown and verifies with the newest code.
+	env.Clock.Advance(61 * time.Second)
+	require.NoError(t, env.Svc.Register(ctx, "an@gmail.com", victimPw))
+	victimCode := lastCode(t, env)
+	_, err = env.Svc.VerifyEmail(ctx, "an@gmail.com", victimCode, victimPw)
+	require.NoError(t, err)
+
+	var hash string
+	require.NoError(t, env.Pool.QueryRow(ctx, `SELECT password_hash FROM users`).Scan(&hash))
+	ok, err := VerifyPassword(hash, victimPw)
+	require.NoError(t, err)
+	require.True(t, ok)
+	ok, err = VerifyPassword(hash, attackerPw)
+	require.NoError(t, err)
+	require.False(t, ok)
+}
+
+func TestResendVerification_KeepsPendingPassword(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+
+	require.NoError(t, env.Svc.Register(ctx, "an@gmail.com", testPassword))
+	lastCode(t, env)
+
+	env.Clock.Advance(61 * time.Second)
+	require.NoError(t, env.Svc.ResendVerification(ctx, "an@gmail.com"))
+	code := lastCode(t, env)
+
+	_, err := env.Svc.VerifyEmail(ctx, "an@gmail.com", code, testPassword)
+	require.NoError(t, err)
+
+	var hash string
+	require.NoError(t, env.Pool.QueryRow(ctx, `SELECT password_hash FROM users`).Scan(&hash))
+	ok, err := VerifyPassword(hash, testPassword)
+	require.NoError(t, err)
+	require.True(t, ok)
+}
+
+func TestResendVerification_IgnoresNonCustomerAndLocked(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+
+	require.NoError(t, env.Svc.Register(ctx, "an@gmail.com", testPassword))
+	lastCode(t, env)
+	env.Clock.Advance(61 * time.Second)
+
+	_, err := env.Pool.Exec(ctx, `UPDATE users SET status = 'locked'`)
+	require.NoError(t, err)
+	require.NoError(t, env.Svc.ResendVerification(ctx, "an@gmail.com"))
+
+	_, err = env.Pool.Exec(ctx, `UPDATE users SET status = 'active', role = 'partner'`)
+	require.NoError(t, err)
+	require.NoError(t, env.Svc.ResendVerification(ctx, "an@gmail.com"))
+
+	var codes int
+	require.NoError(t, env.Pool.QueryRow(ctx, `SELECT count(*) FROM email_verifications`).Scan(&codes))
+	require.Equal(t, 1, codes)
+}
+
+func codeAttempts(t *testing.T, env *testEnv) int {
+	t.Helper()
+	var n int
+	require.NoError(t, env.Pool.QueryRow(context.Background(),
+		`SELECT attempts FROM email_verifications WHERE consumed_at IS NULL`).Scan(&n))
+	return n
+}
+
+func requireUserUnverified(t *testing.T, env *testEnv) {
+	t.Helper()
+	var verifiedAt *time.Time
+	require.NoError(t, env.Pool.QueryRow(context.Background(),
+		`SELECT email_verified_at FROM users`).Scan(&verifiedAt))
+	require.Nil(t, verifiedAt)
 }
 
 func wrongCode(code string) string {

@@ -28,7 +28,7 @@ func (q *Queries) ConsumeCode(ctx context.Context, arg ConsumeCodeParams) error 
 }
 
 const getLatestActiveCodeForUpdate = `-- name: GetLatestActiveCodeForUpdate :one
-SELECT id, user_id, purpose, code_hash, expires_at, attempts, consumed_at, created_at, updated_at FROM email_verifications
+SELECT id, user_id, purpose, code_hash, password_hash, expires_at, attempts, consumed_at, created_at, updated_at FROM email_verifications
 WHERE user_id = $1 AND purpose = $2 AND consumed_at IS NULL
 ORDER BY created_at DESC, id DESC
 LIMIT 1
@@ -48,6 +48,7 @@ func (q *Queries) GetLatestActiveCodeForUpdate(ctx context.Context, arg GetLates
 		&i.UserID,
 		&i.Purpose,
 		&i.CodeHash,
+		&i.PasswordHash,
 		&i.ExpiresAt,
 		&i.Attempts,
 		&i.ConsumedAt,
@@ -57,23 +58,34 @@ func (q *Queries) GetLatestActiveCodeForUpdate(ctx context.Context, arg GetLates
 	return i, err
 }
 
-const getLatestCodeCreatedAt = `-- name: GetLatestCodeCreatedAt :one
-SELECT created_at FROM email_verifications
+const getLatestCode = `-- name: GetLatestCode :one
+SELECT id, user_id, purpose, code_hash, password_hash, expires_at, attempts, consumed_at, created_at, updated_at FROM email_verifications
 WHERE user_id = $1 AND purpose = $2
 ORDER BY created_at DESC, id DESC
 LIMIT 1
 `
 
-type GetLatestCodeCreatedAtParams struct {
+type GetLatestCodeParams struct {
 	UserID  uuid.UUID
 	Purpose string
 }
 
-func (q *Queries) GetLatestCodeCreatedAt(ctx context.Context, arg GetLatestCodeCreatedAtParams) (time.Time, error) {
-	row := q.db.QueryRow(ctx, getLatestCodeCreatedAt, arg.UserID, arg.Purpose)
-	var created_at time.Time
-	err := row.Scan(&created_at)
-	return created_at, err
+func (q *Queries) GetLatestCode(ctx context.Context, arg GetLatestCodeParams) (EmailVerification, error) {
+	row := q.db.QueryRow(ctx, getLatestCode, arg.UserID, arg.Purpose)
+	var i EmailVerification
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.Purpose,
+		&i.CodeHash,
+		&i.PasswordHash,
+		&i.ExpiresAt,
+		&i.Attempts,
+		&i.ConsumedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }
 
 const getUserByEmail = `-- name: GetUserByEmail :one
@@ -196,17 +208,18 @@ func (q *Queries) InsertUser(ctx context.Context, arg InsertUserParams) error {
 }
 
 const insertVerification = `-- name: InsertVerification :exec
-INSERT INTO email_verifications (id, user_id, purpose, code_hash, expires_at, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $6)
+INSERT INTO email_verifications (id, user_id, purpose, code_hash, password_hash, expires_at, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
 `
 
 type InsertVerificationParams struct {
-	ID        uuid.UUID
-	UserID    uuid.UUID
-	Purpose   string
-	CodeHash  []byte
-	ExpiresAt time.Time
-	Now       time.Time
+	ID           uuid.UUID
+	UserID       uuid.UUID
+	Purpose      string
+	CodeHash     []byte
+	PasswordHash *string
+	ExpiresAt    time.Time
+	Now          time.Time
 }
 
 func (q *Queries) InsertVerification(ctx context.Context, arg InsertVerificationParams) error {
@@ -215,6 +228,7 @@ func (q *Queries) InsertVerification(ctx context.Context, arg InsertVerification
 		arg.UserID,
 		arg.Purpose,
 		arg.CodeHash,
+		arg.PasswordHash,
 		arg.ExpiresAt,
 		arg.Now,
 	)
@@ -238,31 +252,18 @@ func (q *Queries) InvalidateCodes(ctx context.Context, arg InvalidateCodesParams
 }
 
 const markEmailVerified = `-- name: MarkEmailVerified :exec
-UPDATE users SET email_verified_at = $1::timestamptz, updated_at = $1::timestamptz
-WHERE id = $2 AND email_verified_at IS NULL
+UPDATE users
+SET email_verified_at = $1::timestamptz, password_hash = $2, updated_at = $1::timestamptz
+WHERE id = $3 AND email_verified_at IS NULL
 `
 
 type MarkEmailVerifiedParams struct {
-	Now time.Time
-	ID  uuid.UUID
-}
-
-func (q *Queries) MarkEmailVerified(ctx context.Context, arg MarkEmailVerifiedParams) error {
-	_, err := q.db.Exec(ctx, markEmailVerified, arg.Now, arg.ID)
-	return err
-}
-
-const updateUserPassword = `-- name: UpdateUserPassword :exec
-UPDATE users SET password_hash = $1, updated_at = $2 WHERE id = $3
-`
-
-type UpdateUserPasswordParams struct {
-	PasswordHash *string
 	Now          time.Time
+	PasswordHash *string
 	ID           uuid.UUID
 }
 
-func (q *Queries) UpdateUserPassword(ctx context.Context, arg UpdateUserPasswordParams) error {
-	_, err := q.db.Exec(ctx, updateUserPassword, arg.PasswordHash, arg.Now, arg.ID)
+func (q *Queries) MarkEmailVerified(ctx context.Context, arg MarkEmailVerifiedParams) error {
+	_, err := q.db.Exec(ctx, markEmailVerified, arg.Now, arg.PasswordHash, arg.ID)
 	return err
 }

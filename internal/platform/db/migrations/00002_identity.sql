@@ -24,12 +24,16 @@ CREATE TABLE email_verifications (
     id          uuid PRIMARY KEY,
     user_id     uuid NOT NULL REFERENCES users (id),
     purpose     text NOT NULL CHECK (purpose IN ('signup', 'password_reset')),
-    code_hash   bytea NOT NULL,
-    expires_at  timestamptz NOT NULL,
-    attempts    int NOT NULL DEFAULT 0,
-    consumed_at timestamptz NULL,
-    created_at  timestamptz NOT NULL DEFAULT now(),
-    updated_at  timestamptz NOT NULL DEFAULT now()
+    code_hash     bytea NOT NULL,
+    -- For signup: argon2id hash of the password submitted with the signup.
+    -- It becomes users.password_hash only when the code is verified.
+    password_hash text NULL,
+    expires_at    timestamptz NOT NULL,
+    attempts      int NOT NULL DEFAULT 0,
+    consumed_at   timestamptz NULL,
+    created_at    timestamptz NOT NULL DEFAULT now(),
+    updated_at    timestamptz NOT NULL DEFAULT now(),
+    CHECK (purpose <> 'signup' OR password_hash IS NOT NULL)
 );
 
 CREATE INDEX email_verifications_user_purpose_created_idx

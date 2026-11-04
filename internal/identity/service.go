@@ -75,10 +75,21 @@ type Tokens struct {
 	Role             auth.Role `json:"role"`
 }
 
-// Register creates an unverified customer and emails a signup code. If the
-// email belongs to an unverified customer, the password is replaced and a new
-// code is sent (subject to the resend cooldown), since the earlier signup may
-// have been someone mistyping their own address.
+// Lock order rule: every transaction that touches both a user and its
+// verification codes locks the users row (FOR UPDATE) first and only then
+// reads/locks/updates email_verifications rows. Keep it user → code to avoid
+// deadlocks between Register, ResendVerification and VerifyEmail.
+//
+// The password submitted with a signup is stored (as argon2id) on the signup
+// code row, not on the user. It becomes users.password_hash only when that
+// code is verified together with the same password, so a re-registration by
+// someone else cannot replace the password of a pending account.
+
+// Register creates an unverified customer (without a password) and emails a
+// signup code bound to the submitted password. If the email belongs to an
+// unverified active customer, a new code bound to the new password is sent
+// (subject to the resend cooldown), since the earlier signup may have been
+// someone mistyping their own address.
 func (s *Service) Register(ctx context.Context, email, password string) error {
 	e, err := NormalizeEmail(email)
 	if err != nil {
@@ -102,31 +113,29 @@ func (s *Service) Register(ctx context.Context, email, password string) error {
 				return err
 			}
 			if err := q.InsertUser(ctx, store.InsertUserParams{
-				ID: id, Email: e, PasswordHash: &hash, Role: string(auth.RoleCustomer), Now: now,
+				ID: id, Email: e, PasswordHash: nil, Role: string(auth.RoleCustomer), Now: now,
 			}); err != nil {
 				return fmt.Errorf("insert user: %w", err)
 			}
 			if err := q.InsertCustomerProfile(ctx, store.InsertCustomerProfileParams{UserID: id, Now: now}); err != nil {
 				return fmt.Errorf("insert customer profile: %w", err)
 			}
-			return s.sendSignupCodeTx(ctx, tx, q, id, e, now)
+			return s.sendSignupCodeTx(ctx, tx, q, id, e, hash, now)
 		}
 		if err != nil {
 			return fmt.Errorf("get user: %w", err)
 		}
-		// Only a pending customer signup may be taken over by a new signup.
-		if u.EmailVerifiedAt != nil || u.Role != string(auth.RoleCustomer) || u.Status == userStatusLocked {
+		if !pendingCustomer(u) {
 			return ErrEmailTaken
 		}
-		if err := s.checkCooldown(ctx, q, u.ID, now); err != nil {
+		last, err := latestSignupCode(ctx, q, u.ID)
+		if err != nil {
 			return err
 		}
-		if err := q.UpdateUserPassword(ctx, store.UpdateUserPasswordParams{
-			PasswordHash: &hash, Now: now, ID: u.ID,
-		}); err != nil {
-			return fmt.Errorf("update password: %w", err)
+		if inCooldown(last, now) {
+			return ErrResendTooSoon
 		}
-		return s.sendSignupCodeTx(ctx, tx, q, u.ID, e, now)
+		return s.sendSignupCodeTx(ctx, tx, q, u.ID, e, hash, now)
 	})
 	if isUniqueViolation(err, "users_email_key") {
 		// A concurrent signup for the same email just created the user and
@@ -136,9 +145,10 @@ func (s *Service) Register(ctx context.Context, email, password string) error {
 	return err
 }
 
-// ResendVerification emails a new signup code. It returns nil without sending
-// anything when the email is invalid, unknown or already verified, so it does
-// not reveal which emails have accounts.
+// ResendVerification emails a new signup code bound to the same pending
+// password as the latest signup code. It returns nil without sending anything
+// when the email is invalid, unknown, already verified or not an active
+// customer, so it does not reveal which emails have accounts.
 func (s *Service) ResendVerification(ctx context.Context, email string) error {
 	e, err := NormalizeEmail(email)
 	if err != nil {
@@ -154,19 +164,29 @@ func (s *Service) ResendVerification(ctx context.Context, email string) error {
 		if err != nil {
 			return fmt.Errorf("get user: %w", err)
 		}
-		if u.EmailVerifiedAt != nil {
+		if !pendingCustomer(u) {
 			return nil
 		}
-		if err := s.checkCooldown(ctx, q, u.ID, now); err != nil {
+		last, err := latestSignupCode(ctx, q, u.ID)
+		if err != nil {
 			return err
 		}
-		return s.sendSignupCodeTx(ctx, tx, q, u.ID, e, now)
+		if last == nil || last.PasswordHash == nil {
+			return nil
+		}
+		if inCooldown(last, now) {
+			return ErrResendTooSoon
+		}
+		return s.sendSignupCodeTx(ctx, tx, q, u.ID, e, *last.PasswordHash, now)
 	})
 }
 
-// VerifyEmail checks the latest signup code and, if correct, marks the email
-// verified and starts a session. Any failure is reported as ErrInvalidCode.
-func (s *Service) VerifyEmail(ctx context.Context, email, code string) (Tokens, error) {
+// VerifyEmail checks the latest signup code together with the password that
+// was submitted with that signup. If both match, the pending password becomes
+// the account password, the email is marked verified and a session starts.
+// Any failure is reported as ErrInvalidCode, without saying which part was
+// wrong.
+func (s *Service) VerifyEmail(ctx context.Context, email, code, password string) (Tokens, error) {
 	e, err := NormalizeEmail(email)
 	if err != nil {
 		return Tokens{}, ErrInvalidCode
@@ -179,7 +199,8 @@ func (s *Service) VerifyEmail(ctx context.Context, email, code string) (Tokens, 
 	)
 	err = db.InTx(ctx, s.pool, func(tx pgx.Tx) error {
 		q := store.New(tx)
-		u, err := q.GetUserByEmail(ctx, e)
+		// Lock order: user row first, then the code row.
+		u, err := q.GetUserByEmailForUpdate(ctx, e)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrInvalidCode
 		}
@@ -198,7 +219,17 @@ func (s *Service) VerifyEmail(ctx context.Context, email, code string) (Tokens, 
 		if !now.Before(c.ExpiresAt) || c.Attempts >= maxCodeAttempts {
 			return ErrInvalidCode
 		}
-		if !hmac.Equal(hashCode(s.pepper, purposeSignup, u.ID.String(), code), c.CodeHash) {
+		// Always evaluate both checks so timing does not reveal which failed.
+		codeOK := hmac.Equal(hashCode(s.pepper, purposeSignup, u.ID.String(), code), c.CodeHash)
+		passwordOK := false
+		if c.PasswordHash != nil {
+			ok, err := VerifyPassword(*c.PasswordHash, password)
+			if err != nil {
+				return fmt.Errorf("verify pending password: %w", err)
+			}
+			passwordOK = ok
+		}
+		if !codeOK || !passwordOK {
 			// Commit the failed attempt; the error is returned after commit.
 			wrong = true
 			return q.IncrementCodeAttempts(ctx, store.IncrementCodeAttemptsParams{Now: now, ID: c.ID})
@@ -213,7 +244,9 @@ func (s *Service) VerifyEmail(ctx context.Context, email, code string) (Tokens, 
 		if err := q.ConsumeCode(ctx, store.ConsumeCodeParams{Now: now, ID: c.ID}); err != nil {
 			return fmt.Errorf("consume code: %w", err)
 		}
-		if err := q.MarkEmailVerified(ctx, store.MarkEmailVerifiedParams{Now: now, ID: u.ID}); err != nil {
+		if err := q.MarkEmailVerified(ctx, store.MarkEmailVerifiedParams{
+			Now: now, PasswordHash: c.PasswordHash, ID: u.ID,
+		}); err != nil {
 			return fmt.Errorf("mark verified: %w", err)
 		}
 		familyID, err := uuid.NewV7()
@@ -274,27 +307,33 @@ func hashRefreshToken(token string) []byte {
 	return h[:]
 }
 
-// checkCooldown rejects a new code while the user's latest signup code is
-// younger than resendCooldown.
-func (s *Service) checkCooldown(ctx context.Context, q *store.Queries, userID uuid.UUID, now time.Time) error {
-	last, err := q.GetLatestCodeCreatedAt(ctx, store.GetLatestCodeCreatedAtParams{
-		UserID: userID, Purpose: purposeSignup,
-	})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("get latest code: %w", err)
-	}
-	if now.Before(last.Add(resendCooldown)) {
-		return ErrResendTooSoon
-	}
-	return nil
+// pendingCustomer reports whether u is an active, unverified customer: the
+// only kind of account a public signup or resend may act on.
+func pendingCustomer(u store.User) bool {
+	return u.EmailVerifiedAt == nil && u.Role == string(auth.RoleCustomer) && u.Status != userStatusLocked
 }
 
-// sendSignupCodeTx invalidates older signup codes, stores a new one and
-// enqueues its email, all inside tx.
-func (s *Service) sendSignupCodeTx(ctx context.Context, tx pgx.Tx, q *store.Queries, userID uuid.UUID, email string, now time.Time) error {
+// latestSignupCode returns the user's most recent signup code (consumed or
+// not), or nil if there is none. Caller must already hold the user row lock.
+func latestSignupCode(ctx context.Context, q *store.Queries, userID uuid.UUID) (*store.EmailVerification, error) {
+	c, err := q.GetLatestCode(ctx, store.GetLatestCodeParams{UserID: userID, Purpose: purposeSignup})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get latest code: %w", err)
+	}
+	return &c, nil
+}
+
+// inCooldown reports whether last was created less than resendCooldown ago.
+func inCooldown(last *store.EmailVerification, now time.Time) bool {
+	return last != nil && now.Before(last.CreatedAt.Add(resendCooldown))
+}
+
+// sendSignupCodeTx invalidates older signup codes, stores a new one bound to
+// passwordHash and enqueues its email, all inside tx.
+func (s *Service) sendSignupCodeTx(ctx context.Context, tx pgx.Tx, q *store.Queries, userID uuid.UUID, email, passwordHash string, now time.Time) error {
 	if err := q.InvalidateCodes(ctx, store.InvalidateCodesParams{
 		Now: now, UserID: userID, Purpose: purposeSignup,
 	}); err != nil {
@@ -309,12 +348,13 @@ func (s *Service) sendSignupCodeTx(ctx context.Context, tx pgx.Tx, q *store.Quer
 		return err
 	}
 	if err := q.InsertVerification(ctx, store.InsertVerificationParams{
-		ID:        id,
-		UserID:    userID,
-		Purpose:   purposeSignup,
-		CodeHash:  hashCode(s.pepper, purposeSignup, userID.String(), code),
-		ExpiresAt: now.Add(codeTTL),
-		Now:       now,
+		ID:           id,
+		UserID:       userID,
+		Purpose:      purposeSignup,
+		CodeHash:     hashCode(s.pepper, purposeSignup, userID.String(), code),
+		PasswordHash: &passwordHash,
+		ExpiresAt:    now.Add(codeTTL),
+		Now:          now,
 	}); err != nil {
 		return fmt.Errorf("insert verification: %w", err)
 	}
