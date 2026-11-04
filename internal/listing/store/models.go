@@ -116,32 +116,33 @@ type Holiday struct {
 }
 
 type Listing struct {
-	ID              uuid.UUID
-	PartnerID       uuid.UUID
-	ServiceType     string
-	Title           string
-	Slug            string
-	Summary         *string
-	Description     *string
-	CoverFileID     *uuid.UUID
-	ProvinceCode    *string
-	WardCode        *string
-	Address         *string
-	Latitude        *float64
-	Longitude       *float64
-	ReviewStatus    string
-	RejectionReason *string
-	SubmittedAt     *time.Time
-	ReviewedAt      *time.Time
-	ReviewedBy      *uuid.UUID
-	Visibility      string
-	HiddenReason    *string
-	HiddenAt        *time.Time
-	HiddenBy        *uuid.UUID
-	RatingSum       int32
-	RatingCount     int32
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	ID                   uuid.UUID
+	PartnerID            uuid.UUID
+	ServiceType          string
+	Title                string
+	Slug                 string
+	Summary              *string
+	Description          *string
+	CoverFileID          *uuid.UUID
+	ProvinceCode         *string
+	WardCode             *string
+	Address              *string
+	Latitude             *float64
+	Longitude            *float64
+	ReviewStatus         string
+	RejectionReason      *string
+	SubmittedAt          *time.Time
+	ReviewedAt           *time.Time
+	ReviewedBy           *uuid.UUID
+	Visibility           string
+	HiddenReason         *string
+	HiddenAt             *time.Time
+	HiddenBy             *uuid.UUID
+	HiddenFromVisibility *string
+	RatingSum            int32
+	RatingCount          int32
+	CreatedAt            time.Time
+	UpdatedAt            time.Time
 }
 
 type ListingAuditLog struct {

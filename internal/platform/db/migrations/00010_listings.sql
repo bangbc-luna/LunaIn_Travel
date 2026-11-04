@@ -37,6 +37,9 @@ CREATE TABLE listings (
     hidden_reason    text NULL,
     hidden_at        timestamptz NULL,
     hidden_by        uuid NULL REFERENCES users (id),
+    -- The visibility the listing had when an admin hid it; Unhide restores it.
+    hidden_from_visibility text NULL
+                     CHECK (hidden_from_visibility IN ('published','unpublished_by_partner')),
     -- Average rating = rating_sum / rating_count; no float is stored.
     rating_sum       int  NOT NULL DEFAULT 0 CHECK (rating_sum >= 0),
     rating_count     int  NOT NULL DEFAULT 0 CHECK (rating_count >= 0),
@@ -50,7 +53,8 @@ CREATE TABLE listings (
     CHECK ((province_code IS NULL) = (ward_code IS NULL)),
     CHECK ((latitude IS NULL) = (longitude IS NULL)),
     CHECK (review_status <> 'rejected' OR rejection_reason IS NOT NULL),
-    CHECK (visibility <> 'hidden_by_admin' OR hidden_reason IS NOT NULL)
+    CHECK (visibility <> 'hidden_by_admin' OR hidden_reason IS NOT NULL),
+    CHECK (visibility <> 'hidden_by_admin' OR hidden_from_visibility IS NOT NULL)
 );
 
 CREATE INDEX listings_partner_idx ON listings (partner_id, id DESC);

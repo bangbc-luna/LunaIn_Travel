@@ -172,15 +172,19 @@ SET review_status = 'rejected', rejection_reason = @reason, reviewed_at = @now, 
 WHERE id = @id
 RETURNING *;
 
+-- Hide remembers the visibility it replaces (SET reads the old row), so
+-- Unhide can restore the partner's choice.
 -- name: HideListing :one
 UPDATE listings
-SET visibility = 'hidden_by_admin', hidden_reason = @reason, hidden_at = @now, hidden_by = @actor, updated_at = @now
+SET visibility = 'hidden_by_admin', hidden_from_visibility = visibility,
+    hidden_reason = @reason, hidden_at = @now, hidden_by = @actor, updated_at = @now
 WHERE id = @id
 RETURNING *;
 
 -- name: UnhideListing :one
 UPDATE listings
-SET visibility = 'published', hidden_reason = NULL, hidden_at = NULL, hidden_by = NULL, updated_at = @now
+SET visibility = hidden_from_visibility, hidden_from_visibility = NULL,
+    hidden_reason = NULL, hidden_at = NULL, hidden_by = NULL, updated_at = @now
 WHERE id = @id
 RETURNING *;
 

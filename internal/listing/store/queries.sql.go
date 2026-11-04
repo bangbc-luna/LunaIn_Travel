@@ -17,7 +17,7 @@ const approveListing = `-- name: ApproveListing :one
 UPDATE listings
 SET review_status = 'approved', reviewed_at = $1, reviewed_by = $2, updated_at = $1
 WHERE id = $3
-RETURNING id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, rating_sum, rating_count, created_at, updated_at
+RETURNING id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, hidden_from_visibility, rating_sum, rating_count, created_at, updated_at
 `
 
 type ApproveListingParams struct {
@@ -52,6 +52,7 @@ func (q *Queries) ApproveListing(ctx context.Context, arg ApproveListingParams) 
 		&i.HiddenReason,
 		&i.HiddenAt,
 		&i.HiddenBy,
+		&i.HiddenFromVisibility,
 		&i.RatingSum,
 		&i.RatingCount,
 		&i.CreatedAt,
@@ -184,7 +185,7 @@ func (q *Queries) GetClosedDate(ctx context.Context, arg GetClosedDateParams) (A
 }
 
 const getListing = `-- name: GetListing :one
-SELECT id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, rating_sum, rating_count, created_at, updated_at FROM listings WHERE id = $1
+SELECT id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, hidden_from_visibility, rating_sum, rating_count, created_at, updated_at FROM listings WHERE id = $1
 `
 
 func (q *Queries) GetListing(ctx context.Context, id uuid.UUID) (Listing, error) {
@@ -213,6 +214,7 @@ func (q *Queries) GetListing(ctx context.Context, id uuid.UUID) (Listing, error)
 		&i.HiddenReason,
 		&i.HiddenAt,
 		&i.HiddenBy,
+		&i.HiddenFromVisibility,
 		&i.RatingSum,
 		&i.RatingCount,
 		&i.CreatedAt,
@@ -222,7 +224,7 @@ func (q *Queries) GetListing(ctx context.Context, id uuid.UUID) (Listing, error)
 }
 
 const getOwnedListing = `-- name: GetOwnedListing :one
-SELECT id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, rating_sum, rating_count, created_at, updated_at FROM listings WHERE id = $1 AND partner_id = $2
+SELECT id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, hidden_from_visibility, rating_sum, rating_count, created_at, updated_at FROM listings WHERE id = $1 AND partner_id = $2
 `
 
 type GetOwnedListingParams struct {
@@ -256,6 +258,7 @@ func (q *Queries) GetOwnedListing(ctx context.Context, arg GetOwnedListingParams
 		&i.HiddenReason,
 		&i.HiddenAt,
 		&i.HiddenBy,
+		&i.HiddenFromVisibility,
 		&i.RatingSum,
 		&i.RatingCount,
 		&i.CreatedAt,
@@ -265,7 +268,7 @@ func (q *Queries) GetOwnedListing(ctx context.Context, arg GetOwnedListingParams
 }
 
 const getPublicListingBySlug = `-- name: GetPublicListingBySlug :one
-SELECT l.id, l.partner_id, l.service_type, l.title, l.slug, l.summary, l.description, l.cover_file_id, l.province_code, l.ward_code, l.address, l.latitude, l.longitude, l.review_status, l.rejection_reason, l.submitted_at, l.reviewed_at, l.reviewed_by, l.visibility, l.hidden_reason, l.hidden_at, l.hidden_by, l.rating_sum, l.rating_count, l.created_at, l.updated_at,
+SELECT l.id, l.partner_id, l.service_type, l.title, l.slug, l.summary, l.description, l.cover_file_id, l.province_code, l.ward_code, l.address, l.latitude, l.longitude, l.review_status, l.rejection_reason, l.submitted_at, l.reviewed_at, l.reviewed_by, l.visibility, l.hidden_reason, l.hidden_at, l.hidden_by, l.hidden_from_visibility, l.rating_sum, l.rating_count, l.created_at, l.updated_at,
        (SELECT COALESCE(min(tt.price), 0) FROM attraction_ticket_types tt
         WHERE tt.listing_id = l.id AND tt.active)::bigint AS price_from
 FROM listings l
@@ -309,6 +312,7 @@ func (q *Queries) GetPublicListingBySlug(ctx context.Context, slug string) (GetP
 		&i.Listing.HiddenReason,
 		&i.Listing.HiddenAt,
 		&i.Listing.HiddenBy,
+		&i.Listing.HiddenFromVisibility,
 		&i.Listing.RatingSum,
 		&i.Listing.RatingCount,
 		&i.Listing.CreatedAt,
@@ -372,9 +376,10 @@ func (q *Queries) GetTimeSlot(ctx context.Context, arg GetTimeSlotParams) (Attra
 
 const hideListing = `-- name: HideListing :one
 UPDATE listings
-SET visibility = 'hidden_by_admin', hidden_reason = $1, hidden_at = $2, hidden_by = $3, updated_at = $2
+SET visibility = 'hidden_by_admin', hidden_from_visibility = visibility,
+    hidden_reason = $1, hidden_at = $2, hidden_by = $3, updated_at = $2
 WHERE id = $4
-RETURNING id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, rating_sum, rating_count, created_at, updated_at
+RETURNING id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, hidden_from_visibility, rating_sum, rating_count, created_at, updated_at
 `
 
 type HideListingParams struct {
@@ -384,6 +389,8 @@ type HideListingParams struct {
 	ID     uuid.UUID
 }
 
+// Hide remembers the visibility it replaces (SET reads the old row), so
+// Unhide can restore the partner's choice.
 func (q *Queries) HideListing(ctx context.Context, arg HideListingParams) (Listing, error) {
 	row := q.db.QueryRow(ctx, hideListing,
 		arg.Reason,
@@ -415,6 +422,7 @@ func (q *Queries) HideListing(ctx context.Context, arg HideListingParams) (Listi
 		&i.HiddenReason,
 		&i.HiddenAt,
 		&i.HiddenBy,
+		&i.HiddenFromVisibility,
 		&i.RatingSum,
 		&i.RatingCount,
 		&i.CreatedAt,
@@ -509,7 +517,7 @@ INSERT INTO listings (
     $11, $12, $13, $13
 )
 ON CONFLICT (slug) DO NOTHING
-RETURNING id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, rating_sum, rating_count, created_at, updated_at
+RETURNING id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, hidden_from_visibility, rating_sum, rating_count, created_at, updated_at
 `
 
 type InsertListingParams struct {
@@ -570,6 +578,7 @@ func (q *Queries) InsertListing(ctx context.Context, arg InsertListingParams) (L
 		&i.HiddenReason,
 		&i.HiddenAt,
 		&i.HiddenBy,
+		&i.HiddenFromVisibility,
 		&i.RatingSum,
 		&i.RatingCount,
 		&i.CreatedAt,
@@ -730,7 +739,7 @@ func (q *Queries) ListActiveTicketTypesByIDs(ctx context.Context, arg ListActive
 }
 
 const listAdminListings = `-- name: ListAdminListings :many
-SELECT id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, rating_sum, rating_count, created_at, updated_at FROM listings
+SELECT id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, hidden_from_visibility, rating_sum, rating_count, created_at, updated_at FROM listings
 WHERE ($1::text IS NULL OR review_status = $1)
   AND ($2::text IS NULL OR visibility = $2)
   AND ($3::text IS NULL OR service_type = $3)
@@ -788,6 +797,7 @@ func (q *Queries) ListAdminListings(ctx context.Context, arg ListAdminListingsPa
 			&i.HiddenReason,
 			&i.HiddenAt,
 			&i.HiddenBy,
+			&i.HiddenFromVisibility,
 			&i.RatingSum,
 			&i.RatingCount,
 			&i.CreatedAt,
@@ -804,7 +814,7 @@ func (q *Queries) ListAdminListings(ctx context.Context, arg ListAdminListingsPa
 }
 
 const listAdminPendingListings = `-- name: ListAdminPendingListings :many
-SELECT id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, rating_sum, rating_count, created_at, updated_at FROM listings
+SELECT id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, hidden_from_visibility, rating_sum, rating_count, created_at, updated_at FROM listings
 WHERE review_status = 'pending_review'
   AND ($1::text IS NULL OR visibility = $1)
   AND ($2::text IS NULL OR service_type = $2)
@@ -863,6 +873,7 @@ func (q *Queries) ListAdminPendingListings(ctx context.Context, arg ListAdminPen
 			&i.HiddenReason,
 			&i.HiddenAt,
 			&i.HiddenBy,
+			&i.HiddenFromVisibility,
 			&i.RatingSum,
 			&i.RatingCount,
 			&i.CreatedAt,
@@ -976,7 +987,7 @@ func (q *Queries) ListListingImages(ctx context.Context, listingID uuid.UUID) ([
 }
 
 const listOwnListings = `-- name: ListOwnListings :many
-SELECT id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, rating_sum, rating_count, created_at, updated_at FROM listings
+SELECT id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, hidden_from_visibility, rating_sum, rating_count, created_at, updated_at FROM listings
 WHERE partner_id = $1
   AND ($2::text IS NULL OR review_status = $2)
   AND ($3::uuid IS NULL OR id < $3)
@@ -1028,6 +1039,7 @@ func (q *Queries) ListOwnListings(ctx context.Context, arg ListOwnListingsParams
 			&i.HiddenReason,
 			&i.HiddenAt,
 			&i.HiddenBy,
+			&i.HiddenFromVisibility,
 			&i.RatingSum,
 			&i.RatingCount,
 			&i.CreatedAt,
@@ -1171,7 +1183,7 @@ func (q *Queries) ListingPartnerID(ctx context.Context, id uuid.UUID) (uuid.UUID
 }
 
 const lockListing = `-- name: LockListing :one
-SELECT id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, rating_sum, rating_count, created_at, updated_at FROM listings WHERE id = $1 FOR NO KEY UPDATE
+SELECT id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, hidden_from_visibility, rating_sum, rating_count, created_at, updated_at FROM listings WHERE id = $1 FOR NO KEY UPDATE
 `
 
 // Review workflow. Admin transitions lock the row by id only (DB §1.1:
@@ -1202,6 +1214,7 @@ func (q *Queries) LockListing(ctx context.Context, id uuid.UUID) (Listing, error
 		&i.HiddenReason,
 		&i.HiddenAt,
 		&i.HiddenBy,
+		&i.HiddenFromVisibility,
 		&i.RatingSum,
 		&i.RatingCount,
 		&i.CreatedAt,
@@ -1211,7 +1224,7 @@ func (q *Queries) LockListing(ctx context.Context, id uuid.UUID) (Listing, error
 }
 
 const lockOwnedListing = `-- name: LockOwnedListing :one
-SELECT id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, rating_sum, rating_count, created_at, updated_at FROM listings WHERE id = $1 AND partner_id = $2 FOR NO KEY UPDATE
+SELECT id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, hidden_from_visibility, rating_sum, rating_count, created_at, updated_at FROM listings WHERE id = $1 AND partner_id = $2 FOR NO KEY UPDATE
 `
 
 type LockOwnedListingParams struct {
@@ -1248,6 +1261,7 @@ func (q *Queries) LockOwnedListing(ctx context.Context, arg LockOwnedListingPara
 		&i.HiddenReason,
 		&i.HiddenAt,
 		&i.HiddenBy,
+		&i.HiddenFromVisibility,
 		&i.RatingSum,
 		&i.RatingCount,
 		&i.CreatedAt,
@@ -1260,7 +1274,7 @@ const rejectListing = `-- name: RejectListing :one
 UPDATE listings
 SET review_status = 'rejected', rejection_reason = $1, reviewed_at = $2, reviewed_by = $3, updated_at = $2
 WHERE id = $4
-RETURNING id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, rating_sum, rating_count, created_at, updated_at
+RETURNING id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, hidden_from_visibility, rating_sum, rating_count, created_at, updated_at
 `
 
 type RejectListingParams struct {
@@ -1301,6 +1315,7 @@ func (q *Queries) RejectListing(ctx context.Context, arg RejectListingParams) (L
 		&i.HiddenReason,
 		&i.HiddenAt,
 		&i.HiddenBy,
+		&i.HiddenFromVisibility,
 		&i.RatingSum,
 		&i.RatingCount,
 		&i.CreatedAt,
@@ -1310,7 +1325,7 @@ func (q *Queries) RejectListing(ctx context.Context, arg RejectListingParams) (L
 }
 
 const searchPublicListings = `-- name: SearchPublicListings :many
-SELECT l.id, l.partner_id, l.service_type, l.title, l.slug, l.summary, l.description, l.cover_file_id, l.province_code, l.ward_code, l.address, l.latitude, l.longitude, l.review_status, l.rejection_reason, l.submitted_at, l.reviewed_at, l.reviewed_by, l.visibility, l.hidden_reason, l.hidden_at, l.hidden_by, l.rating_sum, l.rating_count, l.created_at, l.updated_at,
+SELECT l.id, l.partner_id, l.service_type, l.title, l.slug, l.summary, l.description, l.cover_file_id, l.province_code, l.ward_code, l.address, l.latitude, l.longitude, l.review_status, l.rejection_reason, l.submitted_at, l.reviewed_at, l.reviewed_by, l.visibility, l.hidden_reason, l.hidden_at, l.hidden_by, l.hidden_from_visibility, l.rating_sum, l.rating_count, l.created_at, l.updated_at,
        (SELECT COALESCE(min(tt.price), 0) FROM attraction_ticket_types tt
         WHERE tt.listing_id = l.id AND tt.active)::bigint AS price_from
 FROM listings l
@@ -1393,6 +1408,7 @@ func (q *Queries) SearchPublicListings(ctx context.Context, arg SearchPublicList
 			&i.Listing.HiddenReason,
 			&i.Listing.HiddenAt,
 			&i.Listing.HiddenBy,
+			&i.Listing.HiddenFromVisibility,
 			&i.Listing.RatingSum,
 			&i.Listing.RatingCount,
 			&i.Listing.CreatedAt,
@@ -1412,7 +1428,7 @@ func (q *Queries) SearchPublicListings(ctx context.Context, arg SearchPublicList
 const setListingCover = `-- name: SetListingCover :one
 UPDATE listings SET cover_file_id = $1, updated_at = $2
 WHERE id = $3 AND partner_id = $4
-RETURNING id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, rating_sum, rating_count, created_at, updated_at
+RETURNING id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, hidden_from_visibility, rating_sum, rating_count, created_at, updated_at
 `
 
 type SetListingCoverParams struct {
@@ -1453,6 +1469,7 @@ func (q *Queries) SetListingCover(ctx context.Context, arg SetListingCoverParams
 		&i.HiddenReason,
 		&i.HiddenAt,
 		&i.HiddenBy,
+		&i.HiddenFromVisibility,
 		&i.RatingSum,
 		&i.RatingCount,
 		&i.CreatedAt,
@@ -1463,7 +1480,7 @@ func (q *Queries) SetListingCover(ctx context.Context, arg SetListingCoverParams
 
 const setListingVisibility = `-- name: SetListingVisibility :one
 UPDATE listings SET visibility = $1, updated_at = $2 WHERE id = $3
-RETURNING id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, rating_sum, rating_count, created_at, updated_at
+RETURNING id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, hidden_from_visibility, rating_sum, rating_count, created_at, updated_at
 `
 
 type SetListingVisibilityParams struct {
@@ -1498,6 +1515,7 @@ func (q *Queries) SetListingVisibility(ctx context.Context, arg SetListingVisibi
 		&i.HiddenReason,
 		&i.HiddenAt,
 		&i.HiddenBy,
+		&i.HiddenFromVisibility,
 		&i.RatingSum,
 		&i.RatingCount,
 		&i.CreatedAt,
@@ -1507,7 +1525,7 @@ func (q *Queries) SetListingVisibility(ctx context.Context, arg SetListingVisibi
 }
 
 const shareListing = `-- name: ShareListing :one
-SELECT id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, rating_sum, rating_count, created_at, updated_at FROM listings WHERE id = $1 FOR SHARE
+SELECT id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, hidden_from_visibility, rating_sum, rating_count, created_at, updated_at FROM listings WHERE id = $1 FOR SHARE
 `
 
 // BookableListing: FOR SHARE blocks partner edits (FOR NO KEY UPDATE) until
@@ -1538,6 +1556,7 @@ func (q *Queries) ShareListing(ctx context.Context, id uuid.UUID) (Listing, erro
 		&i.HiddenReason,
 		&i.HiddenAt,
 		&i.HiddenBy,
+		&i.HiddenFromVisibility,
 		&i.RatingSum,
 		&i.RatingCount,
 		&i.CreatedAt,
@@ -1550,7 +1569,7 @@ const submitListing = `-- name: SubmitListing :one
 UPDATE listings
 SET review_status = 'pending_review', submitted_at = $1, rejection_reason = NULL, updated_at = $1
 WHERE id = $2
-RETURNING id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, rating_sum, rating_count, created_at, updated_at
+RETURNING id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, hidden_from_visibility, rating_sum, rating_count, created_at, updated_at
 `
 
 type SubmitListingParams struct {
@@ -1584,6 +1603,7 @@ func (q *Queries) SubmitListing(ctx context.Context, arg SubmitListingParams) (L
 		&i.HiddenReason,
 		&i.HiddenAt,
 		&i.HiddenBy,
+		&i.HiddenFromVisibility,
 		&i.RatingSum,
 		&i.RatingCount,
 		&i.CreatedAt,
@@ -1594,9 +1614,10 @@ func (q *Queries) SubmitListing(ctx context.Context, arg SubmitListingParams) (L
 
 const unhideListing = `-- name: UnhideListing :one
 UPDATE listings
-SET visibility = 'published', hidden_reason = NULL, hidden_at = NULL, hidden_by = NULL, updated_at = $1
+SET visibility = hidden_from_visibility, hidden_from_visibility = NULL,
+    hidden_reason = NULL, hidden_at = NULL, hidden_by = NULL, updated_at = $1
 WHERE id = $2
-RETURNING id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, rating_sum, rating_count, created_at, updated_at
+RETURNING id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, hidden_from_visibility, rating_sum, rating_count, created_at, updated_at
 `
 
 type UnhideListingParams struct {
@@ -1630,6 +1651,7 @@ func (q *Queries) UnhideListing(ctx context.Context, arg UnhideListingParams) (L
 		&i.HiddenReason,
 		&i.HiddenAt,
 		&i.HiddenBy,
+		&i.HiddenFromVisibility,
 		&i.RatingSum,
 		&i.RatingCount,
 		&i.CreatedAt,
@@ -1650,7 +1672,7 @@ SET title = $1,
     longitude = $8,
     updated_at = $9
 WHERE id = $10 AND partner_id = $11
-RETURNING id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, rating_sum, rating_count, created_at, updated_at
+RETURNING id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, hidden_from_visibility, rating_sum, rating_count, created_at, updated_at
 `
 
 type UpdateListingContentParams struct {
@@ -1705,6 +1727,7 @@ func (q *Queries) UpdateListingContent(ctx context.Context, arg UpdateListingCon
 		&i.HiddenReason,
 		&i.HiddenAt,
 		&i.HiddenBy,
+		&i.HiddenFromVisibility,
 		&i.RatingSum,
 		&i.RatingCount,
 		&i.CreatedAt,

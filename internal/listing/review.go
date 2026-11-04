@@ -233,8 +233,9 @@ func (s *Service) Reject(ctx context.Context, actor, id uuid.UUID, reason string
 		})
 }
 
-// Hide hides an approved listing from the public site; only an admin can
-// undo it.
+// Hide hides an approved listing (published or unpublished by the partner)
+// from the public site and remembers that visibility; only an admin can undo
+// it.
 func (s *Service) Hide(ctx context.Context, actor, id uuid.UUID, reason string) (Listing, error) {
 	return s.adminReason(ctx, actor, id, "listing.hide", reason, ReviewApproved, VisibilityHidden,
 		func(q *store.Queries, cur store.Listing, now time.Time, r string) (store.Listing, error) {
@@ -242,7 +243,8 @@ func (s *Service) Hide(ctx context.Context, actor, id uuid.UUID, reason string) 
 		})
 }
 
-// Unhide makes an admin-hidden listing public again.
+// Unhide lifts an admin hide and restores the visibility the listing had
+// when it was hidden (a partner-unpublished listing stays unpublished).
 func (s *Service) Unhide(ctx context.Context, actor, id uuid.UUID) (Listing, error) {
 	return s.adminTransition(ctx, actor, id, "listing.unhide", "", transition{
 		check: func(cur store.Listing) bool { return cur.Visibility == VisibilityHidden },

@@ -209,6 +209,42 @@ func TestUnhide(t *testing.T) {
 	require.Equal(t, 0, e.count(t, `SELECT count(*) FROM listings WHERE id = $1 AND (hidden_at IS NOT NULL OR hidden_by IS NOT NULL)`, l.ID))
 }
 
+// Ruling 4: Unhide restores the partner's prior visibility.
+func TestUnhide_RestoresPartnerUnpublished(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	p := e.partner(t, "Alpha", attraction)
+	l := e.approved(t, p, "Vé A")
+	_, err := e.Svc.Unpublish(ctx, p.ID, p.OwnerUserID, l.ID)
+	require.NoError(t, err)
+	h, err := e.Svc.Hide(ctx, e.Admin, l.ID, "Vi phạm")
+	require.NoError(t, err)
+	require.Equal(t, "hidden_by_admin", h.Visibility)
+	require.Equal(t, 1, e.count(t, `SELECT count(*) FROM listings WHERE id = $1 AND hidden_from_visibility = 'unpublished_by_partner'`, l.ID))
+
+	u, err := e.Svc.Unhide(ctx, e.Admin, l.ID)
+	require.NoError(t, err)
+	require.Equal(t, "unpublished_by_partner", u.Visibility)
+	require.Nil(t, u.HiddenReason)
+	require.Equal(t, 0, e.count(t, `SELECT count(*) FROM listings WHERE id = $1 AND hidden_from_visibility IS NOT NULL`, l.ID))
+	require.Empty(t, e.search(t, listing.SearchFilter{}))
+
+	var before, after []byte
+	require.NoError(t, e.Pool.QueryRow(ctx, `SELECT before, after FROM admin_audit_log
+		WHERE action = 'listing.unhide' AND target_id = $1`, l.ID).Scan(&before, &after))
+	require.JSONEq(t, `{"review_status":"approved","visibility":"hidden_by_admin"}`, string(before))
+	require.JSONEq(t, `{"review_status":"approved","visibility":"unpublished_by_partner"}`, string(after))
+
+	// The partner can publish again afterwards.
+	pub, err := e.Svc.Publish(ctx, p.ID, p.OwnerUserID, l.ID)
+	require.NoError(t, err)
+	require.Equal(t, "published", pub.Visibility)
+
+	// The schema refuses a hidden row that forgot its prior visibility.
+	_, err = e.Pool.Exec(ctx, `UPDATE listings SET visibility = 'hidden_by_admin', hidden_reason = 'x' WHERE id = $1`, l.ID)
+	require.Error(t, err)
+}
+
 func TestUnpublishPublish(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
