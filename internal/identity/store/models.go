@@ -83,6 +83,15 @@ type PlatformSetting struct {
 	UpdatedAt                  time.Time
 }
 
+type Province struct {
+	Code      string
+	Name      string
+	Slug      string
+	SortOrder int32
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
 type RefreshToken struct {
 	ID        uuid.UUID
 	UserID    uuid.UUID
@@ -113,4 +122,14 @@ type UserIdentity struct {
 	ProviderSubject string
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
+}
+
+type Ward struct {
+	Code         string
+	ProvinceCode string
+	Name         string
+	Kind         string
+	Slug         string
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
 }

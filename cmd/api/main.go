@@ -19,6 +19,7 @@ import (
 	"github.com/riverqueue/river"
 
 	"github.com/bangbc-luna/lunain-travel/internal/files"
+	"github.com/bangbc-luna/lunain-travel/internal/geo"
 	"github.com/bangbc-luna/lunain-travel/internal/identity"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/auth"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/clock"
@@ -186,6 +187,7 @@ func serve(log *slog.Logger) error {
 	idSvc.Routes(mux, issuer, httpx.ClientIPFunc(cfg.TrustedProxyHops))
 	settings.NewService(pool, clock.Real{}).Routes(mux, issuer)
 	files.NewService(pool, objects, clock.Real{}, cfg.PublicFileBaseURL).Routes(mux, issuer, httpx.ClientIPFunc(cfg.TrustedProxyHops))
+	geo.NewService(pool).Routes(mux)
 	mux.HandleFunc("GET /healthz", healthz)
 	mux.HandleFunc("GET /readyz", readyz(pool))
 	mux.HandleFunc("/", httpx.NotFound)
