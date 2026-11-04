@@ -207,6 +207,57 @@ func TestGoogle_ConcurrentFirstLogin(t *testing.T) {
 	require.Equal(t, 1, count(t, env, `SELECT count(*) FROM customer_profiles`))
 }
 
+func TestGoogle_DoesNotLinkNonGmailWithoutHD(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+	registerVerified(t, env, "an@company.vn")
+	id := userIDByEmail(t, env, "an@company.vn")
+	googleTok(env, "t1", "sub-1", "an@company.vn")
+
+	_, err := env.Svc.LoginWithGoogle(ctx, "t1")
+	require.ErrorIs(t, err, ErrGoogleLinkRequiresPassword)
+	require.Equal(t, 0, count(t, env, `SELECT count(*) FROM user_identities`))
+	require.Equal(t, 1, count(t, env, `SELECT count(*) FROM users WHERE id = $1 AND password_hash IS NOT NULL`, id))
+	_, err = env.Svc.Login(ctx, "an@company.vn", testPassword)
+	require.NoError(t, err)
+}
+
+func TestGoogle_DoesNotLinkUnverifiedNonGmailAndKeepsCodes(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+	require.NoError(t, env.Svc.Register(ctx, "an@company.vn", testPassword))
+	code := lastCode(t, env)
+	googleTok(env, "t1", "sub-1", "an@company.vn")
+
+	_, err := env.Svc.LoginWithGoogle(ctx, "t1")
+	require.ErrorIs(t, err, ErrGoogleLinkRequiresPassword)
+	require.Equal(t, 0, count(t, env, `SELECT count(*) FROM user_identities`))
+	_, err = env.Svc.VerifyEmail(ctx, "an@company.vn", code, testPassword)
+	require.NoError(t, err)
+}
+
+func TestGoogle_LinksWorkspaceWithHD(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+	registerVerified(t, env, "an@company.vn")
+	id := userIDByEmail(t, env, "an@company.vn")
+	env.Google.Tokens["t1"] = GoogleIdentity{Subject: "sub-1", Email: "an@company.vn", EmailVerified: true, HostedDomain: "company.vn"}
+
+	_, err := env.Svc.LoginWithGoogle(ctx, "t1")
+	require.NoError(t, err)
+	require.Equal(t, 1, count(t, env, `SELECT count(*) FROM user_identities WHERE user_id = $1`, id))
+}
+
+func TestGoogle_NewNonGmailUserStillCreated(t *testing.T) {
+	env := newTestEnv(t)
+	googleTok(env, "t1", "sub-1", "bo@company.vn")
+
+	_, err := env.Svc.LoginWithGoogle(context.Background(), "t1")
+	require.NoError(t, err)
+	id := userIDByEmail(t, env, "bo@company.vn")
+	require.Equal(t, 1, count(t, env, `SELECT count(*) FROM user_identities WHERE user_id = $1`, id))
+}
+
 func TestIdentityFromClaims(t *testing.T) {
 	cases := []struct {
 		name string
@@ -214,10 +265,11 @@ func TestIdentityFromClaims(t *testing.T) {
 		want GoogleIdentity
 		ok   bool
 	}{
-		{"bool", `{"email":"a@b.com","email_verified":true}`, GoogleIdentity{"s", "a@b.com", true}, true},
-		{"string", `{"email":"a@b.com","email_verified":"true"}`, GoogleIdentity{"s", "a@b.com", true}, true},
-		{"false", `{"email":"a@b.com","email_verified":false}`, GoogleIdentity{"s", "a@b.com", false}, true},
-		{"missing flag", `{"email":"a@b.com"}`, GoogleIdentity{"s", "a@b.com", false}, true},
+		{"bool", `{"email":"a@b.com","email_verified":true}`, GoogleIdentity{Subject: "s", Email: "a@b.com", EmailVerified: true}, true},
+		{"string", `{"email":"a@b.com","email_verified":"true"}`, GoogleIdentity{Subject: "s", Email: "a@b.com", EmailVerified: true}, true},
+		{"false", `{"email":"a@b.com","email_verified":false}`, GoogleIdentity{Subject: "s", Email: "a@b.com"}, true},
+		{"hd", `{"email":"a@b.com","email_verified":true,"hd":"b.com"}`, GoogleIdentity{Subject: "s", Email: "a@b.com", EmailVerified: true, HostedDomain: "b.com"}, true},
+		{"missing flag", `{"email":"a@b.com"}`, GoogleIdentity{Subject: "s", Email: "a@b.com"}, true},
 		{"garbage flag", `{"email":"a@b.com","email_verified":1}`, GoogleIdentity{}, false},
 		{"bad json", `{`, GoogleIdentity{}, false},
 	}

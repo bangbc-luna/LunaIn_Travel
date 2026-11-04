@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -27,6 +28,8 @@ type GoogleIdentity struct {
 	Subject       string
 	Email         string
 	EmailVerified bool
+	// HostedDomain is the optional "hd" claim of Google Workspace accounts.
+	HostedDomain string
 }
 
 // GoogleVerifier validates a Google ID token and returns its identity.
@@ -69,6 +72,7 @@ func identityFromClaims(subject string, rawClaims []byte) (GoogleIdentity, error
 	var c struct {
 		Email         string          `json:"email"`
 		EmailVerified json.RawMessage `json:"email_verified"`
+		HostedDomain  string          `json:"hd"`
 	}
 	if err := json.Unmarshal(rawClaims, &c); err != nil {
 		return GoogleIdentity{}, fmt.Errorf("parse google claims: %w", err)
@@ -90,7 +94,7 @@ func identityFromClaims(subject string, rawClaims []byte) (GoogleIdentity, error
 			verified = b
 		}
 	}
-	return GoogleIdentity{Subject: subject, Email: c.Email, EmailVerified: verified}, nil
+	return GoogleIdentity{Subject: subject, Email: c.Email, EmailVerified: verified, HostedDomain: c.HostedDomain}, nil
 }
 
 // errRetryGoogle aborts a LoginWithGoogle transaction that lost a race
@@ -125,7 +129,7 @@ func (s *Service) LoginWithGoogle(ctx context.Context, idToken string) (Tokens, 
 		var tokens Tokens
 		err = db.InTx(ctx, s.pool, func(tx pgx.Tx) error {
 			var err error
-			tokens, err = s.googleLoginTx(ctx, tx, gid.Subject, email)
+			tokens, err = s.googleLoginTx(ctx, tx, gid, email)
 			return err
 		})
 		if errors.Is(err, errRetryGoogle) || isUniqueViolation(err, "users_email_key") ||
@@ -140,12 +144,12 @@ func (s *Service) LoginWithGoogle(ctx context.Context, idToken string) (Tokens, 
 	return Tokens{}, errors.New("identity: google login kept racing")
 }
 
-func (s *Service) googleLoginTx(ctx context.Context, tx pgx.Tx, sub, email string) (Tokens, error) {
+func (s *Service) googleLoginTx(ctx context.Context, tx pgx.Tx, gid GoogleIdentity, email string) (Tokens, error) {
 	q := store.New(tx)
 	now := s.clock.Now()
 
 	var u store.User
-	ident, err := q.GetIdentity(ctx, store.GetIdentityParams{Provider: providerGoogle, ProviderSubject: sub})
+	ident, err := q.GetIdentity(ctx, store.GetIdentityParams{Provider: providerGoogle, ProviderSubject: gid.Subject})
 	switch {
 	case err == nil:
 		// The identity wins over the email Google reports today.
@@ -163,11 +167,14 @@ func (s *Service) googleLoginTx(ctx context.Context, tx pgx.Tx, sub, email strin
 			if u.Status == userStatusLocked {
 				return Tokens{}, ErrAccountLocked
 			}
-			if err := s.linkGoogle(ctx, q, u, sub, now); err != nil {
+			if !googleEmailTrusted(email, gid.HostedDomain) {
+				return Tokens{}, ErrGoogleLinkRequiresPassword
+			}
+			if err := s.linkGoogle(ctx, q, u, gid.Subject, now); err != nil {
 				return Tokens{}, err
 			}
 		case errors.Is(err, pgx.ErrNoRows):
-			u, err = s.createGoogleUser(ctx, q, sub, email, now)
+			u, err = s.createGoogleUser(ctx, q, gid.Subject, email, now)
 			if err != nil {
 				return Tokens{}, err
 			}
@@ -193,6 +200,13 @@ func (s *Service) googleLoginTx(ctx context.Context, tx pgx.Tx, sub, email strin
 		return Tokens{}, err
 	}
 	return s.issueSession(ctx, tx, u.ID, role, familyID)
+}
+
+// googleEmailTrusted reports whether Google's email_verified claim is reliable
+// enough to link an existing account by email: only for @gmail.com addresses
+// or Workspace accounts (hd claim). For other addresses the claim can be stale.
+func googleEmailTrusted(email, hostedDomain string) bool {
+	return hostedDomain != "" || strings.HasSuffix(email, "@gmail.com")
 }
 
 func isInternalRole(role string) bool {

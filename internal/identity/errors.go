@@ -17,5 +17,9 @@ var (
 	ErrEmailNotVerified    = httpx.NewError(http.StatusForbidden, "email_not_verified", "Email chưa được xác minh")
 	ErrAccountLocked       = httpx.NewError(http.StatusForbidden, "account_locked", "Tài khoản đã bị khóa")
 	ErrInvalidRefreshToken = httpx.NewError(http.StatusUnauthorized, "invalid_refresh_token", "Phiên đăng nhập không hợp lệ hoặc đã hết hạn")
-	ErrGoogleTokenInvalid  = httpx.NewError(http.StatusUnauthorized, "google_token_invalid", "Đăng nhập Google không hợp lệ")
+	// ErrGoogleLinkRequiresPassword: a Google identity matches an existing
+	// account by email, but email_verified is not trusted for that address
+	// (not @gmail.com and no hosted domain).
+	ErrGoogleLinkRequiresPassword = httpx.NewError(http.StatusConflict, "google_link_requires_password", "Email này đã có tài khoản. Vui lòng đăng nhập bằng mật khẩu.")
+	ErrGoogleTokenInvalid         = httpx.NewError(http.StatusUnauthorized, "google_token_invalid", "Đăng nhập Google không hợp lệ")
 )
