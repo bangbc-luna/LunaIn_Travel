@@ -70,6 +70,30 @@ func TestEnqueueTx_CommittedJobIsSent(t *testing.T) {
 	require.Equal(t, []mailer.Message{msg}, rec.Messages())
 }
 
+func TestEnqueueTx_MaxAttempts(t *testing.T) {
+	pool := testutil.Postgres(t)
+	ctx := context.Background()
+	workers := river.NewWorkers()
+	river.AddWorker(workers, &mailer.SendEmailWorker{Mailer: &mailer.Recorder{}})
+	client, err := jobs.NewClient(pool, workers, slog.Default())
+	require.NoError(t, err)
+
+	require.NoError(t, db.InTx(ctx, pool, func(tx pgx.Tx) error {
+		if err := mailer.EnqueueTx(ctx, tx, client, mailer.Message{To: "a@b.c", Subject: "otp", Text: "t", MaxAttempts: 3}); err != nil {
+			return err
+		}
+		return mailer.EnqueueTx(ctx, tx, client, mailer.Message{To: "a@b.c", Subject: "default", Text: "t"})
+	}))
+
+	var otp, def int
+	require.NoError(t, pool.QueryRow(ctx,
+		`SELECT max_attempts FROM river_job WHERE kind = 'send_email' AND args->>'subject' = 'otp'`).Scan(&otp))
+	require.NoError(t, pool.QueryRow(ctx,
+		`SELECT max_attempts FROM river_job WHERE kind = 'send_email' AND args->>'subject' = 'default'`).Scan(&def))
+	require.Equal(t, 3, otp)
+	require.Equal(t, mailer.DefaultMaxAttempts, def)
+}
+
 func TestSMTPMailer_StalledServerIsBoundedByContext(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)

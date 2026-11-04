@@ -20,6 +20,9 @@ type Message struct {
 	To      string `json:"to"`
 	Subject string `json:"subject"`
 	Text    string `json:"text"`
+	// MaxAttempts is how many times River tries to deliver the message
+	// (0 = DefaultMaxAttempts). It is applied at enqueue time only.
+	MaxAttempts int `json:"-"`
 }
 
 // Mailer delivers a message.
