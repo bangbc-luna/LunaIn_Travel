@@ -48,7 +48,8 @@ func TestMigrate_ConcurrentCallsSerialize(t *testing.T) {
 	// Every caller released the lock.
 	var held int
 	require.NoError(t, pool.QueryRow(ctx,
-		`SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND granted`).Scan(&held))
+		`SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND granted
+		   AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`).Scan(&held))
 	require.Equal(t, 0, held)
 }
 
