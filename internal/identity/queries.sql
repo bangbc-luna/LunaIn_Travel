@@ -48,3 +48,29 @@ WHERE user_id = @user_id AND purpose = @purpose AND consumed_at IS NULL;
 -- name: InsertRefreshToken :exec
 INSERT INTO refresh_tokens (id, user_id, family_id, token_hash, expires_at, created_at, updated_at)
 VALUES (@id, @user_id, @family_id, @token_hash, @expires_at, @now, @now);
+
+-- name: GetUserByIDForUpdate :one
+SELECT * FROM users WHERE id = @id FOR UPDATE;
+
+-- name: InsertVerifiedUser :execrows
+INSERT INTO users (id, email, password_hash, email_verified_at, role, created_at, updated_at)
+VALUES (@id, @email, @password_hash, @now::timestamptz, @role, @now::timestamptz, @now::timestamptz)
+ON CONFLICT (email) DO NOTHING;
+
+-- name: GetRefreshTokenByHash :one
+SELECT * FROM refresh_tokens WHERE token_hash = @token_hash;
+
+-- name: GetRefreshTokenForUpdate :one
+SELECT * FROM refresh_tokens WHERE id = @id FOR UPDATE;
+
+-- name: MarkRefreshTokenUsed :exec
+UPDATE refresh_tokens SET used_at = @now::timestamptz, updated_at = @now::timestamptz
+WHERE id = @id AND used_at IS NULL;
+
+-- name: RevokeRefreshTokenFamily :exec
+UPDATE refresh_tokens SET revoked_at = @now::timestamptz, updated_at = @now::timestamptz
+WHERE family_id = @family_id AND revoked_at IS NULL;
+
+-- name: RevokeUserRefreshTokens :exec
+UPDATE refresh_tokens SET revoked_at = @now::timestamptz, updated_at = @now::timestamptz
+WHERE user_id = @user_id AND revoked_at IS NULL;

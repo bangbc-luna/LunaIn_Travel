@@ -88,6 +88,48 @@ func (q *Queries) GetLatestCode(ctx context.Context, arg GetLatestCodeParams) (E
 	return i, err
 }
 
+const getRefreshTokenByHash = `-- name: GetRefreshTokenByHash :one
+SELECT id, user_id, family_id, token_hash, expires_at, used_at, revoked_at, created_at, updated_at FROM refresh_tokens WHERE token_hash = $1
+`
+
+func (q *Queries) GetRefreshTokenByHash(ctx context.Context, tokenHash []byte) (RefreshToken, error) {
+	row := q.db.QueryRow(ctx, getRefreshTokenByHash, tokenHash)
+	var i RefreshToken
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.FamilyID,
+		&i.TokenHash,
+		&i.ExpiresAt,
+		&i.UsedAt,
+		&i.RevokedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getRefreshTokenForUpdate = `-- name: GetRefreshTokenForUpdate :one
+SELECT id, user_id, family_id, token_hash, expires_at, used_at, revoked_at, created_at, updated_at FROM refresh_tokens WHERE id = $1 FOR UPDATE
+`
+
+func (q *Queries) GetRefreshTokenForUpdate(ctx context.Context, id uuid.UUID) (RefreshToken, error) {
+	row := q.db.QueryRow(ctx, getRefreshTokenForUpdate, id)
+	var i RefreshToken
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.FamilyID,
+		&i.TokenHash,
+		&i.ExpiresAt,
+		&i.UsedAt,
+		&i.RevokedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getUserByEmail = `-- name: GetUserByEmail :one
 SELECT id, email, password_hash, email_verified_at, role, status, created_at, updated_at FROM users WHERE email = $1
 `
@@ -114,6 +156,26 @@ SELECT id, email, password_hash, email_verified_at, role, status, created_at, up
 
 func (q *Queries) GetUserByEmailForUpdate(ctx context.Context, email string) (User, error) {
 	row := q.db.QueryRow(ctx, getUserByEmailForUpdate, email)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.Email,
+		&i.PasswordHash,
+		&i.EmailVerifiedAt,
+		&i.Role,
+		&i.Status,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getUserByIDForUpdate = `-- name: GetUserByIDForUpdate :one
+SELECT id, email, password_hash, email_verified_at, role, status, created_at, updated_at FROM users WHERE id = $1 FOR UPDATE
+`
+
+func (q *Queries) GetUserByIDForUpdate(ctx context.Context, id uuid.UUID) (User, error) {
+	row := q.db.QueryRow(ctx, getUserByIDForUpdate, id)
 	var i User
 	err := row.Scan(
 		&i.ID,
@@ -235,6 +297,34 @@ func (q *Queries) InsertVerification(ctx context.Context, arg InsertVerification
 	return err
 }
 
+const insertVerifiedUser = `-- name: InsertVerifiedUser :execrows
+INSERT INTO users (id, email, password_hash, email_verified_at, role, created_at, updated_at)
+VALUES ($1, $2, $3, $4::timestamptz, $5, $4::timestamptz, $4::timestamptz)
+ON CONFLICT (email) DO NOTHING
+`
+
+type InsertVerifiedUserParams struct {
+	ID           uuid.UUID
+	Email        string
+	PasswordHash *string
+	Now          time.Time
+	Role         string
+}
+
+func (q *Queries) InsertVerifiedUser(ctx context.Context, arg InsertVerifiedUserParams) (int64, error) {
+	result, err := q.db.Exec(ctx, insertVerifiedUser,
+		arg.ID,
+		arg.Email,
+		arg.PasswordHash,
+		arg.Now,
+		arg.Role,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const invalidateCodes = `-- name: InvalidateCodes :exec
 UPDATE email_verifications SET consumed_at = $1::timestamptz, updated_at = $1::timestamptz
 WHERE user_id = $2 AND purpose = $3 AND consumed_at IS NULL
@@ -265,5 +355,50 @@ type MarkEmailVerifiedParams struct {
 
 func (q *Queries) MarkEmailVerified(ctx context.Context, arg MarkEmailVerifiedParams) error {
 	_, err := q.db.Exec(ctx, markEmailVerified, arg.Now, arg.PasswordHash, arg.ID)
+	return err
+}
+
+const markRefreshTokenUsed = `-- name: MarkRefreshTokenUsed :exec
+UPDATE refresh_tokens SET used_at = $1::timestamptz, updated_at = $1::timestamptz
+WHERE id = $2 AND used_at IS NULL
+`
+
+type MarkRefreshTokenUsedParams struct {
+	Now time.Time
+	ID  uuid.UUID
+}
+
+func (q *Queries) MarkRefreshTokenUsed(ctx context.Context, arg MarkRefreshTokenUsedParams) error {
+	_, err := q.db.Exec(ctx, markRefreshTokenUsed, arg.Now, arg.ID)
+	return err
+}
+
+const revokeRefreshTokenFamily = `-- name: RevokeRefreshTokenFamily :exec
+UPDATE refresh_tokens SET revoked_at = $1::timestamptz, updated_at = $1::timestamptz
+WHERE family_id = $2 AND revoked_at IS NULL
+`
+
+type RevokeRefreshTokenFamilyParams struct {
+	Now      time.Time
+	FamilyID uuid.UUID
+}
+
+func (q *Queries) RevokeRefreshTokenFamily(ctx context.Context, arg RevokeRefreshTokenFamilyParams) error {
+	_, err := q.db.Exec(ctx, revokeRefreshTokenFamily, arg.Now, arg.FamilyID)
+	return err
+}
+
+const revokeUserRefreshTokens = `-- name: RevokeUserRefreshTokens :exec
+UPDATE refresh_tokens SET revoked_at = $1::timestamptz, updated_at = $1::timestamptz
+WHERE user_id = $2 AND revoked_at IS NULL
+`
+
+type RevokeUserRefreshTokensParams struct {
+	Now    time.Time
+	UserID uuid.UUID
+}
+
+func (q *Queries) RevokeUserRefreshTokens(ctx context.Context, arg RevokeUserRefreshTokensParams) error {
+	_, err := q.db.Exec(ctx, revokeUserRefreshTokens, arg.Now, arg.UserID)
 	return err
 }

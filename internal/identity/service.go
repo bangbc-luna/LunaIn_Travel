@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -371,4 +372,248 @@ func (s *Service) sendSignupCodeTx(ctx context.Context, tx pgx.Tx, q *store.Quer
 func isUniqueViolation(err error, constraint string) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == uniqueViolation && pgErr.ConstraintName == constraint
+}
+
+// errNotInternalRole is returned by CreateInternalUser for any role other
+// than partner or super_admin. Customers only sign up publicly.
+var errNotInternalRole = errors.New("identity: internal users must be partner or super_admin")
+
+// dummyPasswordHash is a fixed argon2id hash that Login verifies against when
+// there is no real hash to check, so response time does not reveal whether an
+// email has an account.
+var dummyPasswordHash = sync.OnceValue(func() string {
+	h, err := HashPassword("lunain-dummy-password-0")
+	if err != nil {
+		panic(fmt.Sprintf("identity: hash dummy password: %v", err))
+	}
+	return h
+})
+
+// burnPasswordCheck spends the same argon2id work as a real password check.
+func burnPasswordCheck(password string) {
+	_, _ = VerifyPassword(dummyPasswordHash(), password)
+}
+
+// Login checks email and password and starts a new session (a new refresh
+// token family). Unknown emails, wrong passwords and accounts without a
+// password all fail with ErrInvalidCredentials. ErrEmailNotVerified and
+// ErrAccountLocked are only reported once the password is known to be right.
+// For an unverified signup the password is checked against the pending
+// password on its latest signup code (consumed or not).
+func (s *Service) Login(ctx context.Context, email, password string) (Tokens, error) {
+	e, err := NormalizeEmail(email)
+	if err != nil {
+		burnPasswordCheck(password)
+		return Tokens{}, ErrInvalidCredentials
+	}
+	q := store.New(s.pool)
+	u, err := q.GetUserByEmail(ctx, e)
+	if errors.Is(err, pgx.ErrNoRows) {
+		burnPasswordCheck(password)
+		return Tokens{}, ErrInvalidCredentials
+	}
+	if err != nil {
+		return Tokens{}, fmt.Errorf("get user: %w", err)
+	}
+
+	hash := u.PasswordHash
+	if u.EmailVerifiedAt == nil {
+		// A pending signup's password lives on its latest signup code.
+		last, err := latestSignupCode(ctx, q, u.ID)
+		if err != nil {
+			return Tokens{}, err
+		}
+		hash = nil
+		if last != nil {
+			hash = last.PasswordHash
+		}
+	}
+	if hash == nil {
+		burnPasswordCheck(password)
+		return Tokens{}, ErrInvalidCredentials
+	}
+	ok, err := VerifyPassword(*hash, password)
+	if err != nil {
+		return Tokens{}, fmt.Errorf("verify password: %w", err)
+	}
+	if !ok {
+		return Tokens{}, ErrInvalidCredentials
+	}
+	if u.Status == userStatusLocked {
+		return Tokens{}, ErrAccountLocked
+	}
+	if u.EmailVerifiedAt == nil {
+		return Tokens{}, ErrEmailNotVerified
+	}
+
+	// The password was checked without holding a lock (argon2 is slow).
+	// Re-check under the user lock that the account did not change meanwhile.
+	var tokens Tokens
+	err = db.InTx(ctx, s.pool, func(tx pgx.Tx) error {
+		u, err := store.New(tx).GetUserByIDForUpdate(ctx, u.ID)
+		if err != nil {
+			return fmt.Errorf("lock user: %w", err)
+		}
+		if u.PasswordHash == nil || *u.PasswordHash != *hash || u.EmailVerifiedAt == nil {
+			return ErrInvalidCredentials
+		}
+		if u.Status == userStatusLocked {
+			return ErrAccountLocked
+		}
+		role := auth.Role(u.Role)
+		if !role.Valid() {
+			return fmt.Errorf("user %s has invalid role %q", u.ID, u.Role)
+		}
+		familyID, err := uuid.NewV7()
+		if err != nil {
+			return err
+		}
+		tokens, err = s.issueSession(ctx, tx, u.ID, role, familyID)
+		return err
+	})
+	if err != nil {
+		return Tokens{}, err
+	}
+	return tokens, nil
+}
+
+// Refresh rotates a refresh token: the presented token is marked used and a
+// new one in the same family is issued, with an access token carrying the
+// user's current role. Presenting an already used token means it was copied
+// (or sent twice), so its whole family is revoked. A locked user's family is
+// revoked too. These revocations are committed even though an error is
+// returned.
+func (s *Service) Refresh(ctx context.Context, refreshToken string) (Tokens, error) {
+	if refreshToken == "" {
+		return Tokens{}, ErrInvalidRefreshToken
+	}
+	// Unlocked lookup only to learn the user; state is re-checked under lock.
+	found, err := store.New(s.pool).GetRefreshTokenByHash(ctx, hashRefreshToken(refreshToken))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Tokens{}, ErrInvalidRefreshToken
+	}
+	if err != nil {
+		return Tokens{}, fmt.Errorf("get refresh token: %w", err)
+	}
+	now := s.clock.Now()
+
+	var (
+		tokens  Tokens
+		outcome error // returned after the transaction commits
+	)
+	err = db.InTx(ctx, s.pool, func(tx pgx.Tx) error {
+		q := store.New(tx)
+		// Lock order: user row first, then the token row.
+		u, err := q.GetUserByIDForUpdate(ctx, found.UserID)
+		if err != nil {
+			return fmt.Errorf("lock user: %w", err)
+		}
+		t, err := q.GetRefreshTokenForUpdate(ctx, found.ID)
+		if err != nil {
+			return fmt.Errorf("lock refresh token: %w", err)
+		}
+		revokeFamily := func() error {
+			return q.RevokeRefreshTokenFamily(ctx, store.RevokeRefreshTokenFamilyParams{Now: now, FamilyID: t.FamilyID})
+		}
+		switch {
+		case t.RevokedAt != nil:
+			outcome = ErrInvalidRefreshToken
+			return nil
+		case t.UsedAt != nil:
+			outcome = ErrInvalidRefreshToken
+			return revokeFamily()
+		case !now.Before(t.ExpiresAt):
+			outcome = ErrInvalidRefreshToken
+			return nil
+		case u.Status == userStatusLocked:
+			outcome = ErrAccountLocked
+			return revokeFamily()
+		}
+		role := auth.Role(u.Role)
+		if !role.Valid() {
+			return fmt.Errorf("user %s has invalid role %q", u.ID, u.Role)
+		}
+		if err := q.MarkRefreshTokenUsed(ctx, store.MarkRefreshTokenUsedParams{Now: now, ID: t.ID}); err != nil {
+			return fmt.Errorf("mark refresh token used: %w", err)
+		}
+		tokens, err = s.issueSession(ctx, tx, u.ID, role, t.FamilyID)
+		return err
+	})
+	if err != nil {
+		return Tokens{}, err
+	}
+	if outcome != nil {
+		return Tokens{}, outcome
+	}
+	return tokens, nil
+}
+
+// Logout revokes the whole family of refreshToken. Unknown or already
+// revoked tokens are ignored, so Logout is idempotent.
+func (s *Service) Logout(ctx context.Context, refreshToken string) error {
+	if refreshToken == "" {
+		return nil
+	}
+	found, err := store.New(s.pool).GetRefreshTokenByHash(ctx, hashRefreshToken(refreshToken))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("get refresh token: %w", err)
+	}
+	now := s.clock.Now()
+	return db.InTx(ctx, s.pool, func(tx pgx.Tx) error {
+		q := store.New(tx)
+		// Lock order: user row first, then token rows.
+		if _, err := q.GetUserByIDForUpdate(ctx, found.UserID); err != nil {
+			return fmt.Errorf("lock user: %w", err)
+		}
+		return q.RevokeRefreshTokenFamily(ctx, store.RevokeRefreshTokenFamilyParams{Now: now, FamilyID: found.FamilyID})
+	})
+}
+
+// RevokeAllSessions revokes every refresh token of userID inside tx. Per the
+// lock order rule, the caller should already hold the user row lock.
+func (s *Service) RevokeAllSessions(ctx context.Context, tx pgx.Tx, userID uuid.UUID) error {
+	if err := store.New(tx).RevokeUserRefreshTokens(ctx, store.RevokeUserRefreshTokensParams{
+		Now: s.clock.Now(), UserID: userID,
+	}); err != nil {
+		return fmt.Errorf("revoke sessions: %w", err)
+	}
+	return nil
+}
+
+// CreateInternalUser creates an already verified partner or super_admin
+// account with a password, inside the caller's tx (no customer profile). It
+// returns ErrEmailTaken if the email is used by any account, verified or not.
+func (s *Service) CreateInternalUser(ctx context.Context, tx pgx.Tx, email, password string, role auth.Role) (uuid.UUID, error) {
+	if role != auth.RolePartner && role != auth.RoleSuperAdmin {
+		return uuid.Nil, fmt.Errorf("%w: got %q", errNotInternalRole, role)
+	}
+	e, err := NormalizeEmail(email)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	if err := ValidatePassword(password); err != nil {
+		return uuid.Nil, err
+	}
+	hash, err := HashPassword(password)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("hash password: %w", err)
+	}
+	id, err := uuid.NewV7()
+	if err != nil {
+		return uuid.Nil, err
+	}
+	// ON CONFLICT DO NOTHING keeps the caller's tx usable on a duplicate.
+	n, err := store.New(tx).InsertVerifiedUser(ctx, store.InsertVerifiedUserParams{
+		ID: id, Email: e, PasswordHash: &hash, Now: s.clock.Now(), Role: string(role),
+	})
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("insert user: %w", err)
+	}
+	if n == 0 {
+		return uuid.Nil, ErrEmailTaken
+	}
+	return id, nil
 }
