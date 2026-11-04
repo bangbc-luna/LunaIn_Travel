@@ -26,7 +26,7 @@ func (e *env) complete(t *testing.T, p partner.Partner, title string) listing.Li
 		Description: ptr("Mô tả chi tiết"), Address: ptr("1 Đường A"), ProvinceCode: &province, WardCode: &ward,
 	})
 	require.NoError(t, err)
-	_, err = e.Svc.SetImages(ctx, p.ID, p.OwnerUserID, l.ID, []uuid.UUID{e.upload(t, p.OwnerUserID, "listing_image")}, nil)
+	_, _, err = e.Svc.SetImages(ctx, p.ID, p.OwnerUserID, l.ID, []uuid.UUID{e.upload(t, p.OwnerUserID, "listing_image")}, nil)
 	require.NoError(t, err)
 	e.ticket(t, p, l, "Người lớn", 100000)
 	_, err = e.slot(t, p, l, "08:00", "12:00", monToFri)

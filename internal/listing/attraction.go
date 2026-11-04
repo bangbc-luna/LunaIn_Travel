@@ -36,6 +36,9 @@ const (
 	actionClosedDate = "closed_date"
 
 	dateLayout = "2006-01-02"
+
+	// maxClosedDateAheadDays bounds how far ahead a closed date may be set.
+	maxClosedDateAheadDays = 730
 )
 
 var (
@@ -93,6 +96,23 @@ type TimeSlot struct {
 	EndTime   string    `json:"end_time"`
 	Weekdays  int       `json:"weekdays"`
 	Active    bool      `json:"active"`
+}
+
+// StartAt is the instant the slot starts on the Vietnam calendar date of
+// date (date is read in clock.VN, so 17:00Z is already the next VN day).
+func (t TimeSlot) StartAt(date time.Time) (time.Time, error) { return atVN(date, t.StartTime) }
+
+// EndAt is the instant the slot ends on the Vietnam calendar date of date.
+func (t TimeSlot) EndAt(date time.Time) (time.Time, error) { return atVN(date, t.EndTime) }
+
+// atVN combines the Vietnam calendar date of date with an "HH:MM" clock.
+func atVN(date time.Time, hm string) (time.Time, error) {
+	m, err := minutes(hm, "time")
+	if err != nil {
+		return time.Time{}, err
+	}
+	y, mo, d := date.In(clock.VN).Date()
+	return time.Date(y, mo, d, m/60, m%60, 0, 0, clock.VN), nil
 }
 
 // TimeSlotInput creates a time slot (always active).
@@ -362,6 +382,12 @@ func (s *Service) UpdateTicketType(ctx context.Context, partnerID, actor, listin
 		if f, err = f.validate(); err != nil {
 			return err
 		}
+		changes := f.diff(&old)
+		if len(changes) == 0 {
+			// Like Update: a patch that changes nothing writes nothing.
+			out = ticketFromRow(cur)
+			return nil
+		}
 		row, err := q.UpdateTicketType(ctx, store.UpdateTicketTypeParams{
 			ID: ticketTypeID, ListingID: listingID, Name: f.Name, Description: f.Description, Audience: f.Audience,
 			Price: f.Price, Active: f.Active, SortOrder: int32(f.SortOrder), Now: now,
@@ -370,7 +396,6 @@ func (s *Service) UpdateTicketType(ctx context.Context, partnerID, actor, listin
 			return fmt.Errorf("update ticket type: %w", err)
 		}
 		out = ticketFromRow(row)
-		changes := f.diff(&old)
 		changes["id"] = change{ticketTypeID.String(), ticketTypeID.String()}
 		return s.logChange(ctx, tx, listingID, actor, actionTicketType, changes, now)
 	})
@@ -531,6 +556,11 @@ func (s *Service) UpdateTimeSlot(ctx context.Context, partnerID, actor, listingI
 		if err := f.validate(); err != nil {
 			return err
 		}
+		changes := f.diff(&old)
+		if len(changes) == 0 {
+			out = slotFromRow(cur)
+			return nil
+		}
 		if err := checkOverlap(ctx, q, listingID, slotID, f); err != nil {
 			return err
 		}
@@ -542,7 +572,6 @@ func (s *Service) UpdateTimeSlot(ctx context.Context, partnerID, actor, listingI
 			return fmt.Errorf("update time slot: %w", err)
 		}
 		out = slotFromRow(row)
-		changes := f.diff(&old)
 		changes["id"] = change{slotID.String(), slotID.String()}
 		return s.logChange(ctx, tx, listingID, actor, actionTimeSlot, changes, now)
 	})
@@ -553,8 +582,8 @@ func (s *Service) UpdateTimeSlot(ctx context.Context, partnerID, actor, listingI
 }
 
 // AddClosedDate closes the attraction on the Vietnam calendar date of date.
-// A date before today (Vietnam time) is ErrInvalidClosedDate; an existing one
-// is ErrClosedDateExists.
+// A date before today or more than 730 days after today (Vietnam time) is
+// ErrInvalidClosedDate; an existing one is ErrClosedDateExists.
 func (s *Service) AddClosedDate(ctx context.Context, partnerID, actor, listingID uuid.UUID, date time.Time, reason *string) error {
 	now := s.clock.Now()
 	return db.InTx(ctx, s.pool, func(tx pgx.Tx) error {
@@ -566,8 +595,12 @@ func (s *Service) AddClosedDate(ctx context.Context, partnerID, actor, listingID
 			return err
 		}
 		d := vnDate(date)
-		if d.Time.Before(vnDate(now).Time) {
+		today := vnDate(now).Time
+		if d.Time.Before(today) {
 			return ErrInvalidClosedDate
+		}
+		if d.Time.After(today.AddDate(0, 0, maxClosedDateAheadDays)) {
+			return withMessage(ErrInvalidClosedDate, fmt.Sprintf("Chỉ đặt được ngày nghỉ trong vòng %d ngày tới", maxClosedDateAheadDays))
 		}
 		q := store.New(tx)
 		if err := q.EnsureAttraction(ctx, store.EnsureAttractionParams{ListingID: listingID, Now: now}); err != nil {
@@ -678,9 +711,12 @@ func (s *Service) SlotsForDate(ctx context.Context, tx pgx.Tx, listingID uuid.UU
 }
 
 // TicketTypesForBooking returns the requested ticket types keyed by id. Only
-// active types of this listing count; if any id is missing the whole call is
-// ErrInvalidTicketType. For booking (plan 4).
+// active types of this listing count; if any id is missing, or ids is empty,
+// the whole call is ErrInvalidTicketType. For booking (plan 4).
 func (s *Service) TicketTypesForBooking(ctx context.Context, tx pgx.Tx, listingID uuid.UUID, ids []uuid.UUID) (map[uuid.UUID]TicketType, error) {
+	if len(ids) == 0 {
+		return nil, ErrInvalidTicketType
+	}
 	rows, err := store.New(tx).ListActiveTicketTypesByIDs(ctx, store.ListActiveTicketTypesByIDsParams{ListingID: listingID, Ids: ids})
 	if err != nil {
 		return nil, fmt.Errorf("list ticket types: %w", err)

@@ -89,16 +89,19 @@ type CreateInput struct {
 
 // UpdateInput is a partial update (PATCH body): nil keeps a field, "" clears
 // an optional text field. Title is required and cannot be cleared. Province
-// and ward travel together. The service type cannot change.
+// and ward travel together. ClearCoordinates sets latitude and longitude to
+// NULL and cannot be combined with either of them. The service type cannot
+// change.
 type UpdateInput struct {
-	Title        *string  `json:"title"`
-	Summary      *string  `json:"summary"`
-	Description  *string  `json:"description"`
-	Address      *string  `json:"address"`
-	ProvinceCode *string  `json:"province_code"`
-	WardCode     *string  `json:"ward_code"`
-	Latitude     *float64 `json:"latitude"`
-	Longitude    *float64 `json:"longitude"`
+	Title            *string  `json:"title"`
+	Summary          *string  `json:"summary"`
+	Description      *string  `json:"description"`
+	Address          *string  `json:"address"`
+	ProvinceCode     *string  `json:"province_code"`
+	WardCode         *string  `json:"ward_code"`
+	Latitude         *float64 `json:"latitude"`
+	Longitude        *float64 `json:"longitude"`
+	ClearCoordinates bool     `json:"clear_coordinates"`
 }
 
 // OwnFilter selects a page of the partner's own listings, newest first.
@@ -244,6 +247,12 @@ func (u UpdateInput) apply(cur content) (content, error) {
 		if c.Address, err = optionalText(u.Address, "address", maxAddressLen); err != nil {
 			return c, err
 		}
+	}
+	if u.ClearCoordinates {
+		if u.Latitude != nil || u.Longitude != nil {
+			return c, invalidListing("clear_coordinates không dùng cùng latitude/longitude")
+		}
+		c.Latitude, c.Longitude = nil, nil
 	}
 	if u.Latitude != nil {
 		if c.Latitude, err = coordinate(u.Latitude, "latitude", 90); err != nil {

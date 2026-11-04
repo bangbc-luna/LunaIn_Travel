@@ -146,7 +146,7 @@ func TestTicketType_WrongServiceType422(t *testing.T) {
 	_, err = e.Svc.SetAttractionInfo(ctx, p.ID, p.OwnerUserID, l.ID, ptr("x"), nil)
 	_, code = appCode(t, err)
 	require.Equal(t, "wrong_service_type", code)
-	err = e.Svc.AddClosedDate(ctx, p.ID, p.OwnerUserID, l.ID, time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC), nil)
+	err = e.Svc.AddClosedDate(ctx, p.ID, p.OwnerUserID, l.ID, time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC), nil)
 	_, code = appCode(t, err)
 	require.Equal(t, "wrong_service_type", code)
 
@@ -380,7 +380,7 @@ func TestAttraction_InfoAndAudit(t *testing.T) {
 	// Every write logs one audit row, with old and new values.
 	_, err = e.slot(t, p, l, "08:00", "10:00", mon)
 	require.NoError(t, err)
-	d := time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC)
+	d := time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)
 	require.NoError(t, e.Svc.AddClosedDate(ctx, p.ID, p.OwnerUserID, l.ID, d, nil))
 	require.NoError(t, e.Svc.RemoveClosedDate(ctx, p.ID, p.OwnerUserID, l.ID, d))
 	au := e.audits(t, l.ID)
@@ -426,8 +426,8 @@ func TestAttraction_OtherPartner404(t *testing.T) {
 		{"PATCH", base + "/ticket-types/" + ttB.ID.String(), map[string]any{"price": 1000}},
 		{"POST", base + "/time-slots", map[string]any{"start_time": "11:00", "end_time": "12:00", "weekdays": 1}},
 		{"PATCH", base + "/time-slots/" + slB.ID.String(), map[string]any{"active": false}},
-		{"PUT", base + "/closed-dates/2099-01-01", map[string]any{}},
-		{"DELETE", base + "/closed-dates/2099-01-01", nil},
+		{"PUT", base + "/closed-dates/2027-01-01", map[string]any{}},
+		{"DELETE", base + "/closed-dates/2027-01-01", nil},
 	} {
 		requireCode(t, e.do(t, r.method, r.path, tokA, r.body), http.StatusNotFound, "not_found")
 	}
@@ -451,17 +451,17 @@ func TestAttraction_HTTPFlow(t *testing.T) {
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 	requireCode(t, e.do(t, "POST", base+"/time-slots", tok, map[string]any{"start_time": "09:00", "end_time": "11:00", "weekdays": 1}),
 		http.StatusUnprocessableEntity, "overlapping_time_slot")
-	require.Equal(t, http.StatusNoContent, e.do(t, "PUT", base+"/closed-dates/2099-01-01", tok, map[string]any{"reason": "Tết"}).Code)
-	requireCode(t, e.do(t, "PUT", base+"/closed-dates/2099-01-01", tok, map[string]any{}), http.StatusConflict, "closed_date_exists")
+	require.Equal(t, http.StatusNoContent, e.do(t, "PUT", base+"/closed-dates/2027-01-01", tok, map[string]any{"reason": "Tết"}).Code)
+	requireCode(t, e.do(t, "PUT", base+"/closed-dates/2027-01-01", tok, map[string]any{}), http.StatusConflict, "closed_date_exists")
 	requireCode(t, e.do(t, "PUT", base+"/closed-dates/not-a-date", tok, map[string]any{}), http.StatusNotFound, "not_found")
-	requireCode(t, e.do(t, "PUT", base+"/closed-dates/2099-01-02", tok, map[string]any{"zzz": 1}), http.StatusBadRequest, "invalid_request")
+	requireCode(t, e.do(t, "PUT", base+"/closed-dates/2027-01-02", tok, map[string]any{"zzz": 1}), http.StatusBadRequest, "invalid_request")
 	requireCode(t, e.do(t, "POST", base+"/ticket-types", tok, map[string]any{"name": "NL", "audience": "adult", "price": 5000, "x": 1}),
 		http.StatusBadRequest, "invalid_request")
 
 	rec = e.do(t, "GET", base+"/attraction", tok, nil)
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Contains(t, rec.Body.String(), `"08:00"`)
-	require.Contains(t, rec.Body.String(), `"2099-01-01"`)
-	require.Equal(t, http.StatusNoContent, e.do(t, "DELETE", base+"/closed-dates/2099-01-01", tok, nil).Code)
-	requireCode(t, e.do(t, "DELETE", base+"/closed-dates/2099-01-01", tok, nil), http.StatusNotFound, "not_found")
+	require.Contains(t, rec.Body.String(), `"2027-01-01"`)
+	require.Equal(t, http.StatusNoContent, e.do(t, "DELETE", base+"/closed-dates/2027-01-01", tok, nil).Code)
+	requireCode(t, e.do(t, "DELETE", base+"/closed-dates/2027-01-01", tok, nil), http.StatusNotFound, "not_found")
 }

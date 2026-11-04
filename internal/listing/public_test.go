@@ -395,7 +395,7 @@ func TestHTTP_PublicSearchAndDetail(t *testing.T) {
 	require.Equal(t, l.Slug, item["slug"])
 	require.Equal(t, float64(100000), item["price_from"])
 	require.Nil(t, item["rating_avg"])
-	require.NotContains(t, item, "id")
+	require.Equal(t, l.ID.String(), item["id"], "plan 4 books by id")
 	require.NotContains(t, item, "partner_id")
 
 	rec = e.do(t, "GET", "/v1/listings/"+l.Slug, "", nil)
@@ -403,6 +403,7 @@ func TestHTTP_PublicSearchAndDetail(t *testing.T) {
 	require.Equal(t, "public, max-age=60", rec.Header().Get("Cache-Control"))
 	d := decode[map[string]any](t, rec.Body.Bytes())
 	require.Equal(t, l.Slug, d["slug"])
+	require.Equal(t, l.ID.String(), d["id"])
 	require.Len(t, d["image_urls"], 1)
 	require.NotNil(t, d["attraction"])
 	require.NotNil(t, d["cancellation_policy"])

@@ -111,7 +111,7 @@ func TestUnsupportedServiceType_FailsClosed(t *testing.T) {
 	ctx := context.Background()
 	p := e.partner(t, "Alpha", attraction, "self_drive_rental")
 	id := e.rawListing(t, p, "self_drive_rental", "Xe")
-	_, err := e.Svc.SetImages(ctx, p.ID, p.OwnerUserID, id, []uuid.UUID{e.upload(t, p.OwnerUserID, "listing_image")}, nil)
+	_, _, err := e.Svc.SetImages(ctx, p.ID, p.OwnerUserID, id, []uuid.UUID{e.upload(t, p.OwnerUserID, "listing_image")}, nil)
 	require.NoError(t, err)
 
 	_, err = e.Svc.Submit(ctx, p.ID, p.OwnerUserID, id)

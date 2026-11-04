@@ -45,7 +45,7 @@ func TestSetImages_OrderAndCover(t *testing.T) {
 	l := e.create(t, p, "Vé A")
 	f1, f2, f3 := e.upload(t, p.OwnerUserID, "listing_image"), e.upload(t, p.OwnerUserID, "listing_image"), e.upload(t, p.OwnerUserID, "listing_image")
 
-	got, err := e.Svc.SetImages(ctx, p.ID, p.OwnerUserID, l.ID, []uuid.UUID{f2, f1, f3}, nil)
+	got, _, err := e.Svc.SetImages(ctx, p.ID, p.OwnerUserID, l.ID, []uuid.UUID{f2, f1, f3}, nil)
 	require.NoError(t, err)
 	require.Equal(t, &f2, got.CoverFileID)
 	require.Equal(t, []uuid.UUID{f2, f1, f3}, e.imageIDs(t, l.ID))
@@ -60,7 +60,7 @@ func TestSetImages_OrderAndCover(t *testing.T) {
 	require.Equal(t, f3, imgs[2].FileID)
 	require.Equal(t, 2, imgs[2].SortOrder)
 
-	got, err = e.Svc.SetImages(ctx, p.ID, p.OwnerUserID, l.ID, []uuid.UUID{f2, f1, f3}, &f3)
+	got, _, err = e.Svc.SetImages(ctx, p.ID, p.OwnerUserID, l.ID, []uuid.UUID{f2, f1, f3}, &f3)
 	require.NoError(t, err)
 	require.Equal(t, &f3, got.CoverFileID)
 
@@ -78,13 +78,13 @@ func TestSetImages_CoverMustBeInList(t *testing.T) {
 	p := e.partner(t, "Alpha", attraction)
 	l := e.create(t, p, "Vé A")
 	f1, f2 := e.upload(t, p.OwnerUserID, "listing_image"), e.upload(t, p.OwnerUserID, "listing_image")
-	_, err := e.Svc.SetImages(context.Background(), p.ID, p.OwnerUserID, l.ID, []uuid.UUID{f1}, &f2)
+	_, _, err := e.Svc.SetImages(context.Background(), p.ID, p.OwnerUserID, l.ID, []uuid.UUID{f1}, &f2)
 	status, code := appCode(t, err)
 	require.Equal(t, http.StatusUnprocessableEntity, status)
 	require.Equal(t, "invalid_listing", code)
 	require.Empty(t, e.imageIDs(t, l.ID))
 
-	_, err = e.Svc.SetImages(context.Background(), p.ID, p.OwnerUserID, l.ID, nil, &f2)
+	_, _, err = e.Svc.SetImages(context.Background(), p.ID, p.OwnerUserID, l.ID, nil, &f2)
 	_, code = appCode(t, err)
 	require.Equal(t, "invalid_listing", code)
 }
@@ -95,11 +95,11 @@ func TestSetImages_FileOfOtherUser422(t *testing.T) {
 	b := e.partner(t, "Beta", attraction)
 	l := e.create(t, a, "Vé A")
 	other := e.upload(t, b.OwnerUserID, "listing_image")
-	_, err := e.Svc.SetImages(context.Background(), a.ID, a.OwnerUserID, l.ID, []uuid.UUID{other}, nil)
+	_, _, err := e.Svc.SetImages(context.Background(), a.ID, a.OwnerUserID, l.ID, []uuid.UUID{other}, nil)
 	status, code := appCode(t, err)
 	require.Equal(t, http.StatusUnprocessableEntity, status)
 	require.Equal(t, "invalid_file", code)
-	_, err = e.Svc.SetImages(context.Background(), a.ID, a.OwnerUserID, l.ID, []uuid.UUID{uuid.Must(uuid.NewV7())}, nil)
+	_, _, err = e.Svc.SetImages(context.Background(), a.ID, a.OwnerUserID, l.ID, []uuid.UUID{uuid.Must(uuid.NewV7())}, nil)
 	_, code = appCode(t, err)
 	require.Equal(t, "invalid_file", code)
 }
@@ -109,7 +109,7 @@ func TestSetImages_WrongPurpose422(t *testing.T) {
 	p := e.partner(t, "Alpha", attraction)
 	l := e.create(t, p, "Vé A")
 	lic := e.upload(t, p.OwnerUserID, "business_license")
-	_, err := e.Svc.SetImages(context.Background(), p.ID, p.OwnerUserID, l.ID, []uuid.UUID{lic}, nil)
+	_, _, err := e.Svc.SetImages(context.Background(), p.ID, p.OwnerUserID, l.ID, []uuid.UUID{lic}, nil)
 	status, code := appCode(t, err)
 	require.Equal(t, http.StatusUnprocessableEntity, status)
 	require.Equal(t, "invalid_file", code)
@@ -124,15 +124,15 @@ func TestSetImages_Max20AndDuplicates(t *testing.T) {
 	for i := range ids {
 		ids[i] = e.upload(t, p.OwnerUserID, "listing_image")
 	}
-	_, err := e.Svc.SetImages(ctx, p.ID, p.OwnerUserID, l.ID, ids, nil)
+	_, _, err := e.Svc.SetImages(ctx, p.ID, p.OwnerUserID, l.ID, ids, nil)
 	status, code := appCode(t, err)
 	require.Equal(t, http.StatusUnprocessableEntity, status)
 	require.Equal(t, "invalid_listing", code)
-	_, err = e.Svc.SetImages(ctx, p.ID, p.OwnerUserID, l.ID, ids[:20], nil)
+	_, _, err = e.Svc.SetImages(ctx, p.ID, p.OwnerUserID, l.ID, ids[:20], nil)
 	require.NoError(t, err)
 	require.Len(t, e.imageIDs(t, l.ID), 20)
 
-	_, err = e.Svc.SetImages(ctx, p.ID, p.OwnerUserID, l.ID, []uuid.UUID{ids[0], ids[0]}, nil)
+	_, _, err = e.Svc.SetImages(ctx, p.ID, p.OwnerUserID, l.ID, []uuid.UUID{ids[0], ids[0]}, nil)
 	_, code = appCode(t, err)
 	require.Equal(t, "invalid_listing", code)
 	require.Len(t, e.imageIDs(t, l.ID), 20, "failed replace changes nothing")
@@ -144,15 +144,15 @@ func TestSetImages_ReplaceShrinks(t *testing.T) {
 	p := e.partner(t, "Alpha", attraction)
 	l := e.create(t, p, "Vé A")
 	f1, f2 := e.upload(t, p.OwnerUserID, "listing_image"), e.upload(t, p.OwnerUserID, "listing_image")
-	_, err := e.Svc.SetImages(ctx, p.ID, p.OwnerUserID, l.ID, []uuid.UUID{f1, f2}, nil)
+	_, _, err := e.Svc.SetImages(ctx, p.ID, p.OwnerUserID, l.ID, []uuid.UUID{f1, f2}, nil)
 	require.NoError(t, err)
 
-	got, err := e.Svc.SetImages(ctx, p.ID, p.OwnerUserID, l.ID, []uuid.UUID{f2}, nil)
+	got, _, err := e.Svc.SetImages(ctx, p.ID, p.OwnerUserID, l.ID, []uuid.UUID{f2}, nil)
 	require.NoError(t, err)
 	require.Equal(t, []uuid.UUID{f2}, e.imageIDs(t, l.ID))
 	require.Equal(t, &f2, got.CoverFileID)
 
-	got, err = e.Svc.SetImages(ctx, p.ID, p.OwnerUserID, l.ID, nil, nil)
+	got, _, err = e.Svc.SetImages(ctx, p.ID, p.OwnerUserID, l.ID, nil, nil)
 	require.NoError(t, err)
 	require.Empty(t, e.imageIDs(t, l.ID))
 	require.Nil(t, got.CoverFileID)
@@ -165,11 +165,11 @@ func TestSetImages_SuspendedAndForeign(t *testing.T) {
 	b := e.partner(t, "Beta", attraction)
 	l := e.create(t, a, "Vé A")
 	f := e.upload(t, b.OwnerUserID, "listing_image")
-	_, err := e.Svc.SetImages(ctx, b.ID, b.OwnerUserID, l.ID, []uuid.UUID{f}, nil)
+	_, _, err := e.Svc.SetImages(ctx, b.ID, b.OwnerUserID, l.ID, []uuid.UUID{f}, nil)
 	require.ErrorIs(t, err, listing.ErrListingNotFound)
 
 	fa := e.upload(t, a.OwnerUserID, "listing_image")
 	require.NoError(t, e.Partner.Suspend(ctx, e.Admin, a.ID, "test"))
-	_, err = e.Svc.SetImages(ctx, a.ID, a.OwnerUserID, l.ID, []uuid.UUID{fa}, nil)
+	_, _, err = e.Svc.SetImages(ctx, a.ID, a.OwnerUserID, l.ID, []uuid.UUID{fa}, nil)
 	require.ErrorIs(t, err, listing.ErrPartnerSuspended)
 }

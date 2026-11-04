@@ -45,15 +45,16 @@ type SearchFilter struct {
 
 // PublicCard is a listing as shown in public search results.
 type PublicCard struct {
-	Slug         string   `json:"slug"`
-	Title        string   `json:"title"`
-	ServiceType  string   `json:"service_type"`
-	Summary      *string  `json:"summary"`
-	ProvinceCode *string  `json:"province_code"`
-	CoverURL     *string  `json:"cover_url"`
-	RatingAvg    *float64 `json:"rating_avg"`
-	RatingCount  int      `json:"rating_count"`
-	PriceFrom    *int64   `json:"price_from"`
+	ID           uuid.UUID `json:"id"`
+	Slug         string    `json:"slug"`
+	Title        string    `json:"title"`
+	ServiceType  string    `json:"service_type"`
+	Summary      *string   `json:"summary"`
+	ProvinceCode *string   `json:"province_code"`
+	CoverURL     *string   `json:"cover_url"`
+	RatingAvg    *float64  `json:"rating_avg"`
+	RatingCount  int       `json:"rating_count"`
+	PriceFrom    *int64    `json:"price_from"`
 }
 
 // PublicDetail is the public listing page. Attraction holds active ticket
@@ -84,7 +85,7 @@ func blankToNil(s *string) *string {
 // card builds a PublicCard; priceFrom 0 means no active price.
 func (s *Service) card(ctx context.Context, tx pgx.Tx, r store.Listing, priceFrom int64) (PublicCard, error) {
 	c := PublicCard{
-		Slug: r.Slug, Title: r.Title, ServiceType: r.ServiceType, Summary: r.Summary,
+		ID: r.ID, Slug: r.Slug, Title: r.Title, ServiceType: r.ServiceType, Summary: r.Summary,
 		ProvinceCode: r.ProvinceCode, RatingCount: int(r.RatingCount),
 	}
 	if r.RatingCount > 0 {

@@ -48,7 +48,9 @@ type transition struct {
 	check func(cur store.Listing) bool
 	// validate, if set, runs after a passing check (so 409 beats 422).
 	validate func() error
-	apply    func(q *store.Queries, cur store.Listing, now time.Time) (store.Listing, error)
+	// verify, if set, runs after validate with the locked row (completeness).
+	verify func(ctx context.Context, tx pgx.Tx, cur store.Listing) error
+	apply  func(q *store.Queries, cur store.Listing, now time.Time) (store.Listing, error)
 }
 
 // partnerTransition runs t on the partner's own listing: active partner (403)
@@ -200,6 +202,11 @@ func (s *Service) adminTransition(ctx context.Context, actor, id uuid.UUID, acti
 				return err
 			}
 		}
+		if t.verify != nil {
+			if err := t.verify(ctx, tx, cur); err != nil {
+				return err
+			}
+		}
 		if out, err = t.apply(store.New(tx), cur, now); err != nil {
 			return fmt.Errorf("%s: %w", action, err)
 		}
@@ -219,10 +226,13 @@ func reasonText(reason string) (string, error) {
 	return normalizeText(reason, "reason", true, maxReasonLen)
 }
 
-// Approve approves a listing in review; it keeps its visibility.
+// Approve approves a listing in review; it keeps its visibility. The listing
+// must still be complete: a partner may deactivate ticket types or slots, or
+// change the gallery, while it waits for review (422 listing_incomplete).
 func (s *Service) Approve(ctx context.Context, actor, id uuid.UUID) (Listing, error) {
 	return s.adminTransition(ctx, actor, id, "listing.approve", "", transition{
-		check: func(cur store.Listing) bool { return cur.ReviewStatus == ReviewPendingReview },
+		check:  func(cur store.Listing) bool { return cur.ReviewStatus == ReviewPendingReview },
+		verify: s.requireComplete,
 		apply: func(q *store.Queries, cur store.Listing, now time.Time) (store.Listing, error) {
 			return q.ApproveListing(ctx, store.ApproveListingParams{ID: cur.ID, Now: &now, Actor: &actor})
 		},

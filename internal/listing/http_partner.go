@@ -1,6 +1,9 @@
 package listing
 
 import (
+	"bufio"
+	"errors"
+	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -115,12 +118,7 @@ func (s *Service) PartnerRoutes(mux httpx.Router, iss *auth.Issuer, requireMembe
 			httpx.WriteError(w, r, err)
 			return
 		}
-		l, err := s.SetImages(r.Context(), partnerID, userID, id, in.FileIDs, in.CoverFileID)
-		if err != nil {
-			httpx.WriteError(w, r, err)
-			return
-		}
-		images, err := listImages(r.Context(), s.pool, id)
+		l, images, err := s.SetImages(r.Context(), partnerID, userID, id, in.FileIDs, in.CoverFileID)
 		if err != nil {
 			httpx.WriteError(w, r, err)
 			return
@@ -292,7 +290,7 @@ func (s *Service) attractionRoutes(mux httpx.Router, withID func(h func(w http.R
 		var in struct {
 			Reason *string `json:"reason"`
 		}
-		if err := httpx.DecodeJSON(r, &in); err != nil {
+		if err := decodeOptionalJSON(r, &in); err != nil {
 			httpx.WriteError(w, r, err)
 			return
 		}
@@ -310,4 +308,21 @@ func (s *Service) attractionRoutes(mux httpx.Router, withID func(h func(w http.R
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}))
+}
+
+// decodeOptionalJSON is httpx.DecodeJSON, except that an empty body is
+// treated as {} and leaves dst unchanged.
+func decodeOptionalJSON(r *http.Request, dst any) error {
+	if r.Body == nil {
+		return nil
+	}
+	br := bufio.NewReader(r.Body)
+	if _, err := br.Peek(1); errors.Is(err, io.EOF) {
+		return nil
+	}
+	r.Body = struct {
+		io.Reader
+		io.Closer
+	}{br, r.Body}
+	return httpx.DecodeJSON(r, dst)
 }
