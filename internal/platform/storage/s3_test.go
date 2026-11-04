@@ -72,5 +72,5 @@ func minioImage() string {
 	if img := os.Getenv("MINIO_TEST_IMAGE"); img != "" {
 		return img
 	}
-	return "minio/minio:RELEASE.2024-01-16T16-07-38Z"
+	return "pgsty/minio:RELEASE.2026-08-04T00-00-00Z"
 }

@@ -38,6 +38,10 @@ const (
 // does not match its uploader or purpose.
 var ErrInvalidFile = httpx.NewError(http.StatusUnprocessableEntity, "invalid_file", "Tệp không hợp lệ")
 
+// errReadBody marks a failure to read the upload body (truncated or broken
+// stream), as opposed to a storage or database failure.
+var errReadBody = errors.New("files: read upload body")
+
 func invalidFile(msg string) error {
 	return httpx.NewError(http.StatusUnprocessableEntity, "invalid_file", msg)
 }
@@ -107,7 +111,11 @@ func (s *Service) Upload(ctx context.Context, p auth.Principal, purpose string, 
 	}
 	data, err := io.ReadAll(io.LimitReader(r, MaxSize+1))
 	if err != nil {
-		return File{}, fmt.Errorf("read upload: %w", err)
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			return File{}, invalidFile("Tệp vượt quá 10 MiB")
+		}
+		return File{}, fmt.Errorf("%w: %w", errReadBody, err)
 	}
 	if len(data) == 0 {
 		return File{}, invalidFile("Tệp trống")

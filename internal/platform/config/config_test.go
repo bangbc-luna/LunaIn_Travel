@@ -107,6 +107,7 @@ func setS3(t *testing.T) {
 	t.Setenv("S3_BUCKET", "lunain")
 	t.Setenv("S3_ACCESS_KEY", "k")
 	t.Setenv("S3_SECRET_KEY", "s")
+	t.Setenv("PUBLIC_FILE_BASE_URL", "https://cdn.example.com/lunain")
 }
 
 func TestLoad_S3Defaults(t *testing.T) {
@@ -121,7 +122,7 @@ func TestLoad_S3Defaults(t *testing.T) {
 }
 
 func TestLoad_ProdRequiresS3(t *testing.T) {
-	for _, missing := range []string{"S3_ENDPOINT", "S3_BUCKET", "S3_ACCESS_KEY", "S3_SECRET_KEY"} {
+	for _, missing := range []string{"S3_ENDPOINT", "S3_BUCKET", "S3_ACCESS_KEY", "S3_SECRET_KEY", "PUBLIC_FILE_BASE_URL"} {
 		t.Run(missing, func(t *testing.T) {
 			setRequired(t)
 			t.Setenv("APP_ENV", "prod")

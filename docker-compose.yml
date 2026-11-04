@@ -11,20 +11,20 @@ services:
       - pgdata:/var/lib/postgresql/data
 
   minio:
-    image: minio/minio
+    image: pgsty/minio:RELEASE.2026-08-04T00-00-00Z
     command: server /data --console-address :9001
     environment:
       MINIO_ROOT_USER: lunain
       MINIO_ROOT_PASSWORD: lunain-dev-secret
     ports:
-      - "127.0.0.1:9000:9000"
-      - "127.0.0.1:9001:9001"
+      - "127.0.0.1:9010:9000"
+      - "127.0.0.1:9011:9001"
     volumes:
       - miniodata:/data
 
   # One-shot: creates the bucket and opens the public/ prefix for anonymous download.
   minio-init:
-    image: minio/mc
+    image: pgsty/mc:RELEASE.2026-08-04T00-00-00Z
     depends_on:
       - minio
     restart: "no"

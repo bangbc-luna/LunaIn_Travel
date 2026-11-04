@@ -171,8 +171,8 @@ func serve(log *slog.Logger) error {
 		CodePepper: cfg.CodePepper, Google: google, RefreshTTL: 30 * 24 * time.Hour,
 	})
 
-	if cfg.S3Endpoint == "" || cfg.S3Bucket == "" || cfg.S3AccessKey == "" || cfg.S3SecretKey == "" || cfg.PublicFileBaseURL == "" {
-		return errors.New("object storage is not configured: set S3_ENDPOINT, S3_BUCKET, S3_ACCESS_KEY, S3_SECRET_KEY and PUBLIC_FILE_BASE_URL (dev: docker compose up -d minio minio-init, see .env.example)")
+	if cfg.PublicFileBaseURL == "" {
+		return errors.New("PUBLIC_FILE_BASE_URL is not set (dev: docker compose up -d minio minio-init, see .env.example)")
 	}
 	objects, err := storage.NewS3(context.Background(), storage.S3Config{
 		Endpoint: cfg.S3Endpoint, Region: cfg.S3Region, Bucket: cfg.S3Bucket,

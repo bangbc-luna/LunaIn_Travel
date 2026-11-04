@@ -125,6 +125,7 @@ func (c Config) validate() error {
 		for _, f := range []struct{ name, val string }{
 			{"S3_ENDPOINT", c.S3Endpoint}, {"S3_BUCKET", c.S3Bucket},
 			{"S3_ACCESS_KEY", c.S3AccessKey}, {"S3_SECRET_KEY", c.S3SecretKey},
+			{"PUBLIC_FILE_BASE_URL", c.PublicFileBaseURL},
 		} {
 			if f.val == "" {
 				return fmt.Errorf("%s is required when APP_ENV=prod", f.name)

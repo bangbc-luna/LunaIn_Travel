@@ -35,7 +35,7 @@ var _ Storage = (*S3)(nil)
 // NewS3 builds an S3 client. It does not contact the server.
 func NewS3(ctx context.Context, cfg S3Config) (*S3, error) {
 	if cfg.Endpoint == "" || cfg.Bucket == "" || cfg.AccessKey == "" || cfg.SecretKey == "" {
-		return nil, errors.New("storage: s3 endpoint, bucket, access key and secret key are required")
+		return nil, errors.New("storage: object storage is not configured: set S3_ENDPOINT, S3_BUCKET, S3_ACCESS_KEY and S3_SECRET_KEY (dev: docker compose up -d minio minio-init, see .env.example)")
 	}
 	region := cfg.Region
 	if region == "" {

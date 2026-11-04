@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -15,6 +16,8 @@ const (
 	// multipart overhead allowed on top of the file itself.
 	bodyOverhead = 1 << 20
 	maxFormField = 1 << 10
+
+	uploadReadTimeout = 2 * time.Minute
 )
 
 // Routes registers the file API on mux.
@@ -31,6 +34,14 @@ func (s *Service) Routes(mux *http.ServeMux, iss *auth.Issuer, clientIP func(*ht
 }
 
 func (s *Service) handleUpload(w http.ResponseWriter, r *http.Request) {
+	// The server-wide timeouts (15s read) are too short for a 10 MiB upload on
+	// a slow link: extend them for this route only. Socket deadlines are not
+	// business time, so time.Now() is used instead of the injected clock.
+	rc := http.NewResponseController(w)
+	now := time.Now()
+	_ = rc.SetReadDeadline(now.Add(uploadReadTimeout))
+	_ = rc.SetWriteDeadline(now.Add(uploadReadTimeout + 10*time.Second))
+
 	r.Body = http.MaxBytesReader(w, r.Body, MaxSize+bodyOverhead)
 	mr, err := r.MultipartReader()
 	if err != nil {
@@ -45,14 +56,14 @@ func (s *Service) handleUpload(w http.ResponseWriter, r *http.Request) {
 	for {
 		part, err := mr.NextPart()
 		if err != nil {
-			httpx.WriteError(w, r, httpx.ErrInvalidRequest)
+			httpx.WriteError(w, r, streamError(err))
 			return
 		}
 		switch part.FormName() {
 		case "purpose":
 			b, err := io.ReadAll(io.LimitReader(part, maxFormField))
 			if err != nil {
-				httpx.WriteError(w, r, uploadReadError(err))
+				httpx.WriteError(w, r, streamError(err))
 				return
 			}
 			purpose = string(b)
@@ -63,7 +74,7 @@ func (s *Service) handleUpload(w http.ResponseWriter, r *http.Request) {
 			}
 			f, err := s.Upload(r.Context(), pr, purpose, part)
 			if err != nil {
-				httpx.WriteError(w, r, uploadReadError(err))
+				httpx.WriteError(w, r, uploadError(err))
 				return
 			}
 			httpx.WriteJSON(w, http.StatusCreated, f)
@@ -72,11 +83,27 @@ func (s *Service) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// uploadReadError maps a body cut off by MaxBytesReader to invalid_file.
-func uploadReadError(err error) error {
+// streamError maps a failure of reading/parsing the multipart stream itself:
+// a body cut off by MaxBytesReader is invalid_file (422); anything else
+// (truncated body, bad part header, client disconnect) is a 400.
+func streamError(err error) error {
 	var mbe *http.MaxBytesError
 	if errors.As(err, &mbe) {
 		return invalidFile("Tệp vượt quá 10 MiB")
+	}
+	return httpx.ErrInvalidRequest
+}
+
+// uploadError maps an error from Upload: AppErrors pass through, a failure to
+// read the file part is handled like a stream error, and everything else
+// (storage, database) stays a 500.
+func uploadError(err error) error {
+	var ae *httpx.AppError
+	if errors.As(err, &ae) {
+		return err
+	}
+	if errors.Is(err, errReadBody) {
+		return streamError(err)
 	}
 	return err
 }
