@@ -82,6 +82,7 @@ func TestLoad_ProdRequiresExplicitTrustedProxyHops(t *testing.T) {
 	setRequired(t)
 	t.Setenv("APP_ENV", "prod")
 	t.Setenv("SMTP_HOST", "smtp.example.com")
+	setS3(t)
 	t.Setenv("TRUSTED_PROXY_HOPS", "") // registers restore
 	os.Unsetenv("TRUSTED_PROXY_HOPS")
 
@@ -97,5 +98,42 @@ func TestLoad_ProdRequiresExplicitTrustedProxyHops(t *testing.T) {
 	}
 	if cfg.TrustedProxyHops != 0 {
 		t.Errorf("TrustedProxyHops = %d, want 0", cfg.TrustedProxyHops)
+	}
+}
+
+func setS3(t *testing.T) {
+	t.Helper()
+	t.Setenv("S3_ENDPOINT", "https://s3.example.com")
+	t.Setenv("S3_BUCKET", "lunain")
+	t.Setenv("S3_ACCESS_KEY", "k")
+	t.Setenv("S3_SECRET_KEY", "s")
+}
+
+func TestLoad_S3Defaults(t *testing.T) {
+	setRequired(t)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.S3Region != "us-east-1" || !cfg.S3UsePathStyle {
+		t.Errorf("S3Region=%q S3UsePathStyle=%v, want us-east-1/true", cfg.S3Region, cfg.S3UsePathStyle)
+	}
+}
+
+func TestLoad_ProdRequiresS3(t *testing.T) {
+	for _, missing := range []string{"S3_ENDPOINT", "S3_BUCKET", "S3_ACCESS_KEY", "S3_SECRET_KEY"} {
+		t.Run(missing, func(t *testing.T) {
+			setRequired(t)
+			t.Setenv("APP_ENV", "prod")
+			t.Setenv("TRUSTED_PROXY_HOPS", "1")
+			t.Setenv("SMTP_HOST", "smtp.example.com")
+			setS3(t)
+			t.Setenv(missing, "")
+
+			_, err := config.Load()
+			if err == nil || !strings.Contains(err.Error(), missing) {
+				t.Fatalf("err = %v, want error mentioning %s", err, missing)
+			}
+		})
 	}
 }

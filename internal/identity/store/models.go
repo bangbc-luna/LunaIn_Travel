@@ -46,6 +46,18 @@ type EmailVerification struct {
 	UpdatedAt    time.Time
 }
 
+type File struct {
+	ID          uuid.UUID
+	StorageKey  string
+	Purpose     string
+	Visibility  string
+	ContentType string
+	SizeBytes   int64
+	UploadedBy  uuid.UUID
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
 type Holiday struct {
 	Date      pgtype.Date
 	Name      string

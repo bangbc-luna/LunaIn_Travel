@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river"
 
+	"github.com/bangbc-luna/lunain-travel/internal/files"
 	"github.com/bangbc-luna/lunain-travel/internal/identity"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/auth"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/clock"
@@ -26,6 +27,7 @@ import (
 	"github.com/bangbc-luna/lunain-travel/internal/platform/httpx"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/jobs"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/mailer"
+	"github.com/bangbc-luna/lunain-travel/internal/platform/storage"
 	"github.com/bangbc-luna/lunain-travel/internal/settings"
 )
 
@@ -169,9 +171,21 @@ func serve(log *slog.Logger) error {
 		CodePepper: cfg.CodePepper, Google: google, RefreshTTL: 30 * 24 * time.Hour,
 	})
 
+	if cfg.S3Endpoint == "" || cfg.S3Bucket == "" || cfg.S3AccessKey == "" || cfg.S3SecretKey == "" || cfg.PublicFileBaseURL == "" {
+		return errors.New("object storage is not configured: set S3_ENDPOINT, S3_BUCKET, S3_ACCESS_KEY, S3_SECRET_KEY and PUBLIC_FILE_BASE_URL (dev: docker compose up -d minio minio-init, see .env.example)")
+	}
+	objects, err := storage.NewS3(context.Background(), storage.S3Config{
+		Endpoint: cfg.S3Endpoint, Region: cfg.S3Region, Bucket: cfg.S3Bucket,
+		AccessKey: cfg.S3AccessKey, SecretKey: cfg.S3SecretKey, UsePathStyle: cfg.S3UsePathStyle,
+	})
+	if err != nil {
+		return err
+	}
+
 	mux := http.NewServeMux()
 	idSvc.Routes(mux, issuer, httpx.ClientIPFunc(cfg.TrustedProxyHops))
 	settings.NewService(pool, clock.Real{}).Routes(mux, issuer)
+	files.NewService(pool, objects, clock.Real{}, cfg.PublicFileBaseURL).Routes(mux, issuer, httpx.ClientIPFunc(cfg.TrustedProxyHops))
 	mux.HandleFunc("GET /healthz", healthz)
 	mux.HandleFunc("GET /readyz", readyz(pool))
 	mux.HandleFunc("/", httpx.NotFound)

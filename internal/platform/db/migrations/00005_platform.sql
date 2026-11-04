@@ -43,7 +43,20 @@ CREATE TABLE holidays (
     updated_at timestamptz NOT NULL DEFAULT now()
 );
 
+CREATE TABLE files (
+    id           uuid PRIMARY KEY,
+    storage_key  text NOT NULL UNIQUE,
+    purpose      text NOT NULL CHECK (purpose IN ('listing_image','review_image','business_license','payout_proof','refund_proof')),
+    visibility   text NOT NULL CHECK (visibility IN ('public','private')),
+    content_type text NOT NULL,
+    size_bytes   bigint NOT NULL CHECK (size_bytes > 0),
+    uploaded_by  uuid NOT NULL REFERENCES users (id),
+    created_at   timestamptz NOT NULL DEFAULT now(),
+    updated_at   timestamptz NOT NULL DEFAULT now()
+);
+
 -- +goose Down
+DROP TABLE files;
 DROP TABLE holidays;
 DROP TABLE platform_settings;
 DROP TABLE admin_audit_log;

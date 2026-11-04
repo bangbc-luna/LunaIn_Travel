@@ -29,6 +29,14 @@ type Config struct {
 	// explicitly: a wrong 0 behind a load balancer makes every client share
 	// the load balancer's rate-limit bucket.
 	TrustedProxyHops int
+	// S3-compatible object storage (MinIO in dev, S3/R2 in prod).
+	S3Endpoint        string
+	S3Region          string
+	S3Bucket          string
+	S3AccessKey       string
+	S3SecretKey       string
+	S3UsePathStyle    bool
+	PublicFileBaseURL string
 
 	trustedProxyHopsSet bool
 }
@@ -36,18 +44,25 @@ type Config struct {
 // rawEnv mirrors the environment; secrets are strings because env would
 // parse a []byte as a comma-separated list of numbers.
 type rawEnv struct {
-	AppEnv           string `env:"APP_ENV" envDefault:"dev"`
-	HTTPAddr         string `env:"HTTP_ADDR" envDefault:":8080"`
-	DatabaseURL      string `env:"DATABASE_URL,notEmpty"`
-	JWTSecret        string `env:"JWT_SECRET,notEmpty"`
-	CodePepper       string `env:"CODE_PEPPER,notEmpty"`
-	GoogleClientID   string `env:"GOOGLE_CLIENT_ID"`
-	MailFrom         string `env:"MAIL_FROM" envDefault:"LunaIn Travel <no-reply@lunain.vn>"`
-	SMTPHost         string `env:"SMTP_HOST"`
-	SMTPPort         int    `env:"SMTP_PORT"`
-	SMTPUser         string `env:"SMTP_USER"`
-	SMTPPassword     string `env:"SMTP_PASSWORD"`
-	TrustedProxyHops int    `env:"TRUSTED_PROXY_HOPS" envDefault:"0"`
+	AppEnv            string `env:"APP_ENV" envDefault:"dev"`
+	HTTPAddr          string `env:"HTTP_ADDR" envDefault:":8080"`
+	DatabaseURL       string `env:"DATABASE_URL,notEmpty"`
+	JWTSecret         string `env:"JWT_SECRET,notEmpty"`
+	CodePepper        string `env:"CODE_PEPPER,notEmpty"`
+	GoogleClientID    string `env:"GOOGLE_CLIENT_ID"`
+	MailFrom          string `env:"MAIL_FROM" envDefault:"LunaIn Travel <no-reply@lunain.vn>"`
+	SMTPHost          string `env:"SMTP_HOST"`
+	SMTPPort          int    `env:"SMTP_PORT"`
+	SMTPUser          string `env:"SMTP_USER"`
+	SMTPPassword      string `env:"SMTP_PASSWORD"`
+	TrustedProxyHops  int    `env:"TRUSTED_PROXY_HOPS" envDefault:"0"`
+	S3Endpoint        string `env:"S3_ENDPOINT"`
+	S3Region          string `env:"S3_REGION" envDefault:"us-east-1"`
+	S3Bucket          string `env:"S3_BUCKET"`
+	S3AccessKey       string `env:"S3_ACCESS_KEY"`
+	S3SecretKey       string `env:"S3_SECRET_KEY"`
+	S3UsePathStyle    bool   `env:"S3_USE_PATH_STYLE" envDefault:"true"`
+	PublicFileBaseURL string `env:"PUBLIC_FILE_BASE_URL"`
 }
 
 // Load reads the environment and validates it.
@@ -69,6 +84,14 @@ func Load() (Config, error) {
 		SMTPUser:         raw.SMTPUser,
 		SMTPPassword:     raw.SMTPPassword,
 		TrustedProxyHops: raw.TrustedProxyHops,
+
+		S3Endpoint:        raw.S3Endpoint,
+		S3Region:          raw.S3Region,
+		S3Bucket:          raw.S3Bucket,
+		S3AccessKey:       raw.S3AccessKey,
+		S3SecretKey:       raw.S3SecretKey,
+		S3UsePathStyle:    raw.S3UsePathStyle,
+		PublicFileBaseURL: raw.PublicFileBaseURL,
 	}
 	_, cfg.trustedProxyHopsSet = os.LookupEnv("TRUSTED_PROXY_HOPS")
 	if err := cfg.validate(); err != nil {
@@ -97,6 +120,16 @@ func (c Config) validate() error {
 	}
 	if c.AppEnv == "prod" && c.SMTPHost == "" {
 		return errors.New("SMTP_HOST is required when APP_ENV=prod")
+	}
+	if c.AppEnv == "prod" {
+		for _, f := range []struct{ name, val string }{
+			{"S3_ENDPOINT", c.S3Endpoint}, {"S3_BUCKET", c.S3Bucket},
+			{"S3_ACCESS_KEY", c.S3AccessKey}, {"S3_SECRET_KEY", c.S3SecretKey},
+		} {
+			if f.val == "" {
+				return fmt.Errorf("%s is required when APP_ENV=prod", f.name)
+			}
+		}
 	}
 	return nil
 }
