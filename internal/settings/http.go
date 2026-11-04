@@ -15,7 +15,7 @@ type holidayReq struct {
 }
 
 // Routes registers the Super Admin settings and holidays API on mux.
-func (s *Service) Routes(mux *http.ServeMux, iss *auth.Issuer) {
+func (s *Service) Routes(mux httpx.Router, iss *auth.Issuer) {
 	admin := func(h http.HandlerFunc) http.Handler {
 		return httpx.Chain(h, auth.Authenticate(iss), auth.RequireRole(auth.RoleSuperAdmin))
 	}

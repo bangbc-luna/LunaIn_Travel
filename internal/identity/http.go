@@ -67,7 +67,7 @@ type resetReq struct {
 // Routes registers the identity HTTP API on mux. clientIP is the rate-limit
 // key (see httpx.ClientIPFunc). Each public route has its own limiter whose
 // burst equals its per-minute rate.
-func (s *Service) Routes(mux *http.ServeMux, iss *auth.Issuer, clientIP func(*http.Request) string) {
+func (s *Service) Routes(mux httpx.Router, iss *auth.Issuer, clientIP func(*http.Request) string) {
 	limited := func(perMinute int, h http.HandlerFunc) http.Handler {
 		return httpx.RateLimit(perMinute, perMinute, clientIP)(h)
 	}

@@ -96,7 +96,7 @@ func TestHTTP_UploadMultipart(t *testing.T) {
 	}
 	require.Equal(t, http.StatusUnauthorized, get("", pf.ID).StatusCode)
 	require.Equal(t, http.StatusNotFound, get(tok(other), pf.ID).StatusCode)
-	require.Equal(t, http.StatusBadRequest, get(tok(partner), "not-a-uuid").StatusCode)
+	require.Equal(t, http.StatusNotFound, get(tok(partner), "not-a-uuid").StatusCode)
 	r := get(tok(partner), pf.ID)
 	require.Equal(t, http.StatusOK, r.StatusCode)
 	var u struct {

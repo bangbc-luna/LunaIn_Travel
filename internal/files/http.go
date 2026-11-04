@@ -21,7 +21,7 @@ const (
 )
 
 // Routes registers the file API on mux.
-func (s *Service) Routes(mux *http.ServeMux, iss *auth.Issuer, clientIP func(*http.Request) string) {
+func (s *Service) Routes(mux httpx.Router, iss *auth.Issuer, clientIP func(*http.Request) string) {
 	authed := func(h http.HandlerFunc, mws ...func(http.Handler) http.Handler) http.Handler {
 		return httpx.Chain(h, append([]func(http.Handler) http.Handler{
 			auth.Authenticate(iss),
@@ -111,7 +111,7 @@ func uploadError(err error) error {
 func (s *Service) handleURL(w http.ResponseWriter, r *http.Request) {
 	id, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {
-		httpx.WriteError(w, r, httpx.ErrInvalidRequest)
+		httpx.WriteError(w, r, httpx.ErrNotFound)
 		return
 	}
 	pr, _ := auth.PrincipalFrom(r.Context())

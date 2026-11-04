@@ -31,20 +31,22 @@ type muxDeps struct {
 	Partner  *partner.Service
 }
 
-// buildMux registers every HTTP route. Unmatched paths get the JSON 404.
-func buildMux(d muxDeps) *http.ServeMux {
+// buildMux registers every HTTP route and returns the mux plus every pattern
+// registered on it (sorted). Unmatched paths get the JSON 404.
+func buildMux(d muxDeps) (*http.ServeMux, []string) {
 	mux := http.NewServeMux()
-	d.Identity.Routes(mux, d.Issuer, d.ClientIP)
-	d.Settings.Routes(mux, d.Issuer)
-	d.Files.Routes(mux, d.Issuer, d.ClientIP)
-	d.Geo.Routes(mux)
-	d.Catalog.Routes(mux, d.Issuer)
-	d.Partner.Routes(mux, d.Issuer)
-	d.Partner.AdminRoutes(mux, d.Issuer)
-	mux.HandleFunc("GET /healthz", healthz)
-	mux.HandleFunc("GET /readyz", readyz(d.Pool))
-	mux.HandleFunc("/", httpx.NotFound)
-	return mux
+	rr := httpx.NewRecordingRouter(mux)
+	d.Identity.Routes(rr, d.Issuer, d.ClientIP)
+	d.Settings.Routes(rr, d.Issuer)
+	d.Files.Routes(rr, d.Issuer, d.ClientIP)
+	d.Geo.Routes(rr)
+	d.Catalog.Routes(rr, d.Issuer)
+	d.Partner.Routes(rr, d.Issuer)
+	d.Partner.AdminRoutes(rr, d.Issuer)
+	rr.HandleFunc("GET /healthz", healthz)
+	rr.HandleFunc("GET /readyz", readyz(d.Pool))
+	rr.HandleFunc("/", httpx.NotFound)
+	return mux, rr.Patterns()
 }
 
 func healthz(w http.ResponseWriter, _ *http.Request) {

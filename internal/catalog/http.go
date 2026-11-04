@@ -61,7 +61,7 @@ func (s *Service) overview(r *http.Request) ([]rateOverview, error) {
 }
 
 // Routes registers the public service-type and Super Admin commission API.
-func (s *Service) Routes(mux *http.ServeMux, iss *auth.Issuer) {
+func (s *Service) Routes(mux httpx.Router, iss *auth.Issuer) {
 	admin := func(h http.HandlerFunc) http.Handler {
 		return httpx.Chain(h, auth.Authenticate(iss), auth.RequireRole(auth.RoleSuperAdmin))
 	}

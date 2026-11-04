@@ -190,7 +190,7 @@ func serve(log *slog.Logger) error {
 		Pool: pool, Clock: clock.Real{}, Users: idSvc, Catalog: catSvc, Geo: geoSvc, Files: fileSvc,
 	})
 
-	mux := buildMux(muxDeps{
+	mux, _ := buildMux(muxDeps{
 		Pool: pool, Issuer: issuer, ClientIP: httpx.ClientIPFunc(cfg.TrustedProxyHops),
 		Identity: idSvc, Settings: settings.NewService(pool, clock.Real{}), Files: fileSvc,
 		Geo: geoSvc, Catalog: catSvc, Partner: partnerSvc,

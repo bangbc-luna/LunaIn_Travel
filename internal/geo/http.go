@@ -11,7 +11,7 @@ import (
 const cacheControl = "public, max-age=86400"
 
 // Routes registers the public (unauthenticated) geo catalog API on mux.
-func (s *Service) Routes(mux *http.ServeMux) {
+func (s *Service) Routes(mux httpx.Router) {
 	mux.HandleFunc("GET /v1/geo/provinces", func(w http.ResponseWriter, r *http.Request) {
 		list, err := s.Provinces(r.Context())
 		if err != nil {

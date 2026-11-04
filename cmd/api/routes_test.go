@@ -1,12 +1,8 @@
 package main
 
 import (
-	"io/fs"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -33,6 +29,8 @@ var testNow = time.Date(2026, 11, 4, 9, 0, 0, 0, time.FixedZone("ICT", 7*3600))
 type testApp struct {
 	handler http.Handler
 	issuer  *auth.Issuer
+	// patterns are all patterns recorded at registration time.
+	patterns []string
 }
 
 // newTestApp builds the real mux over a fresh Postgres, in-memory storage and
@@ -52,12 +50,12 @@ func newTestApp(t *testing.T) *testApp {
 	partnerSvc := partner.NewService(partner.Deps{
 		Pool: pool, Clock: clk, Users: idSvc, Catalog: catSvc, Geo: geoSvc, Files: fileSvc,
 	})
-	mux := buildMux(muxDeps{
+	mux, patterns := buildMux(muxDeps{
 		Pool: pool, Issuer: issuer, ClientIP: httpx.ClientIPFunc(0),
 		Identity: idSvc, Settings: settings.NewService(pool, clk), Files: fileSvc,
 		Geo: geoSvc, Catalog: catSvc, Partner: partnerSvc,
 	})
-	return &testApp{handler: httpx.Chain(mux, httpx.RequestID, httpx.Recover), issuer: issuer}
+	return &testApp{handler: httpx.Chain(mux, httpx.RequestID, httpx.Recover), issuer: issuer, patterns: patterns}
 }
 
 func (a *testApp) token(t *testing.T, role auth.Role) string {
@@ -98,44 +96,20 @@ var adminRoutes = []struct{ pattern, sample string }{
 	{"POST /v1/admin/partners/{id}/unsuspend", "/v1/admin/partners/" + uuid.Nil.String() + "/unsuspend"},
 }
 
-var adminPatternRe = regexp.MustCompile(`"((?:GET|POST|PUT|PATCH|DELETE) /v1/admin[^"]*)"`)
-
-// registeredAdminPatterns scans the non-test sources of every module for
-// mux registrations under /v1/admin. Routes are registered with string
-// literals, so a new admin route is always found here.
-func registeredAdminPatterns(t *testing.T) []string {
-	t.Helper()
-	seen := map[string]bool{}
-	root := filepath.Join("..", "..", "internal")
-	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
-			return err
-		}
-		src, err := os.ReadFile(p)
-		if err != nil {
-			return err
-		}
-		for _, m := range adminPatternRe.FindAllStringSubmatch(string(src), -1) {
-			seen[m[1]] = true
-		}
-		return nil
-	})
-	require.NoError(t, err)
-	out := make([]string, 0, len(seen))
-	for p := range seen {
-		out = append(out, p)
-	}
-	sort.Strings(out)
-	return out
-}
-
 func TestAdminRouteListIsComplete(t *testing.T) {
 	declared := make([]string, 0, len(adminRoutes))
 	for _, r := range adminRoutes {
 		declared = append(declared, r.pattern)
 	}
 	sort.Strings(declared)
-	require.Equal(t, registeredAdminPatterns(t), declared,
+	var registered []string
+	for _, p := range (newTestApp(t)).patterns {
+		if _, path, _ := strings.Cut(p, " "); strings.HasPrefix(path, "/v1/admin/") {
+			registered = append(registered, p)
+		}
+	}
+	sort.Strings(registered)
+	require.Equal(t, registered, declared,
 		"adminRoutes in routes_test.go must list every /v1/admin route registered by the modules")
 }
 

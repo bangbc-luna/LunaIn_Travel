@@ -12,7 +12,7 @@ import (
 
 // Routes registers the partner self-service API. Every route resolves the
 // partner from the session (RequireMember); none accepts a partner_id.
-func (s *Service) Routes(mux *http.ServeMux, iss *auth.Issuer) {
+func (s *Service) Routes(mux httpx.Router, iss *auth.Issuer) {
 	member := func(h func(w http.ResponseWriter, r *http.Request, partnerID, userID uuid.UUID)) http.Handler {
 		return httpx.Chain(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			partnerID, ok := IDFrom(r.Context())
@@ -75,7 +75,7 @@ func (s *Service) Routes(mux *http.ServeMux, iss *auth.Issuer) {
 // AdminRoutes registers the Super Admin partner API. Every route is
 // Authenticate -> RequireRole(super_admin). A path id that is not a uuid cannot
 // name a partner, so it is answered 404 not_found.
-func (s *Service) AdminRoutes(mux *http.ServeMux, iss *auth.Issuer) {
+func (s *Service) AdminRoutes(mux httpx.Router, iss *auth.Issuer) {
 	admin := func(h func(w http.ResponseWriter, r *http.Request, actor uuid.UUID)) http.Handler {
 		return httpx.Chain(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			pr, _ := auth.PrincipalFrom(r.Context())
