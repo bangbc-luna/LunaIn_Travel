@@ -3,6 +3,7 @@ package db_test
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -23,6 +24,32 @@ func TestMigrate_Idempotent(t *testing.T) {
 	var exists bool
 	require.NoError(t, pool.QueryRow(ctx, `SELECT to_regclass('public.river_job') IS NOT NULL`).Scan(&exists))
 	require.True(t, exists)
+}
+
+func TestMigrate_ConcurrentCallsSerialize(t *testing.T) {
+	pool := testutil.Postgres(t)
+	ctx := context.Background()
+
+	const n = 3
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs[i] = db.Migrate(ctx, pool)
+		}()
+	}
+	wg.Wait()
+	for i, err := range errs {
+		require.NoError(t, err, "migrate #%d", i)
+	}
+
+	// Every caller released the lock.
+	var held int
+	require.NoError(t, pool.QueryRow(ctx,
+		`SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND granted`).Scan(&held))
+	require.Equal(t, 0, held)
 }
 
 // probeTable creates t_probe and returns a row counter.
