@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bangbc-luna/lunain-travel/internal/platform/auth"
@@ -292,6 +293,36 @@ func TestRevokeAllSessions(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvalidRefreshToken)
 	_, err = env.Svc.Refresh(ctx, r2.RefreshToken)
 	require.ErrorIs(t, err, ErrInvalidRefreshToken)
+}
+
+func TestRevokeAllSessions_LocksUserRow(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+	registerVerified(t, env, "an@gmail.com")
+	_, err := env.Svc.Login(ctx, "an@gmail.com", testPassword)
+	require.NoError(t, err)
+	var userID uuid.UUID
+	require.NoError(t, env.Pool.QueryRow(ctx, `SELECT id FROM users`).Scan(&userID))
+
+	txA, err := env.Pool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = txA.Rollback(ctx) }()
+	require.NoError(t, env.Svc.RevokeAllSessions(ctx, txA, userID))
+
+	// While A is open, nobody else can lock the user row.
+	txB, err := env.Pool.Begin(ctx)
+	require.NoError(t, err)
+	_, err = txB.Exec(ctx, `SELECT id FROM users WHERE id = $1 FOR UPDATE NOWAIT`, userID)
+	require.NoError(t, txB.Rollback(ctx)) // before asserting, so a failure cannot leak B's lock
+	var pgErr *pgconn.PgError
+	require.ErrorAs(t, err, &pgErr, "user row was not locked by RevokeAllSessions")
+	require.Equal(t, "55P03", pgErr.Code) // lock_not_available
+
+	require.NoError(t, txA.Commit(ctx))
+	var active int
+	require.NoError(t, env.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM refresh_tokens WHERE user_id = $1 AND revoked_at IS NULL`, userID).Scan(&active))
+	require.Equal(t, 0, active)
 }
 
 func TestCreateInternalUser(t *testing.T) {

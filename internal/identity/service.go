@@ -572,10 +572,17 @@ func (s *Service) Logout(ctx context.Context, refreshToken string) error {
 	})
 }
 
-// RevokeAllSessions revokes every refresh token of userID inside tx. Per the
-// lock order rule, the caller should already hold the user row lock.
+// RevokeAllSessions revokes every refresh token of userID inside tx. It locks
+// the user row first (a no-op if tx already holds it), following the lock
+// order rule, so it serializes with Refresh: a rotation in flight either
+// commits before this runs (and its new token is revoked here) or waits and
+// then sees its token revoked.
 func (s *Service) RevokeAllSessions(ctx context.Context, tx pgx.Tx, userID uuid.UUID) error {
-	if err := store.New(tx).RevokeUserRefreshTokens(ctx, store.RevokeUserRefreshTokensParams{
+	q := store.New(tx)
+	if _, err := q.GetUserByIDForUpdate(ctx, userID); err != nil {
+		return fmt.Errorf("lock user: %w", err)
+	}
+	if err := q.RevokeUserRefreshTokens(ctx, store.RevokeUserRefreshTokensParams{
 		Now: s.clock.Now(), UserID: userID,
 	}); err != nil {
 		return fmt.Errorf("revoke sessions: %w", err)
