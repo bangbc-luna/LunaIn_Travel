@@ -12,10 +12,13 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/riverqueue/river"
 
 	"github.com/bangbc-luna/lunain-travel/internal/platform/config"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/db"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/httpx"
+	"github.com/bangbc-luna/lunain-travel/internal/platform/jobs"
+	"github.com/bangbc-luna/lunain-travel/internal/platform/mailer"
 )
 
 func main() {
@@ -46,6 +49,30 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+
+	var mail mailer.Mailer = mailer.LogMailer{Logger: log}
+	if cfg.AppEnv == "prod" {
+		mail = mailer.SMTPMailer{
+			Host: cfg.SMTPHost, Port: cfg.SMTPPort,
+			User: cfg.SMTPUser, Password: cfg.SMTPPassword, From: cfg.MailFrom,
+		}
+	}
+	workers := river.NewWorkers()
+	river.AddWorker(workers, &mailer.SendEmailWorker{Mailer: mail})
+	jobClient, err := jobs.NewClient(pool, workers, log)
+	if err != nil {
+		return err
+	}
+	if err := jobClient.Start(context.Background()); err != nil {
+		return err
+	}
+	defer func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := jobClient.Stop(stopCtx); err != nil {
+			log.Error("stop job client", "err", err)
+		}
+	}()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthz)
