@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -155,4 +156,35 @@ func TestHolidays_AddListRemove(t *testing.T) {
 	status, code = appCode(t, e.Svc.AddHoliday(ctx, e.Admin, day, "  "))
 	require.Equal(t, http.StatusUnprocessableEntity, status)
 	require.Equal(t, "invalid_holiday", code)
+}
+
+func TestIsHoliday_UsesVietnamDate(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	require.NoError(t, e.Svc.AddHoliday(ctx, e.Admin, time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC), "Quốc khánh"))
+	require.NoError(t, db.InTx(ctx, e.Pool, func(tx pgx.Tx) error {
+		// 2026-09-01T17:30Z is 2026-09-02 00:30 in Vietnam.
+		ok, err := e.Svc.IsHoliday(ctx, tx, time.Date(2026, 9, 1, 17, 30, 0, 0, time.UTC))
+		require.NoError(t, err)
+		require.True(t, ok)
+		// 2026-09-01T16:59Z is 2026-09-01 23:59 in Vietnam.
+		ok, err = e.Svc.IsHoliday(ctx, tx, time.Date(2026, 9, 1, 16, 59, 0, 0, time.UTC))
+		require.NoError(t, err)
+		require.False(t, ok)
+		return nil
+	}))
+}
+
+func TestAddHoliday_NameLimit(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	day := time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC)
+	status, code := appCode(t, e.Svc.AddHoliday(ctx, e.Admin, day, strings.Repeat("ễ", 101)))
+	require.Equal(t, http.StatusUnprocessableEntity, status)
+	require.Equal(t, "invalid_holiday", code)
+	// Exactly 100 characters after trimming is accepted.
+	require.NoError(t, e.Svc.AddHoliday(ctx, e.Admin, day, "  "+strings.Repeat("ễ", 100)+"  "))
+	list, err := e.Svc.ListHolidays(ctx, 2026)
+	require.NoError(t, err)
+	require.Equal(t, strings.Repeat("ễ", 100), list[0].Name)
 }

@@ -1,7 +1,22 @@
 // Package clock abstracts time so business code never calls time.Now directly.
 package clock
 
-import "time"
+import (
+	"time"
+	_ "time/tzdata" // Asia/Ho_Chi_Minh must resolve on hosts without system tzdata
+)
+
+// VN is Vietnam time (Asia/Ho_Chi_Minh, UTC+7, no DST). Business dates
+// (holidays, dates of birth, booking days) are calendar dates in this zone.
+var VN = mustLoadLocation("Asia/Ho_Chi_Minh")
+
+func mustLoadLocation(name string) *time.Location {
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		panic(err)
+	}
+	return loc
+}
 
 // Clock returns the current time.
 type Clock interface {

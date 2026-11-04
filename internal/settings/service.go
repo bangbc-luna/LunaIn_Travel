@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -71,7 +72,10 @@ type Holiday struct {
 	Name string `json:"name"`
 }
 
-const dateLayout = "2006-01-02"
+const (
+	dateLayout          = "2006-01-02"
+	maxHolidayNameRunes = 100
+)
 
 // Service reads and updates platform settings and holidays.
 type Service struct {
@@ -235,7 +239,10 @@ func (s *Service) Update(ctx context.Context, actor uuid.UUID, p Patch) (Setting
 	return after, nil
 }
 
+// pgDate returns the calendar date of d in Vietnam time (clock.VN). A date
+// parsed from YYYY-MM-DD (UTC midnight) keeps its calendar date.
 func pgDate(d time.Time) pgtype.Date {
+	d = d.In(clock.VN)
 	return pgtype.Date{Time: time.Date(d.Year(), d.Month(), d.Day(), 0, 0, 0, 0, time.UTC), Valid: true}
 }
 
@@ -256,10 +263,11 @@ func (s *Service) ListHolidays(ctx context.Context, year int) ([]Holiday, error)
 	return out, nil
 }
 
-// AddHoliday inserts a holiday; a duplicate date is ErrHolidayExists.
+// AddHoliday inserts a holiday; a duplicate date is ErrHolidayExists and a
+// blank name or one over 100 characters (after trimming) is ErrInvalidHoliday.
 func (s *Service) AddHoliday(ctx context.Context, actor uuid.UUID, date time.Time, name string) error {
 	name = strings.TrimSpace(name)
-	if name == "" {
+	if name == "" || utf8.RuneCountInString(name) > maxHolidayNameRunes {
 		return ErrInvalidHoliday
 	}
 	return db.InTx(ctx, s.pool, func(tx pgx.Tx) error {
@@ -275,7 +283,7 @@ func (s *Service) AddHoliday(ctx context.Context, actor uuid.UUID, date time.Tim
 			ActorUserID: actor,
 			Action:      "holiday.create",
 			TargetKind:  "holiday",
-			After:       Holiday{Date: date.Format(dateLayout), Name: name},
+			After:       Holiday{Date: pgDate(date).Time.Format(dateLayout), Name: name},
 		})
 	})
 }
@@ -303,12 +311,13 @@ func (s *Service) RemoveHoliday(ctx context.Context, actor uuid.UUID, date time.
 			ActorUserID: actor,
 			Action:      "holiday.delete",
 			TargetKind:  "holiday",
-			Before:      Holiday{Date: date.Format(dateLayout), Name: name},
+			Before:      Holiday{Date: pgDate(date).Time.Format(dateLayout), Name: name},
 		})
 	})
 }
 
-// IsHoliday reports whether d (calendar date) is in the holidays catalog.
+// IsHoliday reports whether the Vietnam calendar date of d (d.In(clock.VN))
+// is in the holidays catalog, so 2026-09-01T17:30Z is 2026-09-02 in Vietnam.
 func (s *Service) IsHoliday(ctx context.Context, tx pgx.Tx, d time.Time) (bool, error) {
 	ok, err := store.New(tx).HolidayExists(ctx, pgDate(d))
 	if err != nil {

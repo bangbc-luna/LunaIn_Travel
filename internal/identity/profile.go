@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"strings"
 	"time"
-	_ "time/tzdata" // Asia/Ho_Chi_Minh must resolve on minimal hosts
 	"unicode/utf8"
 
 	"github.com/google/uuid"
@@ -15,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/bangbc-luna/lunain-travel/internal/identity/store"
+	"github.com/bangbc-luna/lunain-travel/internal/platform/clock"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/db"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/httpx"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/validate"
@@ -24,16 +24,6 @@ const (
 	maxFullNameRunes = 100
 	dateLayout       = "2006-01-02"
 )
-
-var vnLocation = mustLoadLocation("Asia/Ho_Chi_Minh")
-
-func mustLoadLocation(name string) *time.Location {
-	loc, err := time.LoadLocation(name)
-	if err != nil {
-		panic(err)
-	}
-	return loc
-}
 
 // Profile is a customer's profile. DateOfBirth marshals as YYYY-MM-DD.
 type Profile struct {
@@ -88,7 +78,7 @@ func (s *Service) parseDOB(v string) (time.Time, error) {
 	if err != nil {
 		return time.Time{}, invalidProfile("date_of_birth phải là ngày hợp lệ theo định dạng YYYY-MM-DD")
 	}
-	n := s.clock.Now().In(vnLocation)
+	n := s.clock.Now().In(clock.VN)
 	today := time.Date(n.Year(), n.Month(), n.Day(), 0, 0, 0, 0, time.UTC)
 	if !d.Before(today) {
 		return time.Time{}, invalidProfile("date_of_birth phải là ngày hợp lệ trong quá khứ")
