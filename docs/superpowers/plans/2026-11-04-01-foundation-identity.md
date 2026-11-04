@@ -255,7 +255,7 @@ sqlc.yaml, docker-compose.yml, Makefile, .env.example, .gitignore
   - `type Tokens struct{ AccessToken string; AccessExpiresAt time.Time; RefreshToken string; RefreshExpiresAt time.Time; Role auth.Role }` (JSON snake_case).
   - `func (s *Service) Register(ctx, email, password string) error`
   - `func (s *Service) ResendVerification(ctx, email string) error`
-  - `func (s *Service) VerifyEmail(ctx, email, code string) (Tokens, error)`
+  - `func (s *Service) VerifyEmail(ctx, email, code, password string) (Tokens, error)` (Ruling 7: mật khẩu đăng ký gắn với mã `signup` qua `email_verifications.password_hash` và phải nhập lại khi xác minh, `users.password_hash` chỉ được đặt khi xác minh thành công. Thứ tự khóa luôn là user → mã.)
   - `func (s *Service) issueSession(ctx, tx pgx.Tx, userID uuid.UUID, role auth.Role, familyID uuid.UUID) (Tokens, error)` (nội bộ, Task 7 dùng lại).
 
 Quy tắc hành vi:
@@ -304,7 +304,7 @@ Quy tắc hành vi:
   - `func (s *Service) CreateInternalUser(ctx context.Context, tx pgx.Tx, email, password string, role auth.Role) (uuid.UUID, error)`: tạo user **đã xác minh** với role `partner` hoặc `super_admin` (role `customer` → lỗi). Plan 2 dùng để tạo tài khoản đối tác. Email trùng → `ErrEmailTaken`.
 
 Quy tắc hành vi:
-- `Login`: email không tồn tại hoặc sai mật khẩu → `ErrInvalidCredentials`, và **vẫn chạy một lần verify argon2 với hash giả** để thời gian phản hồi không lộ email có tồn tại hay không. User không có `password_hash` (chỉ dùng Google) → `ErrInvalidCredentials`. Chưa xác minh → `ErrEmailNotVerified` (chỉ trả sau khi mật khẩu đúng). `status=locked` → `ErrAccountLocked`. Thành công → phiên mới, `family_id` mới.
+- `Login`: email không tồn tại hoặc sai mật khẩu → `ErrInvalidCredentials`, và **vẫn chạy một lần verify argon2 với hash giả** để thời gian phản hồi không lộ email có tồn tại hay không. User đã xác minh nhưng không có `password_hash` (chỉ dùng Google) → `ErrInvalidCredentials`. Chưa xác minh (theo Ruling 7, lúc này `users.password_hash` là NULL và mật khẩu chờ kích hoạt nằm trên mã `signup` mới nhất) → so mật khẩu với `password_hash` của mã `signup` mới nhất của user (đã dùng hay chưa đều được). Khớp → `ErrEmailNotVerified`, không khớp hoặc không có mã → `ErrInvalidCredentials`. `status=locked` → `ErrAccountLocked`. Thành công → phiên mới, `family_id` mới.
 - `Refresh`: tìm theo hash `FOR UPDATE`. Không thấy, hết hạn hoặc `revoked_at` khác null → `ErrInvalidRefreshToken`. **Đã có `used_at`** (bị dùng lại) → thu hồi mọi token cùng `family_id` (commit việc thu hồi) rồi `ErrInvalidRefreshToken`. User bị khóa → thu hồi family, `ErrAccountLocked`. Hợp lệ → đặt `used_at`, phát token mới **cùng `family_id`**, access token mang role hiện tại của user.
 - `Logout`: thu hồi cả family của token. Token không hợp lệ cũng trả nil (idempotent).
 
@@ -334,7 +334,7 @@ Quy tắc hành vi:
 **Interfaces:**
 - Produces:
   - `func (s *Service) RequestPasswordReset(ctx, email string) error`: email không tồn tại, không hợp lệ, hoặc tài khoản bị khóa → trả **nil** và không gửi gì. Có tài khoản → mã `password_reset` (cùng TTL, cooldown, số lần thử như Task 6). Trong cooldown → vẫn trả nil, không gửi thêm. Email subject `"Đặt lại mật khẩu LunaIn Travel"`. Áp dụng cả cho user chưa xác minh và user chỉ dùng Google.
-  - `func (s *Service) ResetPassword(ctx, email, code, newPassword string) error`: validate mật khẩu mới, kiểm tra mã như `VerifyEmail` → đặt `password_hash`, đặt `email_verified_at` nếu đang null (vì đã chứng minh sở hữu email), gọi `RevokeAllSessions`. Mọi thứ trong một transaction.
+  - `func (s *Service) ResetPassword(ctx, email, code, newPassword string) error`: validate mật khẩu mới, kiểm tra mã như `VerifyEmail` (khóa user trước, rồi tới mã) → đặt `password_hash`, đặt `email_verified_at` nếu đang null (vì đã chứng minh sở hữu email) và khi đó vô hiệu mọi mã `signup` đang chờ, gọi `RevokeAllSessions`. Mọi thứ trong một transaction.
 
 - [ ] **Step 1: Viết test fail**:
   - `TestRequestPasswordReset_UnknownEmailSilent`: trả nil, `rec.Messages()` rỗng.
@@ -368,14 +368,15 @@ Luồng: frontend lấy Google ID token (Google Identity Services) rồi gửi l
 Quy tắc hành vi:
 - Verify lỗi → `ErrGoogleTokenInvalid`. `EmailVerified == false` → `ErrGoogleTokenInvalid`.
 - Đã có `user_identities(google, sub)` → đăng nhập user đó.
-- Chưa có, nhưng có user cùng email (đã chuẩn hóa) → tạo liên kết. Nếu user đó chưa xác minh thì đặt `email_verified_at`. Nếu user có role `partner` hoặc `super_admin` → **không** liên kết, trả `ErrGoogleTokenInvalid` (tài khoản nội bộ chỉ đăng nhập bằng mật khẩu).
+- Chưa có, nhưng có user cùng email (đã chuẩn hóa) → tạo liên kết. Nếu user đó chưa xác minh thì đặt `email_verified_at` và vô hiệu mọi mã `signup` đang chờ. `password_hash` giữ NULL, mật khẩu chờ kích hoạt bị bỏ (Ruling 7). Người dùng muốn có mật khẩu thì dùng quên mật khẩu. Nếu user có role `partner` hoặc `super_admin` → **không** liên kết, trả `ErrGoogleTokenInvalid` (tài khoản nội bộ chỉ đăng nhập bằng mật khẩu).
 - Chưa có gì → tạo user `customer` đã xác minh, `password_hash` null, `customer_profiles` rỗng, và liên kết.
 - `status=locked` → `ErrAccountLocked`.
 
 - [ ] **Step 1: Viết test fail** với `fakeGoogle` (map token → `GoogleIdentity`):
   - `TestGoogle_NewUser`: tạo user customer đã xác minh, có identity, có profile.
   - `TestGoogle_ReturningUser`: lần hai cùng `sub` → cùng user id, không tạo user mới.
-  - `TestGoogle_LinksExistingPasswordUser`: đăng ký email (chưa xác minh) rồi Google cùng email → cùng user id, `email_verified_at` khác null, vẫn đăng nhập mật khẩu được.
+  - `TestGoogle_LinksExistingUnverifiedUser`: đăng ký email (chưa xác minh) rồi Google cùng email → cùng user id, `email_verified_at` khác null, `password_hash` vẫn NULL, mã `signup` cũ không dùng được nữa.
+  - `TestGoogle_LinksExistingVerifiedPasswordUser`: đăng ký + xác minh rồi Google cùng email → cùng user id, vẫn đăng nhập bằng mật khẩu được.
   - `TestGoogle_UnverifiedGoogleEmailRejected` → `ErrGoogleTokenInvalid`.
   - `TestGoogle_DoesNotLinkPartner`: `CreateInternalUser` partner rồi Google cùng email → `ErrGoogleTokenInvalid`.
 - [ ] **Step 2: Chạy.** Kỳ vọng: FAIL.
@@ -428,7 +429,7 @@ Quy tắc hành vi:
 |---|---|---|---|---|
 | `POST /v1/auth/register` | — | `{email,password}` | 202 `{}` | 10 |
 | `POST /v1/auth/resend-verification` | — | `{email}` | 202 `{}` (email lạ cũng 202) | 5 |
-| `POST /v1/auth/verify-email` | — | `{email,code}` | 200 `Tokens` | 20 |
+| `POST /v1/auth/verify-email` | — | `{email,code,password}` | 200 `Tokens` | 20 |
 | `POST /v1/auth/login` | — | `{email,password}` | 200 `Tokens` | 20 |
 | `POST /v1/auth/google` | — | `{id_token}` | 200 `Tokens` | 20 |
 | `POST /v1/auth/refresh` | — | `{refresh_token}` | 200 `Tokens` | 60 |
