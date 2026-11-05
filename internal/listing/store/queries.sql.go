@@ -61,6 +61,99 @@ func (q *Queries) ApproveListing(ctx context.Context, arg ApproveListingParams) 
 	return i, err
 }
 
+const cancelOpenScheduleTrips = `-- name: CancelOpenScheduleTrips :execrows
+UPDATE ride_trips
+SET status = 'cancelled', cancelled_reason = $1::text, cancelled_at = $2::timestamptz,
+    cancelled_by = $3::uuid, cancel_source = 'schedule', updated_at = $2::timestamptz
+WHERE schedule_id = $4::uuid AND departure_at > $2::timestamptz AND departure_at >= $5::timestamptz
+  AND status = 'scheduled' AND seats_reserved = 0
+`
+
+type CancelOpenScheduleTripsParams struct {
+	Reason     string
+	Now        time.Time
+	Actor      *uuid.UUID
+	ScheduleID uuid.UUID
+	FromAt     time.Time
+}
+
+// Cancels the future, unbooked, still scheduled trips of a schedule that
+// depart at or after @from_at.
+func (q *Queries) CancelOpenScheduleTrips(ctx context.Context, arg CancelOpenScheduleTripsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, cancelOpenScheduleTrips,
+		arg.Reason,
+		arg.Now,
+		arg.Actor,
+		arg.ScheduleID,
+		arg.FromAt,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const cancelTrip = `-- name: CancelTrip :one
+UPDATE ride_trips
+SET status = 'cancelled', cancelled_reason = $1::text, cancelled_at = $2::timestamptz,
+    cancelled_by = $3::uuid, cancel_source = $4::text, updated_at = $2::timestamptz
+WHERE id = $5 AND status = 'scheduled'
+RETURNING id, listing_id, schedule_id, departure_at, seat_capacity, seats_reserved, price_per_seat, status, cancelled_reason, cancelled_at, cancelled_by, cancel_source, created_at, updated_at
+`
+
+type CancelTripParams struct {
+	Reason string
+	Now    time.Time
+	Actor  uuid.UUID
+	Source string
+	ID     uuid.UUID
+}
+
+func (q *Queries) CancelTrip(ctx context.Context, arg CancelTripParams) (RideTrip, error) {
+	row := q.db.QueryRow(ctx, cancelTrip,
+		arg.Reason,
+		arg.Now,
+		arg.Actor,
+		arg.Source,
+		arg.ID,
+	)
+	var i RideTrip
+	err := row.Scan(
+		&i.ID,
+		&i.ListingID,
+		&i.ScheduleID,
+		&i.DepartureAt,
+		&i.SeatCapacity,
+		&i.SeatsReserved,
+		&i.PricePerSeat,
+		&i.Status,
+		&i.CancelledReason,
+		&i.CancelledAt,
+		&i.CancelledBy,
+		&i.CancelSource,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const countActiveRideSchedules = `-- name: CountActiveRideSchedules :one
+SELECT count(*) FROM ride_schedules
+WHERE listing_id = $1 AND active AND (valid_to IS NULL OR valid_to >= $2::date)
+`
+
+type CountActiveRideSchedulesParams struct {
+	ListingID uuid.UUID
+	Today     pgtype.Date
+}
+
+func (q *Queries) CountActiveRideSchedules(ctx context.Context, arg CountActiveRideSchedulesParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countActiveRideSchedules, arg.ListingID, arg.Today)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const countActiveTicketTypes = `-- name: CountActiveTicketTypes :one
 SELECT count(*) FROM attraction_ticket_types WHERE listing_id = $1 AND active
 `
@@ -269,8 +362,11 @@ func (q *Queries) GetOwnedListing(ctx context.Context, arg GetOwnedListingParams
 
 const getPublicListingBySlug = `-- name: GetPublicListingBySlug :one
 SELECT l.id, l.partner_id, l.service_type, l.title, l.slug, l.summary, l.description, l.cover_file_id, l.province_code, l.ward_code, l.address, l.latitude, l.longitude, l.review_status, l.rejection_reason, l.submitted_at, l.reviewed_at, l.reviewed_by, l.visibility, l.hidden_reason, l.hidden_at, l.hidden_by, l.hidden_from_visibility, l.rating_sum, l.rating_count, l.created_at, l.updated_at,
-       (SELECT COALESCE(min(tt.price), 0) FROM attraction_ticket_types tt
-        WHERE tt.listing_id = l.id AND tt.active)::bigint AS price_from
+       COALESCE((SELECT min(tt.price) FROM attraction_ticket_types tt
+                 WHERE tt.listing_id = l.id AND tt.active),
+                (SELECT min(rs.price_per_seat) FROM ride_schedules rs
+                 WHERE rs.listing_id = l.id AND rs.active),
+                0)::bigint AS price_from
 FROM visible_listings l
 WHERE l.slug = $1
 `
@@ -312,6 +408,58 @@ func (q *Queries) GetPublicListingBySlug(ctx context.Context, slug string) (GetP
 		&i.VisibleListing.CreatedAt,
 		&i.VisibleListing.UpdatedAt,
 		&i.PriceFrom,
+	)
+	return i, err
+}
+
+const getRideRoute = `-- name: GetRideRoute :one
+SELECT listing_id, origin_province_code, origin_ward_code, origin_name, origin_address, dest_province_code, dest_ward_code, dest_name, dest_address, duration_minutes, vehicle_description, created_at, updated_at FROM ride_routes WHERE listing_id = $1
+`
+
+// Scheduled ride: route, schedules and trip generation.
+func (q *Queries) GetRideRoute(ctx context.Context, listingID uuid.UUID) (RideRoute, error) {
+	row := q.db.QueryRow(ctx, getRideRoute, listingID)
+	var i RideRoute
+	err := row.Scan(
+		&i.ListingID,
+		&i.OriginProvinceCode,
+		&i.OriginWardCode,
+		&i.OriginName,
+		&i.OriginAddress,
+		&i.DestProvinceCode,
+		&i.DestWardCode,
+		&i.DestName,
+		&i.DestAddress,
+		&i.DurationMinutes,
+		&i.VehicleDescription,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getRideTrip = `-- name: GetRideTrip :one
+SELECT id, listing_id, schedule_id, departure_at, seat_capacity, seats_reserved, price_per_seat, status, cancelled_reason, cancelled_at, cancelled_by, cancel_source, created_at, updated_at FROM ride_trips WHERE id = $1
+`
+
+func (q *Queries) GetRideTrip(ctx context.Context, id uuid.UUID) (RideTrip, error) {
+	row := q.db.QueryRow(ctx, getRideTrip, id)
+	var i RideTrip
+	err := row.Scan(
+		&i.ID,
+		&i.ListingID,
+		&i.ScheduleID,
+		&i.DepartureAt,
+		&i.SeatCapacity,
+		&i.SeatsReserved,
+		&i.PricePerSeat,
+		&i.Status,
+		&i.CancelledReason,
+		&i.CancelledAt,
+		&i.CancelledBy,
+		&i.CancelSource,
+		&i.CreatedAt,
+		&i.UpdatedAt,
 	)
 	return i, err
 }
@@ -366,6 +514,23 @@ func (q *Queries) GetTimeSlot(ctx context.Context, arg GetTimeSlotParams) (Attra
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const hasBookedFutureTrips = `-- name: HasBookedFutureTrips :one
+SELECT EXISTS (SELECT 1 FROM ride_trips
+               WHERE listing_id = $1 AND departure_at > $2 AND seats_reserved > 0)
+`
+
+type HasBookedFutureTripsParams struct {
+	ListingID uuid.UUID
+	Now       time.Time
+}
+
+func (q *Queries) HasBookedFutureTrips(ctx context.Context, arg HasBookedFutureTripsParams) (bool, error) {
+	row := q.db.QueryRow(ctx, hasBookedFutureTrips, arg.ListingID, arg.Now)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
 }
 
 const hideListing = `-- name: HideListing :one
@@ -603,6 +768,142 @@ func (q *Queries) InsertListingImage(ctx context.Context, arg InsertListingImage
 		arg.Now,
 	)
 	return err
+}
+
+const insertOneOffTrip = `-- name: InsertOneOffTrip :one
+INSERT INTO ride_trips (id, listing_id, schedule_id, departure_at, seat_capacity, price_per_seat, created_at, updated_at)
+VALUES ($1, $2, NULL, $3, $4, $5, $6, $6)
+ON CONFLICT (listing_id, departure_at) DO NOTHING
+RETURNING id, listing_id, schedule_id, departure_at, seat_capacity, seats_reserved, price_per_seat, status, cancelled_reason, cancelled_at, cancelled_by, cancel_source, created_at, updated_at
+`
+
+type InsertOneOffTripParams struct {
+	ID           uuid.UUID
+	ListingID    uuid.UUID
+	DepartureAt  time.Time
+	SeatCapacity int32
+	PricePerSeat int64
+	Now          time.Time
+}
+
+func (q *Queries) InsertOneOffTrip(ctx context.Context, arg InsertOneOffTripParams) (RideTrip, error) {
+	row := q.db.QueryRow(ctx, insertOneOffTrip,
+		arg.ID,
+		arg.ListingID,
+		arg.DepartureAt,
+		arg.SeatCapacity,
+		arg.PricePerSeat,
+		arg.Now,
+	)
+	var i RideTrip
+	err := row.Scan(
+		&i.ID,
+		&i.ListingID,
+		&i.ScheduleID,
+		&i.DepartureAt,
+		&i.SeatCapacity,
+		&i.SeatsReserved,
+		&i.PricePerSeat,
+		&i.Status,
+		&i.CancelledReason,
+		&i.CancelledAt,
+		&i.CancelledBy,
+		&i.CancelSource,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const insertRideSchedule = `-- name: InsertRideSchedule :one
+INSERT INTO ride_schedules (id, listing_id, departure_time, weekdays, seat_capacity, price_per_seat,
+    valid_from, valid_to, active, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6,
+    $7, $8, true, $9, $9)
+RETURNING id, listing_id, departure_time, weekdays, seat_capacity, price_per_seat, valid_from, valid_to, active, generated_until, created_at, updated_at
+`
+
+type InsertRideScheduleParams struct {
+	ID            uuid.UUID
+	ListingID     uuid.UUID
+	DepartureTime pgtype.Time
+	Weekdays      int16
+	SeatCapacity  int32
+	PricePerSeat  int64
+	ValidFrom     pgtype.Date
+	ValidTo       pgtype.Date
+	Now           time.Time
+}
+
+func (q *Queries) InsertRideSchedule(ctx context.Context, arg InsertRideScheduleParams) (RideSchedule, error) {
+	row := q.db.QueryRow(ctx, insertRideSchedule,
+		arg.ID,
+		arg.ListingID,
+		arg.DepartureTime,
+		arg.Weekdays,
+		arg.SeatCapacity,
+		arg.PricePerSeat,
+		arg.ValidFrom,
+		arg.ValidTo,
+		arg.Now,
+	)
+	var i RideSchedule
+	err := row.Scan(
+		&i.ID,
+		&i.ListingID,
+		&i.DepartureTime,
+		&i.Weekdays,
+		&i.SeatCapacity,
+		&i.PricePerSeat,
+		&i.ValidFrom,
+		&i.ValidTo,
+		&i.Active,
+		&i.GeneratedUntil,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const insertScheduleTrips = `-- name: InsertScheduleTrips :execrows
+INSERT INTO ride_trips (id, listing_id, schedule_id, departure_at, seat_capacity, price_per_seat, created_at, updated_at)
+SELECT unnest($1::uuid[]), $2::uuid, $3::uuid, unnest($4::timestamptz[]),
+       $5::int, $6::bigint, $7::timestamptz, $7::timestamptz
+ON CONFLICT (listing_id, departure_at) DO UPDATE
+SET status = 'scheduled', schedule_id = EXCLUDED.schedule_id, seat_capacity = EXCLUDED.seat_capacity,
+    price_per_seat = EXCLUDED.price_per_seat, cancelled_reason = NULL, cancelled_at = NULL,
+    cancelled_by = NULL, cancel_source = NULL, updated_at = EXCLUDED.updated_at
+WHERE ride_trips.status = 'cancelled' AND ride_trips.cancel_source = 'schedule'
+`
+
+type InsertScheduleTripsParams struct {
+	Ids          []uuid.UUID
+	ListingID    uuid.UUID
+	ScheduleID   uuid.UUID
+	Departures   []time.Time
+	SeatCapacity int32
+	PricePerSeat int64
+	Now          time.Time
+}
+
+// Inserts the schedule's trips; a trip the schedule itself cancelled at the
+// same departure is reopened. Any other existing trip (one-off, running, or
+// cancelled by the partner or an admin) is left as it is.
+// The two unnest calls in the select list run in lockstep (equal lengths).
+func (q *Queries) InsertScheduleTrips(ctx context.Context, arg InsertScheduleTripsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, insertScheduleTrips,
+		arg.Ids,
+		arg.ListingID,
+		arg.ScheduleID,
+		arg.Departures,
+		arg.SeatCapacity,
+		arg.PricePerSeat,
+		arg.Now,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const insertTicketType = `-- name: InsertTicketType :one
@@ -960,6 +1261,54 @@ func (q *Queries) ListClosedDatesFrom(ctx context.Context, arg ListClosedDatesFr
 	return items, nil
 }
 
+const listCoveringSchedules = `-- name: ListCoveringSchedules :many
+SELECT DISTINCT b.id
+FROM ride_trips t
+JOIN ride_schedules s ON s.id = t.schedule_id
+JOIN ride_schedules b ON b.listing_id = t.listing_id AND b.id <> s.id AND b.active
+WHERE s.id = $1::uuid AND t.departure_at > $2::timestamptz
+  AND t.status = 'scheduled' AND t.seats_reserved = 0
+  AND (NOT s.active
+       OR (s.valid_to IS NOT NULL AND (t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date > s.valid_to))
+  AND b.departure_time = (t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::time
+  AND (b.weekdays::int & (1 << (extract(isodow FROM t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::int - 1))) <> 0
+  AND (t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date >= b.valid_from
+  AND (b.valid_to IS NULL OR (t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date <= b.valid_to)
+ORDER BY b.id
+`
+
+type ListCoveringSchedulesParams struct {
+	ScheduleID uuid.UUID
+	Now        time.Time
+}
+
+// A trip that schedule @schedule_id no longer covers (it is inactive, or the
+// trip's VN date is after its valid_to) may be covered by another active
+// schedule of the listing: same VN departure time, the trip's VN weekday bit
+// set (bit 0 = Monday) and its VN date within [valid_from, valid_to]. That
+// happens when a partner replaces a schedule while a trip held seats (the
+// replacement's generation skips the existing row). The overlap rule allows
+// at most one such schedule per trip.
+func (q *Queries) ListCoveringSchedules(ctx context.Context, arg ListCoveringSchedulesParams) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listCoveringSchedules, arg.ScheduleID, arg.Now)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listListingImages = `-- name: ListListingImages :many
 SELECT id, listing_id, file_id, sort_order, created_at, updated_at FROM listing_images WHERE listing_id = $1 ORDER BY sort_order
 `
@@ -978,6 +1327,55 @@ func (q *Queries) ListListingImages(ctx context.Context, listingID uuid.UUID) ([
 			&i.ListingID,
 			&i.FileID,
 			&i.SortOrder,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listListingTrips = `-- name: ListListingTrips :many
+
+SELECT id, listing_id, schedule_id, departure_at, seat_capacity, seats_reserved, price_per_seat, status, cancelled_reason, cancelled_at, cancelled_by, cancel_source, created_at, updated_at FROM ride_trips
+WHERE listing_id = $1 AND departure_at >= $2 AND departure_at < $3
+ORDER BY departure_at
+`
+
+type ListListingTripsParams struct {
+	ListingID uuid.UUID
+	FromAt    time.Time
+	ToAt      time.Time
+}
+
+// Scheduled ride: single trips and seat reservation.
+func (q *Queries) ListListingTrips(ctx context.Context, arg ListListingTripsParams) ([]RideTrip, error) {
+	rows, err := q.db.Query(ctx, listListingTrips, arg.ListingID, arg.FromAt, arg.ToAt)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []RideTrip
+	for rows.Next() {
+		var i RideTrip
+		if err := rows.Scan(
+			&i.ID,
+			&i.ListingID,
+			&i.ScheduleID,
+			&i.DepartureAt,
+			&i.SeatCapacity,
+			&i.SeatsReserved,
+			&i.PricePerSeat,
+			&i.Status,
+			&i.CancelledReason,
+			&i.CancelledAt,
+			&i.CancelledBy,
+			&i.CancelSource,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
@@ -1087,6 +1485,92 @@ func (q *Queries) ListRecentAuditLog(ctx context.Context, listingID uuid.UUID) (
 			return nil, err
 		}
 		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRideSchedules = `-- name: ListRideSchedules :many
+SELECT id, listing_id, departure_time, weekdays, seat_capacity, price_per_seat, valid_from, valid_to, active, generated_until, created_at, updated_at FROM ride_schedules
+WHERE listing_id = $1 AND ($2::bool OR active)
+ORDER BY departure_time, valid_from, id
+`
+
+type ListRideSchedulesParams struct {
+	ListingID       uuid.UUID
+	IncludeInactive bool
+}
+
+func (q *Queries) ListRideSchedules(ctx context.Context, arg ListRideSchedulesParams) ([]RideSchedule, error) {
+	rows, err := q.db.Query(ctx, listRideSchedules, arg.ListingID, arg.IncludeInactive)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []RideSchedule
+	for rows.Next() {
+		var i RideSchedule
+		if err := rows.Scan(
+			&i.ID,
+			&i.ListingID,
+			&i.DepartureTime,
+			&i.Weekdays,
+			&i.SeatCapacity,
+			&i.PricePerSeat,
+			&i.ValidFrom,
+			&i.ValidTo,
+			&i.Active,
+			&i.GeneratedUntil,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listSchedulesToGenerate = `-- name: ListSchedulesToGenerate :many
+SELECT s.id FROM ride_schedules s
+WHERE (s.active
+       AND (s.valid_to IS NULL OR s.valid_to >= $1::date)
+       AND (s.generated_until IS NULL OR s.generated_until < LEAST(COALESCE(s.valid_to, $2::date), $2::date)))
+   OR EXISTS (SELECT 1 FROM ride_trips t
+              WHERE t.schedule_id = s.id AND t.departure_at > $3::timestamptz
+                AND t.status = 'scheduled' AND t.seats_reserved = 0
+                AND (NOT s.active
+                     OR (s.valid_to IS NOT NULL AND (t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date > s.valid_to)))
+ORDER BY s.id
+`
+
+type ListSchedulesToGenerateParams struct {
+	Today   pgtype.Date
+	Horizon pgtype.Date
+	Now     time.Time
+}
+
+// Schedules the job has work for: active ones not expired and not yet
+// generated up to min(valid_to, horizon), and any schedule that still has an
+// out-of-range trip to sweep (see SweepScheduleTrips).
+func (q *Queries) ListSchedulesToGenerate(ctx context.Context, arg ListSchedulesToGenerateParams) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listSchedulesToGenerate, arg.Today, arg.Horizon, arg.Now)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -1228,6 +1712,37 @@ func (q *Queries) LockListing(ctx context.Context, id uuid.UUID) (Listing, error
 	return i, err
 }
 
+const lockListingTrip = `-- name: LockListingTrip :one
+SELECT id, listing_id, schedule_id, departure_at, seat_capacity, seats_reserved, price_per_seat, status, cancelled_reason, cancelled_at, cancelled_by, cancel_source, created_at, updated_at FROM ride_trips WHERE id = $1 AND listing_id = $2 FOR UPDATE
+`
+
+type LockListingTripParams struct {
+	ID        uuid.UUID
+	ListingID uuid.UUID
+}
+
+func (q *Queries) LockListingTrip(ctx context.Context, arg LockListingTripParams) (RideTrip, error) {
+	row := q.db.QueryRow(ctx, lockListingTrip, arg.ID, arg.ListingID)
+	var i RideTrip
+	err := row.Scan(
+		&i.ID,
+		&i.ListingID,
+		&i.ScheduleID,
+		&i.DepartureAt,
+		&i.SeatCapacity,
+		&i.SeatsReserved,
+		&i.PricePerSeat,
+		&i.Status,
+		&i.CancelledReason,
+		&i.CancelledAt,
+		&i.CancelledBy,
+		&i.CancelSource,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const lockOwnedListing = `-- name: LockOwnedListing :one
 SELECT id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, hidden_from_visibility, rating_sum, rating_count, created_at, updated_at FROM listings WHERE id = $1 AND partner_id = $2 FOR NO KEY UPDATE
 `
@@ -1273,6 +1788,130 @@ func (q *Queries) LockOwnedListing(ctx context.Context, arg LockOwnedListingPara
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const lockRideSchedule = `-- name: LockRideSchedule :one
+SELECT id, listing_id, departure_time, weekdays, seat_capacity, price_per_seat, valid_from, valid_to, active, generated_until, created_at, updated_at FROM ride_schedules WHERE id = $1 AND listing_id = $2 FOR UPDATE
+`
+
+type LockRideScheduleParams struct {
+	ID        uuid.UUID
+	ListingID uuid.UUID
+}
+
+func (q *Queries) LockRideSchedule(ctx context.Context, arg LockRideScheduleParams) (RideSchedule, error) {
+	row := q.db.QueryRow(ctx, lockRideSchedule, arg.ID, arg.ListingID)
+	var i RideSchedule
+	err := row.Scan(
+		&i.ID,
+		&i.ListingID,
+		&i.DepartureTime,
+		&i.Weekdays,
+		&i.SeatCapacity,
+		&i.PricePerSeat,
+		&i.ValidFrom,
+		&i.ValidTo,
+		&i.Active,
+		&i.GeneratedUntil,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const lockRideScheduleByID = `-- name: LockRideScheduleByID :one
+SELECT id, listing_id, departure_time, weekdays, seat_capacity, price_per_seat, valid_from, valid_to, active, generated_until, created_at, updated_at FROM ride_schedules WHERE id = $1 FOR UPDATE
+`
+
+func (q *Queries) LockRideScheduleByID(ctx context.Context, id uuid.UUID) (RideSchedule, error) {
+	row := q.db.QueryRow(ctx, lockRideScheduleByID, id)
+	var i RideSchedule
+	err := row.Scan(
+		&i.ID,
+		&i.ListingID,
+		&i.DepartureTime,
+		&i.Weekdays,
+		&i.SeatCapacity,
+		&i.PricePerSeat,
+		&i.ValidFrom,
+		&i.ValidTo,
+		&i.Active,
+		&i.GeneratedUntil,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const lockTrips = `-- name: LockTrips :many
+SELECT id, listing_id, schedule_id, departure_at, seat_capacity, seats_reserved, price_per_seat, status, cancelled_reason, cancelled_at, cancelled_by, cancel_source, created_at, updated_at FROM ride_trips WHERE id = ANY($1::uuid[]) ORDER BY id FOR UPDATE
+`
+
+func (q *Queries) LockTrips(ctx context.Context, ids []uuid.UUID) ([]RideTrip, error) {
+	rows, err := q.db.Query(ctx, lockTrips, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []RideTrip
+	for rows.Next() {
+		var i RideTrip
+		if err := rows.Scan(
+			&i.ID,
+			&i.ListingID,
+			&i.ScheduleID,
+			&i.DepartureAt,
+			&i.SeatCapacity,
+			&i.SeatsReserved,
+			&i.PricePerSeat,
+			&i.Status,
+			&i.CancelledReason,
+			&i.CancelledAt,
+			&i.CancelledBy,
+			&i.CancelSource,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const reassignCoveredTrips = `-- name: ReassignCoveredTrips :execrows
+UPDATE ride_trips t
+SET schedule_id = b.id, seat_capacity = b.seat_capacity, price_per_seat = b.price_per_seat, updated_at = $1::timestamptz
+FROM ride_schedules s, ride_schedules b
+WHERE s.id = $2::uuid AND t.schedule_id = s.id AND b.id = $3::uuid
+  AND b.listing_id = t.listing_id AND b.id <> s.id AND b.active
+  AND t.departure_at > $1::timestamptz AND t.status = 'scheduled' AND t.seats_reserved = 0
+  AND (NOT s.active
+       OR (s.valid_to IS NOT NULL AND (t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date > s.valid_to))
+  AND b.departure_time = (t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::time
+  AND (b.weekdays::int & (1 << (extract(isodow FROM t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::int - 1))) <> 0
+  AND (t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date >= b.valid_from
+  AND (b.valid_to IS NULL OR (t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date <= b.valid_to)
+`
+
+type ReassignCoveredTripsParams struct {
+	Now        time.Time
+	ScheduleID uuid.UUID
+	CoverID    uuid.UUID
+}
+
+// Hands the unbooked trips of @schedule_id that it no longer covers but
+// @cover_id (locked by the caller) does over to @cover_id, with its capacity
+// and price, so that its later edits apply to them.
+func (q *Queries) ReassignCoveredTrips(ctx context.Context, arg ReassignCoveredTripsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, reassignCoveredTrips, arg.Now, arg.ScheduleID, arg.CoverID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const rejectListing = `-- name: RejectListing :one
@@ -1329,10 +1968,51 @@ func (q *Queries) RejectListing(ctx context.Context, arg RejectListingParams) (L
 	return i, err
 }
 
+const releaseSeats = `-- name: ReleaseSeats :execrows
+UPDATE ride_trips SET seats_reserved = seats_reserved - $1::int, updated_at = now()
+WHERE id = $2
+`
+
+type ReleaseSeatsParams struct {
+	N  int32
+	ID uuid.UUID
+}
+
+func (q *Queries) ReleaseSeats(ctx context.Context, arg ReleaseSeatsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, releaseSeats, arg.N, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const reserveSeats = `-- name: ReserveSeats :execrows
+UPDATE ride_trips SET seats_reserved = seats_reserved + $1::int, updated_at = $2
+WHERE id = $3 AND status = 'scheduled' AND departure_at > $2
+  AND seats_reserved + $1::int <= seat_capacity
+`
+
+type ReserveSeatsParams struct {
+	N   int32
+	Now time.Time
+	ID  uuid.UUID
+}
+
+func (q *Queries) ReserveSeats(ctx context.Context, arg ReserveSeatsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, reserveSeats, arg.N, arg.Now, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const searchPublicListings = `-- name: SearchPublicListings :many
 SELECT l.id, l.partner_id, l.service_type, l.title, l.slug, l.summary, l.description, l.cover_file_id, l.province_code, l.ward_code, l.address, l.latitude, l.longitude, l.review_status, l.rejection_reason, l.submitted_at, l.reviewed_at, l.reviewed_by, l.visibility, l.hidden_reason, l.hidden_at, l.hidden_by, l.hidden_from_visibility, l.rating_sum, l.rating_count, l.created_at, l.updated_at,
-       (SELECT COALESCE(min(tt.price), 0) FROM attraction_ticket_types tt
-        WHERE tt.listing_id = l.id AND tt.active)::bigint AS price_from
+       COALESCE((SELECT min(tt.price) FROM attraction_ticket_types tt
+                 WHERE tt.listing_id = l.id AND tt.active),
+                (SELECT min(rs.price_per_seat) FROM ride_schedules rs
+                 WHERE rs.listing_id = l.id AND rs.active),
+                0)::bigint AS price_from
 FROM visible_listings l
 WHERE ($1::text IS NULL OR l.service_type = $1)
   AND ($2::text IS NULL OR l.province_code = $2)
@@ -1360,8 +2040,9 @@ type SearchPublicListingsRow struct {
 }
 
 // Public search over visible_listings (the single visibility rule, see
-// migration 00010). price_from is the cheapest active ticket type, 0 when
-// there is none (prices are > 0 by CHECK; sqlc cannot type a nullable
+// migration 00010). price_from is the cheapest active ticket type or, for a
+// ride, the cheapest active schedule, 0 when there is none (prices are > 0 by
+// CHECK; sqlc cannot type a nullable
 // aggregate, so 0 means NULL). With q: ILIKE on the escaped pattern
 // (ESCAPE '\') or trigram similarity >= 0.3, best match first; without q:
 // newest first.
@@ -1410,6 +2091,115 @@ func (q *Queries) SearchPublicListings(ctx context.Context, arg SearchPublicList
 			&i.VisibleListing.CreatedAt,
 			&i.VisibleListing.UpdatedAt,
 			&i.PriceFrom,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const searchRideTrips = `-- name: SearchRideTrips :many
+SELECT t.id AS trip_id, l.id AS listing_id, l.slug, l.title,
+       r.origin_province_code, r.origin_ward_code, r.origin_name, r.origin_address,
+       r.dest_province_code, r.dest_ward_code, r.dest_name, r.dest_address,
+       r.duration_minutes, r.vehicle_description,
+       t.departure_at, t.price_per_seat,
+       (t.seat_capacity - t.seats_reserved)::int AS seats_left
+FROM ride_trips t
+JOIN ride_routes r ON r.listing_id = t.listing_id
+JOIN visible_listings l ON l.id = t.listing_id
+CROSS JOIN (SELECT $1::timestamptz + GREATEST(ride_booking_cutoff_minutes, hold_minutes + hold_grace_minutes) * interval '1 minute' AS earliest
+            FROM platform_settings WHERE id = 1) ps
+WHERE t.status = 'scheduled'
+  AND r.origin_province_code = $2
+  AND r.dest_province_code = $3
+  AND ($4::text IS NULL OR r.origin_ward_code = $4)
+  AND ($5::text IS NULL OR r.dest_ward_code = $5)
+  AND t.departure_at >= $6::timestamptz AND t.departure_at < $7::timestamptz
+  AND t.departure_at > ps.earliest
+  AND t.seat_capacity - t.seats_reserved >= $8::int
+ORDER BY t.departure_at, t.price_per_seat, t.id
+LIMIT $10 OFFSET $9
+`
+
+type SearchRideTripsParams struct {
+	Now            time.Time
+	OriginProvince string
+	DestProvince   string
+	OriginWard     *string
+	DestWard       *string
+	DayStart       time.Time
+	DayEnd         time.Time
+	Seats          int32
+	Off            int32
+	Lim            int32
+}
+
+type SearchRideTripsRow struct {
+	TripID             uuid.UUID
+	ListingID          uuid.UUID
+	Slug               string
+	Title              string
+	OriginProvinceCode string
+	OriginWardCode     string
+	OriginName         string
+	OriginAddress      string
+	DestProvinceCode   string
+	DestWardCode       string
+	DestName           string
+	DestAddress        string
+	DurationMinutes    int32
+	VehicleDescription string
+	DepartureAt        time.Time
+	PricePerSeat       int64
+	SeatsLeft          int32
+}
+
+// Public trip search. The bookable cutoff is read from platform_settings in
+// the same statement: departure_at > now + max(ride_booking_cutoff_minutes,
+// hold_minutes + hold_grace_minutes). Ward filters are optional.
+func (q *Queries) SearchRideTrips(ctx context.Context, arg SearchRideTripsParams) ([]SearchRideTripsRow, error) {
+	rows, err := q.db.Query(ctx, searchRideTrips,
+		arg.Now,
+		arg.OriginProvince,
+		arg.DestProvince,
+		arg.OriginWard,
+		arg.DestWard,
+		arg.DayStart,
+		arg.DayEnd,
+		arg.Seats,
+		arg.Off,
+		arg.Lim,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []SearchRideTripsRow
+	for rows.Next() {
+		var i SearchRideTripsRow
+		if err := rows.Scan(
+			&i.TripID,
+			&i.ListingID,
+			&i.Slug,
+			&i.Title,
+			&i.OriginProvinceCode,
+			&i.OriginWardCode,
+			&i.OriginName,
+			&i.OriginAddress,
+			&i.DestProvinceCode,
+			&i.DestWardCode,
+			&i.DestName,
+			&i.DestAddress,
+			&i.DurationMinutes,
+			&i.VehicleDescription,
+			&i.DepartureAt,
+			&i.PricePerSeat,
+			&i.SeatsLeft,
 		); err != nil {
 			return nil, err
 		}
@@ -1520,6 +2310,21 @@ func (q *Queries) SetListingVisibility(ctx context.Context, arg SetListingVisibi
 	return i, err
 }
 
+const setScheduleGeneratedUntil = `-- name: SetScheduleGeneratedUntil :exec
+UPDATE ride_schedules SET generated_until = $1, updated_at = $2 WHERE id = $3
+`
+
+type SetScheduleGeneratedUntilParams struct {
+	GeneratedUntil pgtype.Date
+	Now            time.Time
+	ID             uuid.UUID
+}
+
+func (q *Queries) SetScheduleGeneratedUntil(ctx context.Context, arg SetScheduleGeneratedUntilParams) error {
+	_, err := q.db.Exec(ctx, setScheduleGeneratedUntil, arg.GeneratedUntil, arg.Now, arg.ID)
+	return err
+}
+
 const shareListing = `-- name: ShareListing :one
 SELECT id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, hidden_from_visibility, rating_sum, rating_count, created_at, updated_at FROM listings WHERE id = $1 FOR SHARE
 `
@@ -1606,6 +2411,73 @@ func (q *Queries) SubmitListing(ctx context.Context, arg SubmitListingParams) (L
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const sweepScheduleTrips = `-- name: SweepScheduleTrips :execrows
+UPDATE ride_trips t
+SET status = 'cancelled', cancelled_reason = $1::text, cancelled_at = $2::timestamptz,
+    cancelled_by = NULL, cancel_source = 'schedule', updated_at = $2::timestamptz
+FROM ride_schedules s
+WHERE s.id = $3::uuid AND t.schedule_id = s.id AND t.departure_at > $2::timestamptz
+  AND t.status = 'scheduled' AND t.seats_reserved = 0
+  AND (NOT s.active
+       OR (s.valid_to IS NOT NULL AND (t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date > s.valid_to))
+  AND NOT EXISTS (
+      SELECT 1 FROM ride_schedules b
+      WHERE b.listing_id = t.listing_id AND b.id <> s.id AND b.active
+        AND b.departure_time = (t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::time
+        AND (b.weekdays::int & (1 << (extract(isodow FROM t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::int - 1))) <> 0
+        AND (t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date >= b.valid_from
+        AND (b.valid_to IS NULL OR (t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date <= b.valid_to))
+`
+
+type SweepScheduleTripsParams struct {
+	Reason     string
+	Now        time.Time
+	ScheduleID uuid.UUID
+}
+
+// Cancels the future, unbooked, still scheduled trips of a schedule that it
+// no longer covers (schedule inactive, or the trip's VN date after
+// valid_to): trips kept by a schedule edit because they had seats held, once
+// those seats are released. A trip another active schedule covers (see
+// ListCoveringSchedules) is never cancelled here. seats_reserved = 0 is
+// re-checked per row, so a concurrent reservation wins.
+func (q *Queries) SweepScheduleTrips(ctx context.Context, arg SweepScheduleTripsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, sweepScheduleTrips, arg.Reason, arg.Now, arg.ScheduleID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const tripListingIDs = `-- name: TripListingIDs :many
+SELECT id, listing_id FROM ride_trips WHERE id = ANY($1::uuid[])
+`
+
+type TripListingIDsRow struct {
+	ID        uuid.UUID
+	ListingID uuid.UUID
+}
+
+func (q *Queries) TripListingIDs(ctx context.Context, ids []uuid.UUID) ([]TripListingIDsRow, error) {
+	rows, err := q.db.Query(ctx, tripListingIDs, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []TripListingIDsRow
+	for rows.Next() {
+		var i TripListingIDsRow
+		if err := rows.Scan(&i.ID, &i.ListingID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const unhideListing = `-- name: UnhideListing :one
@@ -1732,6 +2604,80 @@ func (q *Queries) UpdateListingContent(ctx context.Context, arg UpdateListingCon
 	return i, err
 }
 
+const updateOpenScheduleTrips = `-- name: UpdateOpenScheduleTrips :execrows
+UPDATE ride_trips
+SET seat_capacity = $1::int, price_per_seat = $2::bigint, updated_at = $3::timestamptz
+WHERE schedule_id = $4::uuid AND departure_at > $3::timestamptz AND status = 'scheduled' AND seats_reserved = 0
+`
+
+type UpdateOpenScheduleTripsParams struct {
+	SeatCapacity int32
+	PricePerSeat int64
+	Now          time.Time
+	ScheduleID   uuid.UUID
+}
+
+// Future, unbooked, still scheduled trips of a schedule take its new
+// capacity and price; trips with reserved seats keep theirs.
+func (q *Queries) UpdateOpenScheduleTrips(ctx context.Context, arg UpdateOpenScheduleTripsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updateOpenScheduleTrips,
+		arg.SeatCapacity,
+		arg.PricePerSeat,
+		arg.Now,
+		arg.ScheduleID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const updateRideSchedule = `-- name: UpdateRideSchedule :one
+UPDATE ride_schedules
+SET seat_capacity = $1, price_per_seat = $2, valid_to = $3,
+    active = $4, generated_until = $5, updated_at = $6
+WHERE id = $7
+RETURNING id, listing_id, departure_time, weekdays, seat_capacity, price_per_seat, valid_from, valid_to, active, generated_until, created_at, updated_at
+`
+
+type UpdateRideScheduleParams struct {
+	SeatCapacity   int32
+	PricePerSeat   int64
+	ValidTo        pgtype.Date
+	Active         bool
+	GeneratedUntil pgtype.Date
+	Now            time.Time
+	ID             uuid.UUID
+}
+
+func (q *Queries) UpdateRideSchedule(ctx context.Context, arg UpdateRideScheduleParams) (RideSchedule, error) {
+	row := q.db.QueryRow(ctx, updateRideSchedule,
+		arg.SeatCapacity,
+		arg.PricePerSeat,
+		arg.ValidTo,
+		arg.Active,
+		arg.GeneratedUntil,
+		arg.Now,
+		arg.ID,
+	)
+	var i RideSchedule
+	err := row.Scan(
+		&i.ID,
+		&i.ListingID,
+		&i.DepartureTime,
+		&i.Weekdays,
+		&i.SeatCapacity,
+		&i.PricePerSeat,
+		&i.ValidFrom,
+		&i.ValidTo,
+		&i.Active,
+		&i.GeneratedUntil,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const updateTicketType = `-- name: UpdateTicketType :one
 UPDATE attraction_ticket_types
 SET name = $1, description = $2, audience = $3, price = $4,
@@ -1821,6 +2767,52 @@ func (q *Queries) UpdateTimeSlot(ctx context.Context, arg UpdateTimeSlotParams) 
 	return i, err
 }
 
+const updateTripFields = `-- name: UpdateTripFields :one
+UPDATE ride_trips
+SET departure_at = $1, seat_capacity = $2, price_per_seat = $3,
+    schedule_id = $4, updated_at = $5
+WHERE id = $6
+RETURNING id, listing_id, schedule_id, departure_at, seat_capacity, seats_reserved, price_per_seat, status, cancelled_reason, cancelled_at, cancelled_by, cancel_source, created_at, updated_at
+`
+
+type UpdateTripFieldsParams struct {
+	DepartureAt  time.Time
+	SeatCapacity int32
+	PricePerSeat int64
+	ScheduleID   *uuid.UUID
+	Now          time.Time
+	ID           uuid.UUID
+}
+
+func (q *Queries) UpdateTripFields(ctx context.Context, arg UpdateTripFieldsParams) (RideTrip, error) {
+	row := q.db.QueryRow(ctx, updateTripFields,
+		arg.DepartureAt,
+		arg.SeatCapacity,
+		arg.PricePerSeat,
+		arg.ScheduleID,
+		arg.Now,
+		arg.ID,
+	)
+	var i RideTrip
+	err := row.Scan(
+		&i.ID,
+		&i.ListingID,
+		&i.ScheduleID,
+		&i.DepartureAt,
+		&i.SeatCapacity,
+		&i.SeatsReserved,
+		&i.PricePerSeat,
+		&i.Status,
+		&i.CancelledReason,
+		&i.CancelledAt,
+		&i.CancelledBy,
+		&i.CancelSource,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const upsertAttraction = `-- name: UpsertAttraction :one
 INSERT INTO attractions (listing_id, opening_note, checkin_instructions, created_at, updated_at)
 VALUES ($1, $2, $3, $4, $4)
@@ -1850,6 +2842,72 @@ func (q *Queries) UpsertAttraction(ctx context.Context, arg UpsertAttractionPara
 		&i.ListingID,
 		&i.OpeningNote,
 		&i.CheckinInstructions,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const upsertRideRoute = `-- name: UpsertRideRoute :one
+INSERT INTO ride_routes (listing_id, origin_province_code, origin_ward_code, origin_name, origin_address,
+    dest_province_code, dest_ward_code, dest_name, dest_address, duration_minutes, vehicle_description,
+    created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5,
+    $6, $7, $8, $9, $10, $11,
+    $12, $12)
+ON CONFLICT (listing_id) DO UPDATE
+SET origin_province_code = EXCLUDED.origin_province_code, origin_ward_code = EXCLUDED.origin_ward_code,
+    origin_name = EXCLUDED.origin_name, origin_address = EXCLUDED.origin_address,
+    dest_province_code = EXCLUDED.dest_province_code, dest_ward_code = EXCLUDED.dest_ward_code,
+    dest_name = EXCLUDED.dest_name, dest_address = EXCLUDED.dest_address,
+    duration_minutes = EXCLUDED.duration_minutes, vehicle_description = EXCLUDED.vehicle_description,
+    updated_at = EXCLUDED.updated_at
+RETURNING listing_id, origin_province_code, origin_ward_code, origin_name, origin_address, dest_province_code, dest_ward_code, dest_name, dest_address, duration_minutes, vehicle_description, created_at, updated_at
+`
+
+type UpsertRideRouteParams struct {
+	ListingID          uuid.UUID
+	OriginProvinceCode string
+	OriginWardCode     string
+	OriginName         string
+	OriginAddress      string
+	DestProvinceCode   string
+	DestWardCode       string
+	DestName           string
+	DestAddress        string
+	DurationMinutes    int32
+	VehicleDescription string
+	Now                time.Time
+}
+
+func (q *Queries) UpsertRideRoute(ctx context.Context, arg UpsertRideRouteParams) (RideRoute, error) {
+	row := q.db.QueryRow(ctx, upsertRideRoute,
+		arg.ListingID,
+		arg.OriginProvinceCode,
+		arg.OriginWardCode,
+		arg.OriginName,
+		arg.OriginAddress,
+		arg.DestProvinceCode,
+		arg.DestWardCode,
+		arg.DestName,
+		arg.DestAddress,
+		arg.DurationMinutes,
+		arg.VehicleDescription,
+		arg.Now,
+	)
+	var i RideRoute
+	err := row.Scan(
+		&i.ListingID,
+		&i.OriginProvinceCode,
+		&i.OriginWardCode,
+		&i.OriginName,
+		&i.OriginAddress,
+		&i.DestProvinceCode,
+		&i.DestWardCode,
+		&i.DestName,
+		&i.DestAddress,
+		&i.DurationMinutes,
+		&i.VehicleDescription,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)

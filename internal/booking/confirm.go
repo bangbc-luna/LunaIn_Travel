@@ -66,7 +66,11 @@ var _ payment.PaymentHandler = (*Service)(nil)
 // for every booking that is late — expired, or pending_payment with its hold
 // already past release (the expiry job lags) — the re-confirmation checks run
 // first: listing.BookableListing per listing in id order (partners, listings
-// FOR SHARE), then SlotsForDate and service_start_at > now. Only then the
+// FOR SHARE), then SlotsForDate and service_start_at > now. A ride checkout
+// then locks its trips (id order), releases other checkouts' overdue holds on
+// them (releaseOverdueOnTrips; their links are cancelled after commit),
+// re-reads its bookings and runs rideChecks (trip still scheduled at the hour
+// sold, seats free again for an expired leg, both legs or none). Only then the
 // checkout and its bookings (id order) are locked FOR UPDATE, its payments
 // (id order) FOR NO KEY UPDATE, and the state is decided from the locked rows:
 //
@@ -84,7 +88,8 @@ var _ payment.PaymentHandler = (*Service)(nil)
 //     commit). Every booking still bookable is confirmed (pending_payment) or
 //     re-confirmed (expired); a late booking that is no longer bookable is (or
 //     stays) expired and refunded in full (late_payment, per booking) without
-//     any ledger entry. More than the amount: the excess is refunded
+//     any ledger entry (a ride leg returns its seats, an expired ride leg
+//     re-confirmed takes them again). More than the amount: the excess is refunded
 //     (payment_mismatch, payment-level) and the payment is needs_review.
 //
 // Ledger postings are made after all booking updates, sorted by partner_id
@@ -110,6 +115,36 @@ func (s *Service) HandlePaid(ctx context.Context, tx pgx.Tx, ev payment.PaidEven
 	if err != nil {
 		return payment.PaidOutcome{}, err
 	}
+	// A ride checkout: its trips are locked before the checkout (DB §1.1).
+	var cancelCodes []int64
+	if tripIDs := rideTripIDs(rows); len(tripIDs) > 0 {
+		if _, err := s.listings.LockTrips(ctx, tx, tripIDs); err != nil {
+			return payment.PaidOutcome{}, err
+		}
+		var err error
+		if cancelCodes, err = s.releaseOverdueOnTrips(ctx, tx, tripIDs, ev.CheckoutID, now); err != nil {
+			return payment.PaidOutcome{}, err
+		}
+		// The release lowered seats_reserved: re-read the trips (already
+		// locked by this tx, so this takes no new lock) for the free-seat
+		// check of rideChecks.
+		locked, err := s.listings.LockTrips(ctx, tx, tripIDs)
+		if err != nil {
+			return payment.PaidOutcome{}, err
+		}
+		trips := make(map[uuid.UUID]listing.Trip, len(locked))
+		for _, t := range locked {
+			trips[t.ID] = t
+		}
+		// Re-read under the trip locks: every status change of a ride
+		// booking holds its trip lock.
+		if rows, err = q.ListCheckoutBookings(ctx, ev.CheckoutID); err != nil {
+			return payment.PaidOutcome{}, fmt.Errorf("list checkout bookings: %w", err)
+		}
+		if err := s.rideChecks(ctx, tx, rows, trips, rebookable, now); err != nil {
+			return payment.PaidOutcome{}, err
+		}
+	}
 
 	co, err := q.LockCheckout(ctx, ev.CheckoutID)
 	if err != nil {
@@ -131,9 +166,10 @@ func (s *Service) HandlePaid(ctx context.Context, tx pgx.Tx, ev payment.PaidEven
 	c := &confirmation{
 		s: s, q: q, tx: tx, ev: ev, co: co, pay: pays[i], pays: pays,
 		bookings: bookings, rebookable: rebookable, now: now,
+		out: payment.PaidOutcome{CancelOrderCodes: cancelCodes},
 	}
 	if ref := c.pay.ProviderReference; ref != nil && *ref == ev.Reference {
-		return payment.PaidOutcome{Result: payment.ResultAlreadyProcessed}, nil
+		return payment.PaidOutcome{Result: payment.ResultAlreadyProcessed, CancelOrderCodes: cancelCodes}, nil
 	}
 	canTake, err := c.canTakeMoney(ctx)
 	if err != nil {
@@ -159,15 +195,39 @@ func (s *Service) HandlePaid(ctx context.Context, tx pgx.Tx, ev payment.PaidEven
 }
 
 // lateBooking: expired, or pending_payment with the hold already past
-// release at now.
+// release at now, or a pending_payment ride booking whose trip has already
+// departed.
 func lateBooking(b store.Booking, now time.Time) bool {
-	return b.Status == StatusExpired ||
-		(b.Status == StatusPendingPayment && b.HoldReleaseAt != nil && !b.HoldReleaseAt.After(now))
+	switch {
+	case b.Status == StatusExpired:
+		return true
+	case b.Status != StatusPendingPayment:
+		return false
+	case b.HoldReleaseAt != nil && !b.HoldReleaseAt.After(now):
+		return true
+	default:
+		return b.ServiceType == serviceTypeRide && !b.ServiceStartAt.After(now)
+	}
+}
+
+// rideTripIDs returns the trips of a checkout's ride bookings, sorted (the
+// lock order); none for an attraction checkout. A booking's trip never
+// changes, so the unlocked read is enough.
+func rideTripIDs(rows []store.ListCheckoutBookingsRow) []uuid.UUID {
+	var ids []uuid.UUID
+	for _, r := range rows {
+		if r.TripID != nil {
+			ids = append(ids, *r.TripID)
+		}
+	}
+	return sortedIDs(ids)
 }
 
 // reconfirmChecks evaluates, before any checkout lock, whether each late
 // booking could still be (re-)confirmed. Bookings that are not late are
-// absent from the map.
+// absent from the map. For a ride booking only the listing is checked here
+// (bookable listing, active partner); rideChecks adds the trip under its
+// lock.
 func (s *Service) reconfirmChecks(ctx context.Context, tx pgx.Tx, rows []store.ListCheckoutBookingsRow, now time.Time) (map[uuid.UUID]bool, error) {
 	out := map[uuid.UUID]bool{}
 	var listingIDs []uuid.UUID
@@ -196,7 +256,7 @@ func (s *Service) reconfirmChecks(ctx context.Context, tx pgx.Tx, rows []store.L
 	}
 	for _, r := range check {
 		ok := bookable[r.Booking.ListingID]
-		if ok {
+		if ok && r.Booking.ServiceType != serviceTypeRide {
 			var err error
 			if ok, err = s.slotStillOffered(ctx, tx, r, now); err != nil {
 				return nil, err
@@ -205,6 +265,65 @@ func (s *Service) reconfirmChecks(ctx context.Context, tx pgx.Tx, rows []store.L
 		out[r.Booking.ID] = ok
 	}
 	return out, nil
+}
+
+// rideChecks decides, with the checkout's trips locked (trips, as locked)
+// and before the checkout is locked, whether each ride booking of rows can be
+// (re-)confirmed, and records it in rebookable for every ride booking:
+//
+//   - The trip must be scheduled, still depart at the hour sold
+//     (departure_at == service_start_at, like Ruling 25) and after now.
+//   - A late booking (lateBooking) also needs its listing bookable, checked
+//     by reconfirmChecks; a late booking reconfirmChecks did not see is
+//     errStateChanged. A late pending_payment booking still holds its seats;
+//     an expired one needs its seats free again on the locked trip.
+//   - Both legs or none: if one ride booking of the checkout cannot be
+//     confirmed, none can (spec §8), and every leg is refunded.
+func (s *Service) rideChecks(_ context.Context, _ pgx.Tx, rows []store.ListCheckoutBookingsRow, trips map[uuid.UUID]listing.Trip, rebookable map[uuid.UUID]bool, now time.Time) error {
+	free := make(map[uuid.UUID]int, len(trips))
+	for id, t := range trips {
+		free[id] = t.SeatCapacity - t.SeatsReserved
+	}
+	var ride []uuid.UUID
+	all := true
+	for _, r := range rows {
+		b := r.Booking
+		if b.ServiceType != serviceTypeRide {
+			continue
+		}
+		if r.TripID == nil || r.Seats == nil {
+			return fmt.Errorf("booking: ride booking %s has no ride details", b.ID)
+		}
+		ride = append(ride, b.ID)
+		t, found := trips[*r.TripID]
+		tripOK := found && t.Status == tripScheduled && t.DepartureAt.Equal(b.ServiceStartAt) && t.DepartureAt.After(now)
+		ok := false
+		switch {
+		case lateBooking(b, now):
+			listed, checked := rebookable[b.ID]
+			if !checked {
+				return errStateChanged
+			}
+			ok = listed && tripOK
+			if ok && b.Status == StatusExpired {
+				if n := int(*r.Seats); free[t.ID] >= n {
+					free[t.ID] -= n
+				} else {
+					ok = false
+				}
+			}
+		case b.Status == StatusPendingPayment:
+			ok = tripOK
+		}
+		rebookable[b.ID] = ok
+		all = all && ok
+	}
+	if !all {
+		for _, id := range ride {
+			rebookable[id] = false
+		}
+	}
+	return nil
 }
 
 // slotStillOffered: the booking's service has not started and its time slot
@@ -389,6 +508,11 @@ func (c *confirmation) confirm(ctx context.Context) (payment.PaidOutcome, error)
 			toPost = append(toPost, b)
 			results = appendOnce(results, ResultConfirmed)
 		case ok:
+			// An expired ride booking takes its seats again (rideChecks saw
+			// them free under the trip lock still held).
+			if err := c.s.reserveRideSeats(ctx, c.tx, b, c.now); err != nil {
+				return c.out, err
+			}
 			reason := reasonLateReconfirm
 			if err := c.confirmBooking(ctx, b, &reason); err != nil {
 				return c.out, err
@@ -474,14 +598,19 @@ func (c *confirmation) history(ctx context.Context, b store.Booking, to string, 
 	return nil
 }
 
-// expireBooking expires a pending booking whose hold passed release and
-// that can no longer be confirmed (Ruling 11).
+// expireBooking expires a pending booking that can no longer be confirmed
+// (Ruling 11: its hold passed release; or a ride leg whose trip, or paired
+// leg, can no longer be served). A ride booking returns its seats in the
+// same tx; HandlePaid locked its trip before the checkout.
 func (c *confirmation) expireBooking(ctx context.Context, b store.Booking) error {
 	if err := c.q.ExpireBooking(ctx, store.ExpireBookingParams{Now: c.now, ID: b.ID}); err != nil {
 		return fmt.Errorf("expire booking: %w", err)
 	}
 	reason := reasonLateExpire
-	return c.history(ctx, b, StatusExpired, &reason)
+	if err := c.history(ctx, b, StatusExpired, &reason); err != nil {
+		return err
+	}
+	return c.s.releaseRideSeats(ctx, c.tx, b)
 }
 
 // confirmBooking moves a locked booking to confirmed (from pending_payment,

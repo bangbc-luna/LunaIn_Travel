@@ -441,3 +441,132 @@ func TestOnePendingPaymentPerCheckout(t *testing.T) {
 	require.GreaterOrEqual(t, minCode, int64(100000))
 	require.Equal(t, int64(2), distinct)
 }
+
+// --- Scheduled ride schema (migration 00017) ---
+
+// wardPair returns the (ward_code, province_code) of the offset-th seeded ward.
+func (f *fixture) wardPair(t *testing.T, offset int) (ward, province string) {
+	t.Helper()
+	require.NoError(t, f.pool.QueryRow(context.Background(),
+		`SELECT code, province_code FROM wards ORDER BY code OFFSET $1 LIMIT 1`, offset).Scan(&ward, &province))
+	return ward, province
+}
+
+// newRideListing inserts a scheduled_ride listing of partner with its route and
+// one schedule.
+func (f *fixture) newRideListing(t *testing.T, partner uuid.UUID) (listing, schedule uuid.UUID) {
+	t.Helper()
+	listing, schedule = newID(t), newID(t)
+	f.mustExec(t, `INSERT INTO listings (id, partner_id, service_type, title, slug)
+		VALUES ($1, $2, 'scheduled_ride', 'Xe tuyến', $3)`, listing, partner, "slug-"+listing.String())
+	ow, op := f.wardPair(t, 0)
+	dw, dp := f.wardPair(t, 1)
+	f.mustExec(t, `INSERT INTO ride_routes (
+		listing_id, origin_province_code, origin_ward_code, origin_name, origin_address,
+		dest_province_code, dest_ward_code, dest_name, dest_address, duration_minutes, vehicle_description)
+		VALUES ($1, $2, $3, 'Bến A', '1 A', $4, $5, 'Bến B', '2 B', 180, 'Limousine 9 chỗ')`,
+		listing, op, ow, dp, dw)
+	f.mustExec(t, `INSERT INTO ride_schedules (id, listing_id, departure_time, weekdays, seat_capacity, price_per_seat, valid_from)
+		VALUES ($1, $2, '08:00', 127, 9, 150000, '2026-12-01')`, schedule, listing)
+	return listing, schedule
+}
+
+func (f *fixture) insertTrip(t *testing.T, id, listing uuid.UUID, schedule any, departure string, capacity, reserved int) error {
+	t.Helper()
+	return f.exec(t, `INSERT INTO ride_trips (id, listing_id, schedule_id, departure_at, seat_capacity, seats_reserved, price_per_seat)
+		VALUES ($1, $2, $3, $4::timestamptz, $5, $6, 150000)`, id, listing, schedule, departure, capacity, reserved)
+}
+
+func TestRideTripSeatsCheck(t *testing.T) {
+	f := newFixture(t)
+	listing, _ := f.newRideListing(t, f.partner)
+
+	err := f.insertTrip(t, newID(t), listing, nil, "2026-12-02 01:00:00Z", 9, 10)
+	requireViolation(t, err, "23514", "ride_trips_seats_check")
+	err = f.insertTrip(t, newID(t), listing, nil, "2026-12-02 02:00:00Z", 9, -1)
+	requireViolation(t, err, "23514", "ride_trips_seats_check")
+	require.NoError(t, f.insertTrip(t, newID(t), listing, nil, "2026-12-02 03:00:00Z", 9, 9))
+
+	trip := newID(t)
+	require.NoError(t, f.insertTrip(t, trip, listing, nil, "2026-12-02 04:00:00Z", 9, 0))
+	err = f.exec(t, `UPDATE ride_trips SET seats_reserved = seats_reserved + 10 WHERE id = $1`, trip)
+	requireViolation(t, err, "23514", "ride_trips_seats_check")
+}
+
+func TestRideTripUniqueDeparture(t *testing.T) {
+	f := newFixture(t)
+	listing, _ := f.newRideListing(t, f.partner)
+	require.NoError(t, f.insertTrip(t, newID(t), listing, nil, "2026-12-02 01:00:00Z", 9, 0))
+	err := f.insertTrip(t, newID(t), listing, nil, "2026-12-02 01:00:00Z", 9, 0)
+	requireViolation(t, err, "23505", "ride_trips_listing_id_departure_at_key")
+}
+
+func TestRideTripTriggerBlocksBookedChanges(t *testing.T) {
+	f := newFixture(t)
+	listing, _ := f.newRideListing(t, f.partner)
+
+	booked := newID(t)
+	require.NoError(t, f.insertTrip(t, booked, listing, nil, "2026-12-02 01:00:00Z", 9, 1))
+	for _, sql := range []string{
+		`UPDATE ride_trips SET departure_at = departure_at + interval '1 hour' WHERE id = $1`,
+		`UPDATE ride_trips SET price_per_seat = 1 WHERE id = $1`,
+	} {
+		err := f.exec(t, sql, booked)
+		require.Error(t, err)
+		e := pgErr(t, err)
+		require.Equal(t, "P0001", e.Code)
+		require.Equal(t, "ride_trip_booked", e.Message)
+	}
+	// Capacity may still change on a booked trip.
+	require.NoError(t, f.exec(t, `UPDATE ride_trips SET seat_capacity = 12 WHERE id = $1`, booked))
+
+	free := newID(t)
+	require.NoError(t, f.insertTrip(t, free, listing, nil, "2026-12-03 01:00:00Z", 9, 0))
+	require.NoError(t, f.exec(t, `UPDATE ride_trips SET departure_at = departure_at + interval '1 hour' WHERE id = $1`, free))
+	require.NoError(t, f.exec(t, `UPDATE ride_trips SET price_per_seat = 200000 WHERE id = $1`, free))
+}
+
+func TestRideDetailTripMustMatchListing(t *testing.T) {
+	f := newFixture(t)
+	listingA, _ := f.newRideListing(t, f.partner)
+	listingB, _ := f.newRideListing(t, f.partner)
+	tripB := newID(t)
+	require.NoError(t, f.insertTrip(t, tripB, listingB, nil, "2026-12-02 01:00:00Z", 9, 1))
+
+	// A ride booking of listing A pointing at a trip of listing B.
+	rideBooking := newID(t)
+	f.mustExec(t, `INSERT INTO bookings (
+		id, code, checkout_id, customer_id, partner_id, listing_id, service_type, booking_mode, status,
+		service_start_at, service_end_at, original_service_start_at,
+		gross_amount, commission_rate_bps, commission_amount, cancellation_policy_snapshot,
+		contact_name, contact_phone, contact_email, confirmed_at, qr_token
+	) VALUES ($1, $2, $3, $4, $5, $6, 'scheduled_ride', 'instant', 'confirmed',
+		'2026-12-02 01:00:00Z', '2026-12-02 04:00:00Z', '2026-12-02 01:00:00Z',
+		150000, 1000, 15000, '[]', 'A', '0900000000', 'a@customer.test', now(), $7)`,
+		rideBooking, randCode(t, "LT"), f.checkout, f.customer, f.partner, listingA, randToken(t))
+
+	err := f.exec(t, `INSERT INTO booking_ride_details (booking_id, listing_id, trip_id, seats, direction, origin_name, dest_name)
+		VALUES ($1, $2, $3, 1, 'outbound', 'Bến A', 'Bến B')`, rideBooking, listingA, tripB)
+	requireViolation(t, err, "23503", "booking_ride_details_trip_id_listing_id_fkey")
+
+	tripA := newID(t)
+	require.NoError(t, f.insertTrip(t, tripA, listingA, nil, "2026-12-02 02:00:00Z", 9, 1))
+	require.NoError(t, f.exec(t, `INSERT INTO booking_ride_details (booking_id, listing_id, trip_id, seats, direction, origin_name, dest_name)
+		VALUES ($1, $2, $3, 1, 'outbound', 'Bến A', 'Bến B')`, rideBooking, listingA, tripA))
+}
+
+func TestRideScheduleOtherListing(t *testing.T) {
+	f := newFixture(t)
+	listingA, _ := f.newRideListing(t, f.partner)
+	_, scheduleB := f.newRideListing(t, f.partner)
+
+	err := f.insertTrip(t, newID(t), listingA, scheduleB, "2026-12-02 01:00:00Z", 9, 0)
+	requireViolation(t, err, "23503", "ride_trips_schedule_id_listing_id_fkey")
+}
+
+func TestBookingCheckedInNeedsTimestamp(t *testing.T) {
+	f := newFixture(t)
+	err := f.exec(t, `UPDATE bookings SET status = 'checked_in' WHERE id = $1`, f.booking)
+	requireViolation(t, err, "23514", "bookings_checked_in_at_check")
+	require.NoError(t, f.exec(t, `UPDATE bookings SET status = 'checked_in', checked_in_at = now() WHERE id = $1`, f.booking))
+}

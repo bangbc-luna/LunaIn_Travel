@@ -41,7 +41,10 @@ users → partners → listings
 - Dòng `payments` khóa bằng `FOR NO KEY UPDATE`, không dùng `FOR UPDATE`: mỗi lệnh insert vào `payment_events` ngầm lấy `KEY SHARE` trên payment qua FK, và `FOR UPDATE` sẽ chặn nó (đã gặp deadlock thật). Mọi transaction khóa payment đều đã khóa `checkouts` trước, nên chúng vẫn xếp hàng theo checkout.
 - **Hợp đồng `Status(lock)` trước `IsServiceTypeEnabled`**: `partner.IsServiceTypeEnabled` tự nó không khóa gì. Muốn an toàn với `Suspend` và `DisableServiceType` (cả hai đều khóa dòng `partners` `FOR NO KEY UPDATE`), phải gọi `partner.Status(ctx, tx, id, true)` (lấy `FOR SHARE`) **trước**, trong cùng transaction. Có test khóa hợp đồng này (`internal/partner/lock_test.go`).
 - Dòng sức chứa đứng **trước** booking. Hủy chuyến, job hết hạn và tạo booking mới đều khóa chuyến hoặc mẫu xe trước. Nếu chỉ biết id booking thì đọc id của chuyến hoặc mẫu xe mà không khóa, khóa chuyến hoặc mẫu xe, rồi mới khóa booking và kiểm tra lại trạng thái.
-- Dòng con của booking (`booking_settlements`, `refunds`, ...) chỉ được khóa sau khi đã khóa dòng `bookings`. Job giải phóng tiền cũng phải khóa booking trước.
+- ✅ Plan 6: **khóa chuyến trước mọi checkout có xe tuyến**. Trừ các ngoại lệ bên dưới, mọi transaction khóa một checkout có booking xe tuyến đều khóa trước các chuyến của checkout đó (theo id tăng dần): tạo booking, job hết hạn, `HandlePaid` (kể cả xác nhận lại khi tiền về trễ), khách hủy, Super Admin hủy đơn và hủy chuyến. Nếu sau khi khóa mà checkout hóa ra có thêm chuyến chưa khóa (đơn vừa được xác nhận giữa chừng) thì transaction rollback và chạy lại.
+  - **Ngoại lệ đã biết** (đều không deadlock):
+    - Đổi hoặc phát lại link thanh toán (`payment.ReissueAfterMismatch`, `replaceLostLink`) khóa checkout xe tuyến mà **không** khóa chuyến. An toàn vì các đường này không đụng ghế và **không bao giờ chờ khóa chuyến** khi đang giữ checkout. Code sau này cũng không được thêm bước chờ chuyến vào đây.
+    - Nhả giữ chỗ quá hạn ngay trong transaction (`releaseOverdueOnTrips`, khi tạo booking hoặc `HandlePaid`) đang giữ một số chuyến thì có thể khóa checkout của **khách khác** có booking trên các chuyến đó. Lúc ấy nó chưa giữ hết các chuyến của checkout kia, và có thể khóa checkout kia trước checkout của chính mình. An toàn vì: (1) mọi đường khác khóa checkout xe tuyến đều đã khóa ít nhất chuyến chung đó trước (theo id tăng dần), nên phải xếp hàng sau transaction này; (2) giữa các checkout thứ tự khóa tùy ý cũng không sao, vì không ai tới được các checkout đó mà không qua chuyến chung đang bị giữ. Chiều kia của đơn khứ hồi nằm trên chuyến chưa khóa thì để job hết hạn xử lý.- Dòng con của booking (`booking_settlements`, `refunds`, ...) chỉ được khóa sau khi đã khóa dòng `bookings`. Job giải phóng tiền cũng phải khóa booking trước.
 - Các dòng khác khóa bằng `FOR UPDATE`.
 
 ### 1.2 Toàn vẹn chéo đối tác **[Builder]**
@@ -122,6 +125,7 @@ Bảng chỉ có một dòng (`id smallint PRIMARY KEY CHECK (id = 1)`). Mỗi t
 | `release_delay_days` | int ≥ 0 | 1 | §9 |
 | `min_payout_amount` | bigint ≥ 0 | 100000 | §9 **[Builder]** chọn số |
 | `reschedule_window_days` | int > 0 | 14 | §6.4 **[Chốt]** |
+| `ride_booking_cutoff_minutes` ✅ plan 6 (migration `00017`) | int ≥ 0 | 60 | **[Chốt]** hạn chót đặt xe tuyến: chỉ đặt (và tìm thấy) được chuyến có `departure_at > now + max(ride_booking_cutoff_minutes, hold_minutes + hold_grace_minutes)`, nên hạn chót không bao giờ ngắn hơn thời gian giữ chỗ |
 
 Mỗi lần đổi đều ghi vào `admin_audit_log`. Booking không trỏ tới bảng này mà chụp lại các mốc thời gian đã tính sẵn lúc tạo (`hold_expires_at`, ...), nên đổi thông số không ảnh hưởng đơn cũ.
 
@@ -216,21 +220,27 @@ Bảng phụ:
 | `attraction_time_slots` | `id`, `listing_id`, `start_time time`, `end_time time`, `weekdays smallint`, `active` | `end_time > start_time`. `weekdays` là bitmask 1..127 (bit 0 = thứ Hai) **[Builder]** |
 | `attraction_closed_dates` | PK `(listing_id, date)`, `reason` | |
 
-### 5.5 Xe tuyến cố định 🔜 plan 6
+### 5.5 Xe tuyến cố định ✅ plan 6 (migration `00017`)
 
-**[Builder]** Mỗi listing là **một tuyến một chiều** A→B, đúng theo glossary. Chiều về B→A là một listing khác của cùng nhà xe. Khi đặt khứ hồi, khách chọn chuyến về từ listing tuyến ngược lại.
+**[Builder]** Mỗi listing là **một tuyến một chiều** A→B, đúng theo glossary. Chiều về B→A là một listing khác của cùng nhà xe. Khi đặt khứ hồi, khách chọn chuyến về từ listing tuyến ngược lại. **[Chốt]** "Tuyến ngược" so theo tỉnh: tỉnh đi của chiều về là tỉnh đến của chiều đi và ngược lại; phường tự do.
 
 | Bảng | Cột chính | Ràng buộc |
 |---|---|---|
-| `ride_routes` | `listing_id` PK, `origin_province_code`, `origin_ward_code`, `origin_name`, `origin_address`, `dest_*` (tương tự), `duration_minutes > 0`, `vehicle_description` | |
-| `ride_schedules` | `id`, `listing_id`, `departure_time time`, `weekdays smallint`, `seat_capacity > 0`, `price_per_seat > 0`, `valid_from date`, `valid_to date NULL`, `active` | lịch lặp để sinh chuyến |
-| `ride_trips` | `id`, `listing_id`, `schedule_id NULL`, `departure_at timestamptz`, `seat_capacity int > 0`, `seats_reserved int`, `price_per_seat`, `status` (`scheduled`\|`cancelled`\|`departed`), `cancelled_reason` | `CHECK (seats_reserved BETWEEN 0 AND seat_capacity)`, `UNIQUE(listing_id, departure_at)`, index `(listing_id, departure_at)` |
+| `ride_routes` | `listing_id` PK FK listings, `origin_province_code`, `origin_ward_code`, `origin_name`, `origin_address`, `dest_*` (tương tự), `duration_minutes` 1..4320, `vehicle_description` | tên, địa chỉ và mô tả xe không rỗng. FK kép `(origin_ward_code, origin_province_code)` và `(dest_ward_code, dest_province_code) → wards(code, province_code)`. Index `(origin_province_code, dest_province_code)` |
+| `ride_schedules` | `id`, `listing_id` FK `ride_routes`, `departure_time time`, `weekdays smallint` 1..127 (bit 0 = thứ Hai), `seat_capacity > 0`, `price_per_seat > 0`, `valid_from date`, `valid_to date NULL`, `active`, `generated_until date NULL` | lịch lặp để sinh chuyến. `valid_to ≥ valid_from`. `UNIQUE(id, listing_id)` làm đích cho FK kép từ `ride_trips`. `generated_until` là ngày VN cuối cùng job sinh chuyến đã phủ |
+| `ride_trips` | `id`, `listing_id` FK `ride_routes`, `schedule_id NULL` (NULL: chuyến lẻ đối tác tự thêm), `departure_at timestamptz`, `seat_capacity int > 0`, `seats_reserved int`, `price_per_seat > 0`, `status` (`scheduled`\|`cancelled`\|`departed`), `cancelled_reason`, `cancelled_at`, `cancelled_by NULL` FK users, `cancel_source` (`partner`\|`admin`\|`schedule`) | `CHECK (seats_reserved BETWEEN 0 AND seat_capacity)`, `UNIQUE(listing_id, departure_at)`, `UNIQUE(id, listing_id)`. FK kép `(schedule_id, listing_id) → ride_schedules(id, listing_id)`. `cancelled_at` có đúng khi `status = 'cancelled'`, đi cùng `cancel_source` và `cancelled_reason`. Index `(departure_at) WHERE status = 'scheduled'` cho tìm chuyến, `(schedule_id, departure_at)` cho job sinh chuyến |
 
-Giữ ghế dùng lệnh `UPDATE ride_trips SET seats_reserved = seats_reserved + n WHERE id = $1 AND status = 'scheduled' AND departure_at > $now AND seats_reserved + n <= seat_capacity` (spec §7). Không bán ghế cho chuyến đã hủy hoặc đã chạy.
+`cancel_source`: `partner` là đối tác hủy chuyến (chỉ khi `seats_reserved = 0`), `admin` là Super Admin hủy chuyến (`cancelled_by` là admin), `schedule` là chuyến bị hủy vì lịch không còn phủ nó (lịch tắt hoặc rút ngắn `valid_to`; `cancelled_by` là đối tác sửa lịch, NULL khi job quét). Chỉ chuyến `schedule` mới được job sinh chuyến mở lại khi lịch phủ lại ngày đó; chuyến đối tác hoặc admin đã hủy thì giữ nguyên. Trạng thái `departed` chưa có job nào ghi (điều kiện `departure_at > now` đã chặn bán ghế), để dành cho báo cáo.
+
+**Sinh chuyến** **[Chốt]**: job River chạy mỗi giờ và một lần lúc khởi động (`RunOnStart`), sinh chuyến cho **60 ngày** tới (hằng số `tripHorizonDays`) theo ngày VN của `departure_at`. Tạo hoặc sửa lịch cũng sinh ngay. Sửa lịch không đổi được `departure_time`, `weekdays`, `valid_from`; giá, sức chứa, `valid_to`, `active` chỉ áp cho chuyến tương lai chưa có ghế được giữ. Job cũng hủy (`cancel_source = 'schedule'`) các chuyến tương lai còn `seats_reserved = 0` mà lịch không còn phủ, trừ khi một lịch đang hoạt động khác phủ đúng giờ đó.
+
+**Một lịch đang hoạt động cho mỗi khung giờ** **[Builder]**: hai lịch `active` của cùng listing không được trùng nhau (cùng `departure_time`, có thứ chung và khoảng ngày giao nhau). Bất biến này **chỉ do app giữ** (`checkScheduleOverlap`, chạy khi đang khóa dòng `listings`), DB không có ràng buộc. Mọi đường bật lịch sau này (kể cả của admin) phải gọi lại hàm này.
+
+Giữ ghế dùng lệnh `UPDATE ride_trips SET seats_reserved = seats_reserved + n WHERE id = $1 AND status = 'scheduled' AND departure_at > $now AND seats_reserved + n <= seat_capacity` (spec §7), rồi kiểm tra số dòng bị ảnh hưởng. Không bán ghế cho chuyến đã hủy hoặc đã chạy. Mỗi lần giữ hoặc trả ghế, `n` phải nằm trong **1..1000** (chặn tràn số `int`, không phải trần nghiệp vụ: khách nhập số khách và chỉ bị giới hạn bởi số ghế còn trống). Khứ hồi giữ cùng số ghế ở hai chiều. Ghế chỉ trả lại khi booking `expired` hoặc `cancelled`, trong cùng transaction đổi trạng thái; `checked_in`, `completed`, `no_show` vẫn giữ ghế.
 
 Trước khi giữ ghế, transaction đã khóa chuyến **[Builder]**. Ngay lúc đó nó nhả luôn ghế của các booking trên chuyến này đã quá `hold_release_at` mà job chưa quét tới. Spec §7 yêu cầu đơn quá hạn không được chiếm chỗ, mà bộ đếm `seats_reserved` không tự bỏ qua được đơn quá hạn, nên phải nhả ngay trong transaction.
 
-**[Builder]** Một trigger chặn sửa `departure_at` và `price_per_seat` khi `seats_reserved > 0`. Đối tác không đổi được giờ của chuyến đã có người đặt, phù hợp với quy tắc đối tác không hủy được đơn đã xác nhận. Muốn đổi thì nhờ Super Admin hủy chuyến.
+**[Builder]** Trigger `ride_trips_booked_immutable` (`BEFORE UPDATE`) chặn sửa `departure_at` và `price_per_seat` khi `seats_reserved > 0` (raise `ride_trip_booked`). App kiểm tra trước và trả lỗi rõ ràng; trigger là lưới an toàn. Đối tác không đổi được giờ của chuyến đã có người đặt, phù hợp với quy tắc đối tác không hủy được đơn đã xác nhận, và không giảm được `seat_capacity` xuống dưới `seats_reserved`. Muốn đổi thì nhờ Super Admin hủy chuyến.
 
 ### 5.6 Xe bao chuyến 🔜 plan 8
 
@@ -293,7 +303,7 @@ Trước khi giữ ghế, transaction đã khóa chuyến **[Builder]**. Ngay l�
 | Loại | `service_start_at` | `service_end_at` | Chuyển trạng thái cuối |
 |---|---|---|---|
 | Attraction | ngày tham quan + giờ bắt đầu khung | 00:00 ngày hôm sau ngày tham quan theo giờ VN (mốc mở, vé dùng được cả ngày tham quan). Giờ của khung nằm ở `booking_attraction_details.slot_start/slot_end` | check-in → `completed` ngay. Qua `service_end_at` mà chưa check-in → `no_show` |
-| Scheduled Ride | `departure_at` | `departure_at` + `duration_minutes` | qua `departure_at` + `ride_no_show_after_minutes` mà chưa check-in → `no_show`. Đã check-in → job chuyển `completed` khi qua `service_end_at` |
+| Scheduled Ride | `departure_at` | `departure_at` + `duration_minutes` (chụp lại lúc đặt) | check-in QR chỉ được trong khoảng `departure_at` ± `ride_checkin_window_minutes` (tính cả hai đầu) → `checked_in`. Qua `departure_at` + `ride_no_show_after_minutes` mà chưa check-in → `no_show`. Đã check-in → job `CompleteRides` chuyển `completed` khi `service_end_at ≤ now` (kể cả khi Super Admin đã hủy chuyến sau lúc khách lên xe). Quy tắc 00:00 hôm sau của Attraction không áp cho xe tuyến |
 | Private Charter | `pickup_at` | `return_at` nếu đi khứ hồi, nếu không thì `pickup_at` + thời gian chạy ước tính từ API bản đồ | đối tác bấm hoàn thành, hoặc job tự hoàn thành sau `service_end_at` + `charter_auto_complete_hours` |
 | Self-Drive Rental | `pickup_at` | `return_at` | đối tác bấm "đã nhận lại xe" → `completed` |
 
@@ -301,7 +311,13 @@ Index của job No-show dùng `service_start_at` cho Scheduled Ride, vì mốc N
 
 **Super Admin hủy đơn** **[Builder]**: chỉ hủy được khi dịch vụ chưa diễn ra, tức đơn đang `confirmed` (hoặc trước đó). Đơn đã `checked_in`, `in_service`, `completed` hay `no_show` thì không hủy được. Spec đã chốt không có hoàn tiền ngoài chính sách hủy, nên sổ cái không cần xử lý trường hợp hoàn tiền sau khi tiền đã được giải phóng.
 
-**Vé khứ hồi hủy cùng nhau** **[Chốt]**: hủy là hủy theo cả `checkout`. Transaction khóa cả hai chuyến (theo id tăng dần), rồi khóa cả hai booking (theo id tăng dần), sau đó hủy cả hai. Khách chỉ hủy được khi chưa đi chiều nào.
+**Vé khứ hồi hủy cùng nhau** **[Chốt]**: hủy là hủy theo cả `checkout`. Transaction khóa cả hai chuyến (theo id tăng dần), rồi khóa checkout, rồi cả hai booking (theo id tăng dần), sau đó hủy cả hai. Khách chỉ hủy được khi chưa đi chiều nào (mọi chiều còn `confirmed` và chưa tới `service_start_at` sớm nhất); % hoàn của từng chiều tính theo giờ khởi hành của chính chiều đó.
+
+✅ Plan 6, **khi một chiều đã đi** **[Builder]**: spec §5.6 nói Super Admin hủy thì "cả hai chiều đều bị hủy", nhưng đơn `checked_in`, `completed`, `no_show` không hủy được (đoạn trên). Plan 6 chọn: Super Admin hủy đơn hoặc hủy chuyến chỉ hủy những chiều **còn `confirmed` và chưa tới `service_end_at`**; chiều đã đi giữ nguyên. Hủy chuyến luôn là `admin_force_majeure` (hoàn 100%, miễn hoa hồng); hủy đơn cho Super Admin chọn `admin_policy` hoặc `admin_force_majeure`. Ghế của mỗi chiều bị hủy trả về chuyến của nó trong cùng transaction. Khi hủy chuyến, checkout **bị ảnh hưởng** là checkout có booking **còn `confirmed`** (chưa tới `service_end_at`) trên chuyến đó. Nếu chiều nằm trên chuyến bị hủy đã `checked_in` thì checkout đó không bị ảnh hưởng: chiều đã lên xe vẫn được job `CompleteRides` chuyển `completed`, và chiều kia của khứ hồi vẫn `confirmed`, phục vụ bình thường. Booking `pending_payment` trên chuyến bị hủy để job hết hạn xử lý; nếu tiền về sau đó thì `HandlePaid` hoàn `late_payment`.
+
+**Tiền về trễ cho khứ hồi** **[Chốt]**: cả hai chiều trong cùng `checkout` phải giữ lại được ghế (đúng chuyến, đúng giờ đã bán) thì mới xác nhận lại; nếu chỉ một chiều được thì hoàn `late_payment` 100% cả hai chiều và không ghi bút toán. Không chiều nào được giữ ghế: chiều nào còn `pending_payment` thì chuyển `expired` và trả ghế ngay trong transaction, chiều đã `expired` thì không lấy lại ghế. Vì vậy `seats_reserved` có thể giảm (khi có chiều còn đang giữ ghế), nhưng không bao giờ tăng.
+
+Xe tuyến luôn có `can_reschedule = false`: đổi lịch chỉ dành cho Attraction (spec §6.4).
 
 **Thanh toán sai số tiền** **[Builder]**: mã QR của PayOS đã gắn sẵn số tiền nên hiếm khi xảy ra, nhưng vẫn có các trường hợp sau: khách quét mã hai lần (trả trùng), khách tự chuyển khoản tay vào số tài khoản với nội dung là mã đơn, hoặc tiền về sau khi đơn đã hết hạn. Hệ thống xử lý tự động như sau:
 - **Trả trùng**: lần thứ hai được hoàn 100% (`refunds.reason = duplicate_payment`).
@@ -320,6 +336,7 @@ Ràng buộc khác của `bookings` (migration `00012`):
 - `UNIQUE(id, partner_id)`, `UNIQUE(id, listing_id)`, `UNIQUE(id, checkout_id)`: đích của các FK kép từ bảng con, `refunds` và sổ cái.
 - CHECK mốc thời gian theo trạng thái: `confirmed`…`no_show` ⇒ có `confirmed_at`; `completed` ⇒ `completed_at`; `no_show` ⇒ `no_show_at`; `pending_payment`/`awaiting_payment` ⇒ `hold_release_at`; `requested` ⇒ `response_due_at`; `rejected` ⇒ `rejected_at`. `hold_expires_at` và `hold_release_at` cùng NULL hoặc cùng có, và `hold_release_at ≥ hold_expires_at`. `cancelled_at` có đúng khi `status = cancelled`, đi cùng `cancel_kind`.
 - `cancellation_policy_snapshot` phải là mảng JSON (`jsonb_typeof = 'array'`).
+- ✅ Plan 6 (migration `00017`): `bookings_checked_in_at_check` `CHECK (status <> 'checked_in' OR checked_in_at IS NOT NULL)`. Trạng thái `checked_in` giờ có thật (xe tuyến check-in rồi mới `completed`), nên DB buộc có mốc check-in.
 
 Index cho job nền (partial index để nhỏ và nhanh):
 - `(hold_release_at) WHERE status IN ('pending_payment','awaiting_payment')`: hết hạn giữ chỗ
@@ -334,7 +351,7 @@ Index cho job nền (partial index để nhỏ và nhanh):
 | `booking_items` | `id`, `booking_id`, `line_kind` (`ticket`\|`seat`\|`charter_base`\|`charter_distance`\|`surcharge`\|`rental_day`\|`delivery_fee`), `description`, `unit_price ≥ 0`, `quantity numeric(10,1) > 0`, `line_total` | `CHECK (line_total = round(unit_price * quantity))`. `round` của Postgres làm tròn nửa lên với số dương, khớp quy ước ở mục 1. Quãng đường đi vào `quantity` (12,3 km), khứ hồi tính 2 lần quãng đường. Phụ phí theo % thì `unit_price` là số tiền đã tính và `quantity` là 1. App kiểm tra tổng các dòng = `gross_amount` (có test) |
 | `booking_ticket_lines` | `booking_item_id` PK, `booking_id`, `listing_id`, `ticket_type_id` | loại vé của từng dòng. FK kép `(booking_item_id, booking_id) → booking_items(id, booking_id)`, `(booking_id, listing_id) → bookings(id, listing_id)`, `(ticket_type_id, listing_id) → attraction_ticket_types(id, listing_id)` |
 | `booking_attraction_details` | `booking_id` PK, `listing_id`, `visit_date date`, `time_slot_id`, `slot_start time`, `slot_end time` | chụp lại giờ của khung, `slot_end > slot_start`. FK kép `(booking_id, listing_id) → bookings`, `(time_slot_id, listing_id) → attraction_time_slots`. Index `(listing_id, visit_date)` và `(time_slot_id, visit_date)` cho `BookingGuard` |
-| `booking_ride_details` | `booking_id` PK, `listing_id`, `trip_id`, `seats int > 0`, `direction` (`outbound`\|`return`) | FK `(trip_id, listing_id) → ride_trips(id, listing_id)`, index `(trip_id)` |
+| `booking_ride_details` ✅ plan 6 (migration `00017`) | `booking_id` PK, `listing_id`, `trip_id`, `seats int > 0`, `direction` (`outbound`\|`return`), `origin_name`, `dest_name` | `origin_name`/`dest_name` chụp lại tên điểm đi, điểm đến của tuyến lúc đặt. FK kép `(booking_id, listing_id) → bookings(id, listing_id)` và `(trip_id, listing_id) → ride_trips(id, listing_id)`, index `(trip_id)`. Booking xe tuyến có đúng một dòng `booking_items` (`line_kind = 'seat'`, `quantity` = số ghế) |
 | `booking_charter_details` | `booking_id` PK, `vehicle_class_id`, `pickup_at`, `pickup_address`, `pickup_lat/lng`, `dropoff_address`, `dropoff_lat/lng`, `distance_km numeric(7,1)`, `is_round_trip`, `return_at NULL`, `quote jsonb` | `quote` chụp lại toàn bộ cách tính giá |
 | `booking_rental_details` | `booking_id` PK, `listing_id`, `vehicle_model_id`, `pickup_at`, `return_at`, `period tstzrange GENERATED ALWAYS AS (tstzrange(pickup_at, return_at, '[)')) STORED`, `days int > 0`, `pickup_point_id NULL`, `delivery_address NULL`, `holds_vehicle bool`, `hold_until timestamptz NULL` | xem ghi chú bên dưới |
 | `booking_status_history` | `id`, `booking_id`, `from_status`, `to_status`, `actor_kind` (`customer`\|`partner`\|`admin`\|`system`), `actor_user_id NULL`, `reason`, `created_at` | index `(booking_id, created_at)`. `CHECK (actor_kind = 'system' OR actor_user_id IS NOT NULL)` |
@@ -469,13 +486,16 @@ Email không có bảng riêng, chạy qua job River (outbox) như plan 1.
 | Mỗi booking tối đa một khoản hoàn | unique index partial trên `refunds` |
 | Dữ liệu không bị gắn nhầm đối tác | khóa ngoại kép (mục 1.2) |
 | Không bán ghế cho chuyến đã hủy hoặc đã chạy | điều kiện `status` và `departure_at` trong lệnh UPDATE giữ ghế |
+| Chuyến đã có người đặt giữ nguyên giờ và giá | trigger `ride_trips_booked_immutable` |
+| Mỗi listing không có hai chuyến cùng giờ | `ride_trips UNIQUE(listing_id, departure_at)` |
+| Chuyến và lịch thuộc đúng listing của booking | FK kép `booking_ride_details (trip_id, listing_id)` và `ride_trips (schedule_id, listing_id)` |
 | Sổ cái không bị sửa | trigger chặn UPDATE và DELETE |
 | Đổi lịch tối đa 1 lần | `booking_reschedules.booking_id UNIQUE` |
 | Tối đa 1 review mỗi đơn | `reviews.booking_id UNIQUE` |
 | 1 payout đang mở mỗi đối tác | unique index partial trên `payouts` |
 | Hoa hồng không vượt giá trị đơn | `CHECK` trên `bookings` |
 
-Những bất biến DB không tự giữ được (tổng các dòng = `gross_amount`, cache số dư = tổng bút toán) thì có test ở app, và có thêm job đối soát (spec §9).
+Những bất biến DB không tự giữ được (tổng các dòng = `gross_amount`, cache số dư = tổng bút toán, một lịch chạy đang hoạt động cho mỗi khung giờ của listing (`checkScheduleOverlap`, mục 5.5)) thì có test ở app, và có thêm job đối soát (spec §9).
 
 ---
 

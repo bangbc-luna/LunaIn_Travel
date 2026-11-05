@@ -5,6 +5,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/bangbc-luna/lunain-travel/internal/listing"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/auth"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/httpx"
 )
@@ -66,5 +67,23 @@ func (s *Service) AdminRoutes(mux httpx.Router, iss *auth.Issuer) {
 		p, _ := auth.PrincipalFrom(r.Context())
 		v, err := s.CancelByAdmin(r.Context(), p.UserID, id, in.Mode, in.Reason)
 		writeView(w, r, http.StatusOK, v, err)
+	}))
+
+	mux.Handle("POST /v1/admin/ride-trips/{id}/cancel", admin(func(w http.ResponseWriter, r *http.Request) {
+		id, err := uuid.Parse(r.PathValue("id"))
+		if err != nil {
+			httpx.WriteError(w, r, listing.ErrTripNotFound)
+			return
+		}
+		var in struct {
+			Reason string `json:"reason"`
+		}
+		if err := httpx.DecodeJSON(r, &in); err != nil {
+			httpx.WriteError(w, r, err)
+			return
+		}
+		p, _ := auth.PrincipalFrom(r.Context())
+		res, err := s.CancelTrip(r.Context(), p.UserID, id, in.Reason)
+		writeView(w, r, http.StatusOK, res, err)
 	}))
 }

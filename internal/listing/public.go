@@ -58,7 +58,7 @@ type PublicCard struct {
 }
 
 // PublicDetail is the public listing page. Attraction holds active ticket
-// types and slots only.
+// types and slots only; Ride the route and active schedules only.
 type PublicDetail struct {
 	PublicCard
 	Description        *string            `json:"description"`
@@ -69,6 +69,7 @@ type PublicDetail struct {
 	ImageURLs          []string           `json:"image_urls"`
 	CancellationPolicy []CancellationTier `json:"cancellation_policy"`
 	Attraction         *AttractionDetail  `json:"attraction"`
+	Ride               *RideDetail        `json:"ride"`
 }
 
 func blankToNil(s *string) *string {
@@ -190,6 +191,12 @@ func (s *Service) PublicDetail(ctx context.Context, slug string) (PublicDetail, 
 				return err
 			}
 			out.Attraction = &d
+		case rideServiceType:
+			d, err := s.rideDetail(ctx, tx, r.ID, false)
+			if err != nil {
+				return err
+			}
+			out.Ride = &d
 		default:
 			return ErrServiceTypeNotSupported
 		}

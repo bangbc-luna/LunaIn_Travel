@@ -38,6 +38,22 @@ func (q *Queries) CancelBooking(ctx context.Context, arg CancelBookingParams) er
 	return err
 }
 
+const checkInRide = `-- name: CheckInRide :exec
+UPDATE bookings SET status = 'checked_in', checked_in_at = $1::timestamptz, updated_at = $1 WHERE id = $2
+`
+
+type CheckInRideParams struct {
+	Now time.Time
+	ID  uuid.UUID
+}
+
+// Ride check-in: the passenger boarded; completion comes at service_end_at
+// (CompleteRide).
+func (q *Queries) CheckInRide(ctx context.Context, arg CheckInRideParams) error {
+	_, err := q.db.Exec(ctx, checkInRide, arg.Now, arg.ID)
+	return err
+}
+
 const completeCheckIn = `-- name: CompleteCheckIn :exec
 UPDATE bookings
 SET status = 'completed', checked_in_at = $1::timestamptz, completed_at = $1::timestamptz, updated_at = $1
@@ -52,6 +68,20 @@ type CompleteCheckInParams struct {
 // Attraction check-in completes the booking at once.
 func (q *Queries) CompleteCheckIn(ctx context.Context, arg CompleteCheckInParams) error {
 	_, err := q.db.Exec(ctx, completeCheckIn, arg.Now, arg.ID)
+	return err
+}
+
+const completeRide = `-- name: CompleteRide :exec
+UPDATE bookings SET status = 'completed', completed_at = $1::timestamptz, updated_at = $1 WHERE id = $2
+`
+
+type CompleteRideParams struct {
+	Now time.Time
+	ID  uuid.UUID
+}
+
+func (q *Queries) CompleteRide(ctx context.Context, arg CompleteRideParams) error {
+	_, err := q.db.Exec(ctx, completeRide, arg.Now, arg.ID)
 	return err
 }
 
@@ -312,6 +342,27 @@ func (q *Queries) GetIdempotencyKey(ctx context.Context, arg GetIdempotencyKeyPa
 	return i, err
 }
 
+const getRideDetails = `-- name: GetRideDetails :one
+SELECT booking_id, listing_id, trip_id, seats, direction, origin_name, dest_name, created_at, updated_at FROM booking_ride_details WHERE booking_id = $1
+`
+
+func (q *Queries) GetRideDetails(ctx context.Context, bookingID uuid.UUID) (BookingRideDetail, error) {
+	row := q.db.QueryRow(ctx, getRideDetails, bookingID)
+	var i BookingRideDetail
+	err := row.Scan(
+		&i.BookingID,
+		&i.ListingID,
+		&i.TripID,
+		&i.Seats,
+		&i.Direction,
+		&i.OriginName,
+		&i.DestName,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const hasReschedule = `-- name: HasReschedule :one
 SELECT EXISTS (SELECT 1 FROM booking_reschedules WHERE booking_id = $1)
 `
@@ -516,6 +567,36 @@ func (q *Queries) InsertReschedule(ctx context.Context, arg InsertReschedulePara
 	return err
 }
 
+const insertRideDetail = `-- name: InsertRideDetail :exec
+INSERT INTO booking_ride_details (booking_id, listing_id, trip_id, seats, direction, origin_name, dest_name, created_at, updated_at)
+VALUES ($1, $2, $3, $4::int, $5, $6, $7, $8, $8)
+`
+
+type InsertRideDetailParams struct {
+	BookingID  uuid.UUID
+	ListingID  uuid.UUID
+	TripID     uuid.UUID
+	Seats      int32
+	Direction  string
+	OriginName string
+	DestName   string
+	Now        time.Time
+}
+
+func (q *Queries) InsertRideDetail(ctx context.Context, arg InsertRideDetailParams) error {
+	_, err := q.db.Exec(ctx, insertRideDetail,
+		arg.BookingID,
+		arg.ListingID,
+		arg.TripID,
+		arg.Seats,
+		arg.Direction,
+		arg.OriginName,
+		arg.DestName,
+		arg.Now,
+	)
+	return err
+}
+
 const insertStatusHistory = `-- name: InsertStatusHistory :exec
 INSERT INTO booking_status_history (id, booking_id, from_status, to_status, actor_kind, actor_user_id, reason, created_at, updated_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
@@ -623,9 +704,11 @@ WHERE ($1::uuid IS NULL OR b.customer_id = $1)
   AND ($2::uuid IS NULL OR b.partner_id = $2)
   AND ($3::text IS NULL OR b.status = $3)
   AND ($4::text IS NULL OR b.code = $4)
-  AND ($5::uuid IS NULL OR b.id < $5)
+  AND ($5::uuid IS NULL OR EXISTS (
+        SELECT 1 FROM booking_ride_details d WHERE d.booking_id = b.id AND d.trip_id = $5))
+  AND ($6::uuid IS NULL OR b.id < $6)
 ORDER BY b.id DESC
-LIMIT $6
+LIMIT $7
 `
 
 type ListBookingsParams struct {
@@ -633,6 +716,7 @@ type ListBookingsParams struct {
 	PartnerID  *uuid.UUID
 	Status     *string
 	Code       *string
+	TripID     *uuid.UUID
 	Cursor     *uuid.UUID
 	Lim        int32
 }
@@ -659,6 +743,7 @@ func (q *Queries) ListBookings(ctx context.Context, arg ListBookingsParams) ([]L
 		arg.PartnerID,
 		arg.Status,
 		arg.Code,
+		arg.TripID,
 		arg.Cursor,
 		arg.Lim,
 	)
@@ -698,9 +783,12 @@ SELECT b.id, b.code, b.checkout_id, b.customer_id, b.partner_id, b.listing_id, b
        COALESCE(to_char(d.visit_date, 'YYYY-MM-DD'), '')::text AS visit_date,
        d.time_slot_id,
        COALESCE(to_char(d.slot_start, 'HH24:MI'), '')::text AS slot_start,
-       COALESCE(to_char(d.slot_end, 'HH24:MI'), '')::text AS slot_end
+       COALESCE(to_char(d.slot_end, 'HH24:MI'), '')::text AS slot_end,
+       r.trip_id,
+       r.seats
 FROM bookings b
 LEFT JOIN booking_attraction_details d ON d.booking_id = b.id
+LEFT JOIN booking_ride_details r ON r.booking_id = b.id
 WHERE b.checkout_id = $1
 ORDER BY b.id
 `
@@ -711,6 +799,8 @@ type ListCheckoutBookingsRow struct {
 	TimeSlotID *uuid.UUID
 	SlotStart  string
 	SlotEnd    string
+	TripID     *uuid.UUID
+	Seats      *int32
 }
 
 // Unlocked read of a checkout's bookings with what re-confirmation needs.
@@ -767,7 +857,72 @@ func (q *Queries) ListCheckoutBookings(ctx context.Context, checkoutID uuid.UUID
 			&i.TimeSlotID,
 			&i.SlotStart,
 			&i.SlotEnd,
+			&i.TripID,
+			&i.Seats,
 		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listCheckoutRideTrips = `-- name: ListCheckoutRideTrips :many
+SELECT DISTINCT d.trip_id FROM booking_ride_details d
+JOIN bookings b ON b.id = d.booking_id
+WHERE b.checkout_id = $1
+ORDER BY d.trip_id
+`
+
+// Trips of a checkout's ride bookings, unlocked (a booking's trip never
+// changes), so the caller can lock them before the checkout.
+func (q *Queries) ListCheckoutRideTrips(ctx context.Context, checkoutID uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listCheckoutRideTrips, checkoutID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var trip_id uuid.UUID
+		if err := rows.Scan(&trip_id); err != nil {
+			return nil, err
+		}
+		items = append(items, trip_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listCheckoutsRideBookings = `-- name: ListCheckoutsRideBookings :many
+SELECT b.id, b.checkout_id, d.trip_id FROM bookings b
+JOIN booking_ride_details d ON d.booking_id = b.id
+WHERE b.checkout_id = ANY($1::uuid[])
+ORDER BY b.id
+`
+
+type ListCheckoutsRideBookingsRow struct {
+	ID         uuid.UUID
+	CheckoutID uuid.UUID
+	TripID     uuid.UUID
+}
+
+// The ride bookings of these checkouts with their trips, unlocked.
+func (q *Queries) ListCheckoutsRideBookings(ctx context.Context, checkoutIds []uuid.UUID) ([]ListCheckoutsRideBookingsRow, error) {
+	rows, err := q.db.Query(ctx, listCheckoutsRideBookings, checkoutIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListCheckoutsRideBookingsRow
+	for rows.Next() {
+		var i ListCheckoutsRideBookingsRow
+		if err := rows.Scan(&i.ID, &i.CheckoutID, &i.TripID); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -854,6 +1009,155 @@ func (q *Queries) ListNoShowCandidates(ctx context.Context, arg ListNoShowCandid
 	return items, nil
 }
 
+const listOverdueRideHolds = `-- name: ListOverdueRideHolds :many
+SELECT b.id, b.checkout_id FROM bookings b
+JOIN booking_ride_details d ON d.booking_id = b.id
+WHERE d.trip_id = ANY($1::uuid[])
+  AND b.status = 'pending_payment' AND b.hold_release_at <= $2::timestamptz
+  AND b.checkout_id <> $3
+ORDER BY b.id
+`
+
+type ListOverdueRideHoldsParams struct {
+	TripIds        []uuid.UUID
+	Now            time.Time
+	ExceptCheckout uuid.UUID
+}
+
+type ListOverdueRideHoldsRow struct {
+	ID         uuid.UUID
+	CheckoutID uuid.UUID
+}
+
+// Pending ride bookings on these trips whose hold passed release, except
+// those of one checkout (booking_ride_details_trip_idx). The caller holds the
+// trip locks.
+func (q *Queries) ListOverdueRideHolds(ctx context.Context, arg ListOverdueRideHoldsParams) ([]ListOverdueRideHoldsRow, error) {
+	rows, err := q.db.Query(ctx, listOverdueRideHolds, arg.TripIds, arg.Now, arg.ExceptCheckout)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListOverdueRideHoldsRow
+	for rows.Next() {
+		var i ListOverdueRideHoldsRow
+		if err := rows.Scan(&i.ID, &i.CheckoutID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPairedRideBookings = `-- name: ListPairedRideBookings :many
+SELECT b.id FROM bookings b
+JOIN booking_ride_details d ON d.booking_id = b.id
+WHERE b.checkout_id = $1 AND b.id <> $2
+ORDER BY b.id
+`
+
+type ListPairedRideBookingsParams struct {
+	CheckoutID uuid.UUID
+	BookingID  uuid.UUID
+}
+
+// The other ride booking of a round trip (same checkout).
+func (q *Queries) ListPairedRideBookings(ctx context.Context, arg ListPairedRideBookingsParams) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listPairedRideBookings, arg.CheckoutID, arg.BookingID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRideNoShowCandidates = `-- name: ListRideNoShowCandidates :many
+SELECT id FROM bookings
+WHERE status = 'confirmed' AND service_type = 'scheduled_ride' AND service_start_at < $1::timestamptz
+  AND NOT (id = ANY($2::uuid[]))
+ORDER BY service_start_at, id
+LIMIT $3
+`
+
+type ListRideNoShowCandidatesParams struct {
+	Cutoff time.Time
+	Skip   []uuid.UUID
+	Lim    int32
+}
+
+// No-show job, scheduled rides: confirmed (never checked in) ride bookings
+// that departed before @cutoff = now − ride_no_show_after_minutes
+// (bookings_ride_no_show_idx).
+func (q *Queries) ListRideNoShowCandidates(ctx context.Context, arg ListRideNoShowCandidatesParams) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listRideNoShowCandidates, arg.Cutoff, arg.Skip, arg.Lim)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRidesToComplete = `-- name: ListRidesToComplete :many
+SELECT id FROM bookings
+WHERE status = 'checked_in' AND service_type = 'scheduled_ride' AND service_end_at <= $1::timestamptz
+  AND NOT (id = ANY($2::uuid[]))
+ORDER BY service_end_at, id
+LIMIT $3
+`
+
+type ListRidesToCompleteParams struct {
+	Now  time.Time
+	Skip []uuid.UUID
+	Lim  int32
+}
+
+// Ride completion job: checked-in ride bookings whose service ended
+// (bookings_service_end_idx).
+func (q *Queries) ListRidesToComplete(ctx context.Context, arg ListRidesToCompleteParams) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listRidesToComplete, arg.Now, arg.Skip, arg.Lim)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listStatusHistory = `-- name: ListStatusHistory :many
 SELECT id, booking_id, from_status, to_status, actor_kind, actor_user_id, reason, created_at, updated_at FROM booking_status_history WHERE booking_id = $1 ORDER BY created_at, id
 `
@@ -881,6 +1185,37 @@ func (q *Queries) ListStatusHistory(ctx context.Context, bookingID uuid.UUID) ([
 			return nil, err
 		}
 		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listTripCheckouts = `-- name: ListTripCheckouts :many
+SELECT DISTINCT b.checkout_id FROM bookings b
+JOIN booking_ride_details d ON d.booking_id = b.id
+WHERE d.trip_id = $1 AND b.status = 'confirmed'
+ORDER BY b.checkout_id
+`
+
+// Checkouts holding a confirmed booking on a trip, unlocked
+// (booking_ride_details_trip_idx): the checkouts an admin trip cancel
+// affects. Re-read under the trip lock, which every status change of a
+// pending or confirmed ride booking but check-in holds.
+func (q *Queries) ListTripCheckouts(ctx context.Context, tripID uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listTripCheckouts, tripID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var checkout_id uuid.UUID
+		if err := rows.Scan(&checkout_id); err != nil {
+			return nil, err
+		}
+		items = append(items, checkout_id)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -937,6 +1272,71 @@ func (q *Queries) LockBooking(ctx context.Context, id uuid.UUID) (Booking, error
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const lockBookingsByIDs = `-- name: LockBookingsByIDs :many
+SELECT id, code, checkout_id, customer_id, partner_id, listing_id, service_type, booking_mode, status, service_start_at, service_end_at, original_service_start_at, gross_amount, commission_rate_bps, commission_amount, cancellation_policy_snapshot, contact_name, contact_phone, contact_email, customer_note, hold_expires_at, hold_release_at, response_due_at, payment_due_at, accepted_at, rejected_at, reject_reason, confirmed_at, checked_in_at, in_service_at, completed_at, no_show_at, cancelled_at, cancel_kind, cancel_reason, cancelled_by, qr_token, created_at, updated_at FROM bookings WHERE id = ANY($1::uuid[]) ORDER BY id FOR UPDATE
+`
+
+// Bookings locked in id order (DB §1.1).
+func (q *Queries) LockBookingsByIDs(ctx context.Context, ids []uuid.UUID) ([]Booking, error) {
+	rows, err := q.db.Query(ctx, lockBookingsByIDs, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Booking
+	for rows.Next() {
+		var i Booking
+		if err := rows.Scan(
+			&i.ID,
+			&i.Code,
+			&i.CheckoutID,
+			&i.CustomerID,
+			&i.PartnerID,
+			&i.ListingID,
+			&i.ServiceType,
+			&i.BookingMode,
+			&i.Status,
+			&i.ServiceStartAt,
+			&i.ServiceEndAt,
+			&i.OriginalServiceStartAt,
+			&i.GrossAmount,
+			&i.CommissionRateBps,
+			&i.CommissionAmount,
+			&i.CancellationPolicySnapshot,
+			&i.ContactName,
+			&i.ContactPhone,
+			&i.ContactEmail,
+			&i.CustomerNote,
+			&i.HoldExpiresAt,
+			&i.HoldReleaseAt,
+			&i.ResponseDueAt,
+			&i.PaymentDueAt,
+			&i.AcceptedAt,
+			&i.RejectedAt,
+			&i.RejectReason,
+			&i.ConfirmedAt,
+			&i.CheckedInAt,
+			&i.InServiceAt,
+			&i.CompletedAt,
+			&i.NoShowAt,
+			&i.CancelledAt,
+			&i.CancelKind,
+			&i.CancelReason,
+			&i.CancelledBy,
+			&i.QrToken,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const lockCheckout = `-- name: LockCheckout :one

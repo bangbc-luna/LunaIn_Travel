@@ -42,6 +42,7 @@ const (
 	StatusPendingPayment = "pending_payment"
 	StatusConfirmed      = "confirmed"
 	StatusCompleted      = "completed"
+	StatusCheckedIn      = "checked_in"
 
 	serviceTypeAttraction = "attraction_ticket"
 	lineKindTicket        = "ticket"
@@ -57,6 +58,7 @@ const (
 	maxIdemKeyLen      = 255
 	codeInsertTries    = 5
 	endpointAttraction = "POST /v1/bookings/attraction"
+	endpointRide       = "POST /v1/bookings/ride"
 )
 
 var (
@@ -108,7 +110,7 @@ type Service struct {
 	log      *slog.Logger
 
 	// Periodic jobs: rows backing off after a failure, one tracker per job.
-	holdBackoff, noShowBackoff, releaseBackoff jobBackoff
+	holdBackoff, noShowBackoff, completeBackoff, releaseBackoff jobBackoff
 	// batchSize overrides jobBatchSize when > 0 (tests).
 	batchSize int32
 	// beforeItem, when set (tests), runs inside each job item's transaction
@@ -181,35 +183,55 @@ func (in CreateAttractionInput) normalize() (attractionRequest, error) {
 	if total > maxTotalTickets {
 		return r, invalidBooking(fmt.Sprintf("Tổng số vé tối đa là %d", maxTotalTickets))
 	}
-	r.name = strings.TrimSpace(in.ContactName)
-	if n := utf8.RuneCountInString(r.name); n < 1 || n > maxContactName || strings.ContainsFunc(r.name, unicode.IsControl) {
-		return r, invalidBooking(fmt.Sprintf("Tên liên hệ phải có từ 1 đến %d ký tự", maxContactName))
-	}
-	phone, ok := validate.NormalizePhone(in.ContactPhone)
-	if !ok {
-		return r, invalidBooking("Số điện thoại liên hệ không hợp lệ")
-	}
-	r.phone = phone
-	mail, err := identity.NormalizeEmail(in.ContactEmail)
+	c, err := normalizeContact(in.ContactName, in.ContactPhone, in.ContactEmail, in.Note)
 	if err != nil {
-		return r, invalidBooking("Email liên hệ không hợp lệ")
+		return r, err
 	}
-	r.mail = mail
-	if in.Note != nil {
-		n := strings.TrimSpace(*in.Note)
-		if utf8.RuneCountInString(n) > maxNoteRunes {
-			return r, invalidBooking(fmt.Sprintf("Ghi chú tối đa %d ký tự", maxNoteRunes))
-		}
-		if n != "" {
-			r.note = &n
-		}
-	}
+	r.name, r.phone, r.mail, r.note = c.name, c.phone, c.mail, c.note
 	return r, nil
 }
 
+// contact is a validated, normalized booking contact and note.
+type contact struct {
+	name, phone, mail string
+	note              *string
+}
+
+// normalizeContact validates and normalizes the contact fields shared by
+// every booking request: a name of 1..100 characters without control
+// characters, a Vietnamese phone, an email and an optional note (blank is
+// none).
+func normalizeContact(name, phone, mail string, note *string) (contact, error) {
+	var c contact
+	c.name = strings.TrimSpace(name)
+	if n := utf8.RuneCountInString(c.name); n < 1 || n > maxContactName || strings.ContainsFunc(c.name, unicode.IsControl) {
+		return c, invalidBooking(fmt.Sprintf("Tên liên hệ phải có từ 1 đến %d ký tự", maxContactName))
+	}
+	p, ok := validate.NormalizePhone(phone)
+	if !ok {
+		return c, invalidBooking("Số điện thoại liên hệ không hợp lệ")
+	}
+	c.phone = p
+	m, err := identity.NormalizeEmail(mail)
+	if err != nil {
+		return c, invalidBooking("Email liên hệ không hợp lệ")
+	}
+	c.mail = m
+	if note != nil {
+		n := strings.TrimSpace(*note)
+		if utf8.RuneCountInString(n) > maxNoteRunes {
+			return c, invalidBooking(fmt.Sprintf("Ghi chú tối đa %d ký tự", maxNoteRunes))
+		}
+		if n != "" {
+			c.note = &n
+		}
+	}
+	return c, nil
+}
+
 // requestHash identifies the request body of an Idempotency-Key. The input
-// struct marshals deterministically (fixed field order).
-func requestHash(endpoint string, in CreateAttractionInput) ([]byte, error) {
+// structs marshal deterministically (fixed field order).
+func requestHash(endpoint string, in any) ([]byte, error) {
 	b, err := json.Marshal(in)
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
@@ -311,11 +333,15 @@ func (s *Service) CreateAttraction(ctx context.Context, customerID uuid.UUID, id
 			return fmt.Errorf("reserve idempotency key: %w", err)
 		}
 		if n == 0 {
-			id, err := replayed(ctx, q, customerID, idemKey, hash)
+			body, err := replayed(ctx, q, customerID, idemKey, endpointAttraction, hash)
 			if err != nil {
 				return err
 			}
-			bookingID, replay = id, true
+			var ref createdRef
+			if err := json.Unmarshal(body, &ref); err != nil {
+				return fmt.Errorf("decode idempotent response: %w", err)
+			}
+			bookingID, replay = ref.ID, true
 			return nil
 		}
 		if err := s.identity.FillProfileIfEmpty(ctx, tx, customerID, req.name, req.phone); err != nil {
@@ -326,19 +352,7 @@ func (s *Service) CreateAttraction(ctx context.Context, customerID uuid.UUID, id
 			return err
 		}
 		bookingID, paymentID = ref.ID, payID
-		// Only a successful creation is stored: a failed request rolls the
-		// key back with everything else, so the client may simply retry.
-		body, err := json.Marshal(ref)
-		if err != nil {
-			return fmt.Errorf("marshal idempotent response: %w", err)
-		}
-		status := int32(http.StatusCreated)
-		if err := q.StoreIdempotencyResponse(ctx, store.StoreIdempotencyResponseParams{
-			ResponseStatus: &status, ResponseBody: body, Now: now, UserID: customerID, Key: idemKey,
-		}); err != nil {
-			return fmt.Errorf("store idempotency response: %w", err)
-		}
-		return nil
+		return storeIdempotentResponse(ctx, q, customerID, idemKey, ref, now)
 	})
 	if err != nil {
 		return BookingView{}, err
@@ -361,32 +375,53 @@ func (s *Service) activateMissingLink(ctx context.Context, bookingID uuid.UUID) 
 	if err != nil || b.Status != StatusPendingPayment {
 		return
 	}
-	p, err := s.payments.PendingForCheckout(ctx, b.CheckoutID)
+	s.activateCheckoutLink(ctx, b.CheckoutID)
+}
+
+// activateCheckoutLink creates the link of a checkout's pending payment that
+// has none yet (best effort, outside any tx).
+func (s *Service) activateCheckoutLink(ctx context.Context, checkoutID uuid.UUID) {
+	p, err := s.payments.PendingForCheckout(ctx, checkoutID)
 	if err != nil || p == nil || p.CheckoutURL != nil {
 		return
 	}
 	if _, err := s.payments.ActivateLink(context.WithoutCancel(ctx), p.ID); err != nil {
-		s.log.Warn("booking: payment link not created on replay", "booking_id", bookingID, "err", err)
+		s.log.Warn("booking: payment link not created on replay", "checkout_id", checkoutID, "err", err)
 	}
 }
 
-// replayed resolves an already used Idempotency-Key to its booking.
-func replayed(ctx context.Context, q *store.Queries, customerID uuid.UUID, key string, hash []byte) (uuid.UUID, error) {
+// replayed resolves an already used Idempotency-Key of endpoint to the
+// response body stored with it. A key used on another endpoint or with
+// another body is ErrIdempotencyKeyReused.
+func replayed(ctx context.Context, q *store.Queries, customerID uuid.UUID, key, endpoint string, hash []byte) (json.RawMessage, error) {
 	row, err := q.GetIdempotencyKey(ctx, store.GetIdempotencyKeyParams{UserID: customerID, Key: key})
 	if err != nil {
-		return uuid.Nil, fmt.Errorf("get idempotency key: %w", err)
+		return nil, fmt.Errorf("get idempotency key: %w", err)
 	}
-	if row.Endpoint != endpointAttraction || string(row.RequestHash) != string(hash) {
-		return uuid.Nil, ErrIdempotencyKeyReused
+	if row.Endpoint != endpoint || string(row.RequestHash) != string(hash) {
+		return nil, ErrIdempotencyKeyReused
 	}
 	if row.ResponseBody == nil {
-		return uuid.Nil, errIdempotencyInFlight
+		return nil, errIdempotencyInFlight
 	}
-	var ref createdRef
-	if err := json.Unmarshal(row.ResponseBody, &ref); err != nil {
-		return uuid.Nil, fmt.Errorf("decode idempotent response: %w", err)
+	return json.RawMessage(row.ResponseBody), nil
+}
+
+// storeIdempotentResponse stores the 201 response body of a reserved key.
+// Only a successful creation is stored: a failed request rolls the key back
+// with everything else, so the client may simply retry.
+func storeIdempotentResponse(ctx context.Context, q *store.Queries, customerID uuid.UUID, key string, ref any, now time.Time) error {
+	body, err := json.Marshal(ref)
+	if err != nil {
+		return fmt.Errorf("marshal idempotent response: %w", err)
 	}
-	return ref.ID, nil
+	status := int32(http.StatusCreated)
+	if err := q.StoreIdempotencyResponse(ctx, store.StoreIdempotencyResponseParams{
+		ResponseStatus: &status, ResponseBody: body, Now: now, UserID: customerID, Key: key,
+	}); err != nil {
+		return fmt.Errorf("store idempotency response: %w", err)
+	}
+	return nil
 }
 
 func startOfDayVN(t time.Time) time.Time {
@@ -486,33 +521,17 @@ func (s *Service) createAttractionTx(ctx context.Context, tx pgx.Tx, customerID 
 	if err != nil {
 		return createdRef{}, uuid.Nil, err
 	}
-	bookingID, err := uuid.NewV7()
+	bookingID, code, err := insertPendingBooking(ctx, q, store.InsertPendingBookingParams{
+		CheckoutID: checkoutID, CustomerID: customerID,
+		PartnerID: l.PartnerID, ListingID: l.ID, ServiceType: l.ServiceType,
+		ServiceStartAt: startAt, ServiceEndAt: endAt,
+		GrossAmount: gross, CommissionRateBps: int32(rateBps), CommissionAmount: commission,
+		CancellationPolicySnapshot: snapshot,
+		ContactName:                req.name, ContactPhone: req.phone, ContactEmail: req.mail, CustomerNote: req.note,
+		HoldExpiresAt: &holdExpires, HoldReleaseAt: &holdRelease, QrToken: qrToken, Now: now,
+	})
 	if err != nil {
 		return createdRef{}, uuid.Nil, err
-	}
-	var code string
-	for try := 0; ; try++ {
-		if try == codeInsertTries {
-			return createdRef{}, uuid.Nil, errors.New("booking code: too many collisions")
-		}
-		if code, err = randomCode("LT"); err != nil {
-			return createdRef{}, uuid.Nil, err
-		}
-		n, err := q.InsertPendingBooking(ctx, store.InsertPendingBookingParams{
-			ID: bookingID, Code: code, CheckoutID: checkoutID, CustomerID: customerID,
-			PartnerID: l.PartnerID, ListingID: l.ID, ServiceType: l.ServiceType,
-			ServiceStartAt: startAt, ServiceEndAt: endAt,
-			GrossAmount: gross, CommissionRateBps: int32(rateBps), CommissionAmount: commission,
-			CancellationPolicySnapshot: snapshot,
-			ContactName:                req.name, ContactPhone: req.phone, ContactEmail: req.mail, CustomerNote: req.note,
-			HoldExpiresAt: &holdExpires, HoldReleaseAt: &holdRelease, QrToken: qrToken, Now: now,
-		})
-		if err != nil {
-			return createdRef{}, uuid.Nil, fmt.Errorf("insert booking: %w", err)
-		}
-		if n == 1 {
-			break
-		}
 	}
 	for _, ln := range lines {
 		itemID, err := uuid.NewV7()
@@ -553,6 +572,30 @@ func (s *Service) createAttractionTx(ctx context.Context, tx pgx.Tx, customerID 
 		return createdRef{}, uuid.Nil, err
 	}
 	return createdRef{ID: bookingID, Code: code}, pay.ID, nil
+}
+
+// insertPendingBooking inserts a pending_payment booking with a fresh id and
+// LT code (p.ID and p.Code are set here) and returns both, retrying on a
+// code collision (ON CONFLICT DO NOTHING keeps the tx usable).
+func insertPendingBooking(ctx context.Context, q *store.Queries, p store.InsertPendingBookingParams) (uuid.UUID, string, error) {
+	id, err := uuid.NewV7()
+	if err != nil {
+		return uuid.Nil, "", err
+	}
+	p.ID = id
+	for range codeInsertTries {
+		if p.Code, err = randomCode("LT"); err != nil {
+			return uuid.Nil, "", err
+		}
+		n, err := q.InsertPendingBooking(ctx, p)
+		if err != nil {
+			return uuid.Nil, "", fmt.Errorf("insert booking: %w", err)
+		}
+		if n == 1 {
+			return id, p.Code, nil
+		}
+	}
+	return uuid.Nil, "", errors.New("booking code: too many collisions")
 }
 
 // insertCheckout inserts an open checkout with a fresh CO code, retrying on

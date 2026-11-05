@@ -14,7 +14,7 @@ var (
 	ErrListingIncomplete     = httpx.NewError(http.StatusUnprocessableEntity, "listing_incomplete", "Listing chưa đủ thông tin để gửi duyệt")
 	ErrServiceTypeNotEnabled = httpx.NewError(http.StatusUnprocessableEntity, "service_type_not_enabled", "Loại dịch vụ này chưa được bật cho đối tác")
 	// ErrServiceTypeNotSupported: the catalog knows the type but listing has
-	// no detail model for it yet (only attraction_ticket today).
+	// no detail model for it yet (attraction_ticket and scheduled_ride today).
 	ErrServiceTypeNotSupported = httpx.NewError(http.StatusUnprocessableEntity, "service_type_not_supported", "Loại dịch vụ này chưa hỗ trợ đăng bán")
 )
 
@@ -23,7 +23,7 @@ var (
 // ErrServiceTypeNotSupported, so a new type fails closed until it is wired.
 func supportedServiceType(serviceType string) bool {
 	switch serviceType {
-	case attractionServiceType:
+	case attractionServiceType, rideServiceType:
 		return true
 	default:
 		return false

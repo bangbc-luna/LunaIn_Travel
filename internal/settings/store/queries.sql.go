@@ -36,7 +36,7 @@ func (q *Queries) GetHolidayName(ctx context.Context, date pgtype.Date) (string,
 }
 
 const getSettings = `-- name: GetSettings :one
-SELECT id, hold_minutes, hold_grace_minutes, request_response_hours, request_payment_hours, charter_late_confirm_min_hours, ride_checkin_window_minutes, ride_no_show_after_minutes, charter_auto_complete_hours, release_delay_days, min_payout_amount, reschedule_window_days, updated_by, created_at, updated_at FROM platform_settings WHERE id = 1
+SELECT id, hold_minutes, hold_grace_minutes, request_response_hours, request_payment_hours, charter_late_confirm_min_hours, ride_checkin_window_minutes, ride_no_show_after_minutes, charter_auto_complete_hours, release_delay_days, min_payout_amount, reschedule_window_days, updated_by, created_at, updated_at, ride_booking_cutoff_minutes FROM platform_settings WHERE id = 1
 `
 
 func (q *Queries) GetSettings(ctx context.Context) (PlatformSetting, error) {
@@ -58,12 +58,13 @@ func (q *Queries) GetSettings(ctx context.Context) (PlatformSetting, error) {
 		&i.UpdatedBy,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.RideBookingCutoffMinutes,
 	)
 	return i, err
 }
 
 const getSettingsForUpdate = `-- name: GetSettingsForUpdate :one
-SELECT id, hold_minutes, hold_grace_minutes, request_response_hours, request_payment_hours, charter_late_confirm_min_hours, ride_checkin_window_minutes, ride_no_show_after_minutes, charter_auto_complete_hours, release_delay_days, min_payout_amount, reschedule_window_days, updated_by, created_at, updated_at FROM platform_settings WHERE id = 1 FOR UPDATE
+SELECT id, hold_minutes, hold_grace_minutes, request_response_hours, request_payment_hours, charter_late_confirm_min_hours, ride_checkin_window_minutes, ride_no_show_after_minutes, charter_auto_complete_hours, release_delay_days, min_payout_amount, reschedule_window_days, updated_by, created_at, updated_at, ride_booking_cutoff_minutes FROM platform_settings WHERE id = 1 FOR UPDATE
 `
 
 func (q *Queries) GetSettingsForUpdate(ctx context.Context) (PlatformSetting, error) {
@@ -85,6 +86,7 @@ func (q *Queries) GetSettingsForUpdate(ctx context.Context) (PlatformSetting, er
 		&i.UpdatedBy,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.RideBookingCutoffMinutes,
 	)
 	return i, err
 }
@@ -169,8 +171,9 @@ UPDATE platform_settings SET
     release_delay_days             = $9,
     min_payout_amount              = $10,
     reschedule_window_days         = $11,
-    updated_by                     = $12,
-    updated_at                     = $13
+    ride_booking_cutoff_minutes    = $12,
+    updated_by                     = $13,
+    updated_at                     = $14
 WHERE id = 1
 `
 
@@ -186,6 +189,7 @@ type UpdateSettingsParams struct {
 	ReleaseDelayDays           int32
 	MinPayoutAmount            int64
 	RescheduleWindowDays       int32
+	RideBookingCutoffMinutes   int32
 	UpdatedBy                  pgtype.UUID
 	Now                        time.Time
 }
@@ -203,6 +207,7 @@ func (q *Queries) UpdateSettings(ctx context.Context, arg UpdateSettingsParams) 
 		arg.ReleaseDelayDays,
 		arg.MinPayoutAmount,
 		arg.RescheduleWindowDays,
+		arg.RideBookingCutoffMinutes,
 		arg.UpdatedBy,
 		arg.Now,
 	)

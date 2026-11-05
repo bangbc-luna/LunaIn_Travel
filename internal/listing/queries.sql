@@ -230,15 +230,19 @@ ORDER BY created_at DESC, id DESC
 LIMIT 20;
 
 -- Public search over visible_listings (the single visibility rule, see
--- migration 00010). price_from is the cheapest active ticket type, 0 when
--- there is none (prices are > 0 by CHECK; sqlc cannot type a nullable
+-- migration 00010). price_from is the cheapest active ticket type or, for a
+-- ride, the cheapest active schedule, 0 when there is none (prices are > 0 by
+-- CHECK; sqlc cannot type a nullable
 -- aggregate, so 0 means NULL). With q: ILIKE on the escaped pattern
 -- (ESCAPE '\') or trigram similarity >= 0.3, best match first; without q:
 -- newest first.
 -- name: SearchPublicListings :many
 SELECT sqlc.embed(l),
-       (SELECT COALESCE(min(tt.price), 0) FROM attraction_ticket_types tt
-        WHERE tt.listing_id = l.id AND tt.active)::bigint AS price_from
+       COALESCE((SELECT min(tt.price) FROM attraction_ticket_types tt
+                 WHERE tt.listing_id = l.id AND tt.active),
+                (SELECT min(rs.price_per_seat) FROM ride_schedules rs
+                 WHERE rs.listing_id = l.id AND rs.active),
+                0)::bigint AS price_from
 FROM visible_listings l
 WHERE (sqlc.narg(service_type)::text IS NULL OR l.service_type = sqlc.narg(service_type))
   AND (sqlc.narg(province_code)::text IS NULL OR l.province_code = sqlc.narg(province_code))
@@ -252,8 +256,11 @@ LIMIT @lim OFFSET @off;
 
 -- name: GetPublicListingBySlug :one
 SELECT sqlc.embed(l),
-       (SELECT COALESCE(min(tt.price), 0) FROM attraction_ticket_types tt
-        WHERE tt.listing_id = l.id AND tt.active)::bigint AS price_from
+       COALESCE((SELECT min(tt.price) FROM attraction_ticket_types tt
+                 WHERE tt.listing_id = l.id AND tt.active),
+                (SELECT min(rs.price_per_seat) FROM ride_schedules rs
+                 WHERE rs.listing_id = l.id AND rs.active),
+                0)::bigint AS price_from
 FROM visible_listings l
 WHERE l.slug = @slug;
 
@@ -267,3 +274,240 @@ SELECT * FROM listings WHERE id = @id FOR SHARE;
 
 -- name: IsListingVisible :one
 SELECT EXISTS (SELECT 1 FROM visible_listings WHERE id = @id);
+
+-- name: GetRideTrip :one
+SELECT * FROM ride_trips WHERE id = @id;
+
+-- Scheduled ride: route, schedules and trip generation.
+-- name: GetRideRoute :one
+SELECT * FROM ride_routes WHERE listing_id = @listing_id;
+
+-- name: UpsertRideRoute :one
+INSERT INTO ride_routes (listing_id, origin_province_code, origin_ward_code, origin_name, origin_address,
+    dest_province_code, dest_ward_code, dest_name, dest_address, duration_minutes, vehicle_description,
+    created_at, updated_at)
+VALUES (@listing_id, @origin_province_code, @origin_ward_code, @origin_name, @origin_address,
+    @dest_province_code, @dest_ward_code, @dest_name, @dest_address, @duration_minutes, @vehicle_description,
+    @now, @now)
+ON CONFLICT (listing_id) DO UPDATE
+SET origin_province_code = EXCLUDED.origin_province_code, origin_ward_code = EXCLUDED.origin_ward_code,
+    origin_name = EXCLUDED.origin_name, origin_address = EXCLUDED.origin_address,
+    dest_province_code = EXCLUDED.dest_province_code, dest_ward_code = EXCLUDED.dest_ward_code,
+    dest_name = EXCLUDED.dest_name, dest_address = EXCLUDED.dest_address,
+    duration_minutes = EXCLUDED.duration_minutes, vehicle_description = EXCLUDED.vehicle_description,
+    updated_at = EXCLUDED.updated_at
+RETURNING *;
+
+-- name: HasBookedFutureTrips :one
+SELECT EXISTS (SELECT 1 FROM ride_trips
+               WHERE listing_id = @listing_id AND departure_at > @now AND seats_reserved > 0);
+
+-- name: InsertRideSchedule :one
+INSERT INTO ride_schedules (id, listing_id, departure_time, weekdays, seat_capacity, price_per_seat,
+    valid_from, valid_to, active, created_at, updated_at)
+VALUES (@id, @listing_id, @departure_time, @weekdays, @seat_capacity, @price_per_seat,
+    @valid_from, sqlc.narg(valid_to), true, @now, @now)
+RETURNING *;
+
+-- name: LockRideSchedule :one
+SELECT * FROM ride_schedules WHERE id = @id AND listing_id = @listing_id FOR UPDATE;
+
+-- name: LockRideScheduleByID :one
+SELECT * FROM ride_schedules WHERE id = @id FOR UPDATE;
+
+-- name: ListRideSchedules :many
+SELECT * FROM ride_schedules
+WHERE listing_id = @listing_id AND (@include_inactive::bool OR active)
+ORDER BY departure_time, valid_from, id;
+
+-- name: UpdateRideSchedule :one
+UPDATE ride_schedules
+SET seat_capacity = @seat_capacity, price_per_seat = @price_per_seat, valid_to = sqlc.narg(valid_to),
+    active = @active, generated_until = sqlc.narg(generated_until), updated_at = @now
+WHERE id = @id
+RETURNING *;
+
+-- name: SetScheduleGeneratedUntil :exec
+UPDATE ride_schedules SET generated_until = @generated_until, updated_at = @now WHERE id = @id;
+
+-- name: CountActiveRideSchedules :one
+SELECT count(*) FROM ride_schedules
+WHERE listing_id = @listing_id AND active AND (valid_to IS NULL OR valid_to >= @today::date);
+
+-- Schedules the job has work for: active ones not expired and not yet
+-- generated up to min(valid_to, horizon), and any schedule that still has an
+-- out-of-range trip to sweep (see SweepScheduleTrips).
+-- name: ListSchedulesToGenerate :many
+SELECT s.id FROM ride_schedules s
+WHERE (s.active
+       AND (s.valid_to IS NULL OR s.valid_to >= @today::date)
+       AND (s.generated_until IS NULL OR s.generated_until < LEAST(COALESCE(s.valid_to, @horizon::date), @horizon::date)))
+   OR EXISTS (SELECT 1 FROM ride_trips t
+              WHERE t.schedule_id = s.id AND t.departure_at > @now::timestamptz
+                AND t.status = 'scheduled' AND t.seats_reserved = 0
+                AND (NOT s.active
+                     OR (s.valid_to IS NOT NULL AND (t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date > s.valid_to)))
+ORDER BY s.id;
+
+-- A trip that schedule @schedule_id no longer covers (it is inactive, or the
+-- trip's VN date is after its valid_to) may be covered by another active
+-- schedule of the listing: same VN departure time, the trip's VN weekday bit
+-- set (bit 0 = Monday) and its VN date within [valid_from, valid_to]. That
+-- happens when a partner replaces a schedule while a trip held seats (the
+-- replacement's generation skips the existing row). The overlap rule allows
+-- at most one such schedule per trip.
+-- name: ListCoveringSchedules :many
+SELECT DISTINCT b.id
+FROM ride_trips t
+JOIN ride_schedules s ON s.id = t.schedule_id
+JOIN ride_schedules b ON b.listing_id = t.listing_id AND b.id <> s.id AND b.active
+WHERE s.id = @schedule_id::uuid AND t.departure_at > @now::timestamptz
+  AND t.status = 'scheduled' AND t.seats_reserved = 0
+  AND (NOT s.active
+       OR (s.valid_to IS NOT NULL AND (t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date > s.valid_to))
+  AND b.departure_time = (t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::time
+  AND (b.weekdays::int & (1 << (extract(isodow FROM t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::int - 1))) <> 0
+  AND (t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date >= b.valid_from
+  AND (b.valid_to IS NULL OR (t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date <= b.valid_to)
+ORDER BY b.id;
+
+-- Hands the unbooked trips of @schedule_id that it no longer covers but
+-- @cover_id (locked by the caller) does over to @cover_id, with its capacity
+-- and price, so that its later edits apply to them.
+-- name: ReassignCoveredTrips :execrows
+UPDATE ride_trips t
+SET schedule_id = b.id, seat_capacity = b.seat_capacity, price_per_seat = b.price_per_seat, updated_at = @now::timestamptz
+FROM ride_schedules s, ride_schedules b
+WHERE s.id = @schedule_id::uuid AND t.schedule_id = s.id AND b.id = @cover_id::uuid
+  AND b.listing_id = t.listing_id AND b.id <> s.id AND b.active
+  AND t.departure_at > @now::timestamptz AND t.status = 'scheduled' AND t.seats_reserved = 0
+  AND (NOT s.active
+       OR (s.valid_to IS NOT NULL AND (t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date > s.valid_to))
+  AND b.departure_time = (t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::time
+  AND (b.weekdays::int & (1 << (extract(isodow FROM t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::int - 1))) <> 0
+  AND (t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date >= b.valid_from
+  AND (b.valid_to IS NULL OR (t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date <= b.valid_to);
+
+-- Cancels the future, unbooked, still scheduled trips of a schedule that it
+-- no longer covers (schedule inactive, or the trip's VN date after
+-- valid_to): trips kept by a schedule edit because they had seats held, once
+-- those seats are released. A trip another active schedule covers (see
+-- ListCoveringSchedules) is never cancelled here. seats_reserved = 0 is
+-- re-checked per row, so a concurrent reservation wins.
+-- name: SweepScheduleTrips :execrows
+UPDATE ride_trips t
+SET status = 'cancelled', cancelled_reason = @reason::text, cancelled_at = @now::timestamptz,
+    cancelled_by = NULL, cancel_source = 'schedule', updated_at = @now::timestamptz
+FROM ride_schedules s
+WHERE s.id = @schedule_id::uuid AND t.schedule_id = s.id AND t.departure_at > @now::timestamptz
+  AND t.status = 'scheduled' AND t.seats_reserved = 0
+  AND (NOT s.active
+       OR (s.valid_to IS NOT NULL AND (t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date > s.valid_to))
+  AND NOT EXISTS (
+      SELECT 1 FROM ride_schedules b
+      WHERE b.listing_id = t.listing_id AND b.id <> s.id AND b.active
+        AND b.departure_time = (t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::time
+        AND (b.weekdays::int & (1 << (extract(isodow FROM t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::int - 1))) <> 0
+        AND (t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date >= b.valid_from
+        AND (b.valid_to IS NULL OR (t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date <= b.valid_to));
+
+-- Inserts the schedule's trips; a trip the schedule itself cancelled at the
+-- same departure is reopened. Any other existing trip (one-off, running, or
+-- cancelled by the partner or an admin) is left as it is.
+-- name: InsertScheduleTrips :execrows
+INSERT INTO ride_trips (id, listing_id, schedule_id, departure_at, seat_capacity, price_per_seat, created_at, updated_at)
+-- The two unnest calls in the select list run in lockstep (equal lengths).
+SELECT unnest(@ids::uuid[]), @listing_id::uuid, @schedule_id::uuid, unnest(@departures::timestamptz[]),
+       @seat_capacity::int, @price_per_seat::bigint, @now::timestamptz, @now::timestamptz
+ON CONFLICT (listing_id, departure_at) DO UPDATE
+SET status = 'scheduled', schedule_id = EXCLUDED.schedule_id, seat_capacity = EXCLUDED.seat_capacity,
+    price_per_seat = EXCLUDED.price_per_seat, cancelled_reason = NULL, cancelled_at = NULL,
+    cancelled_by = NULL, cancel_source = NULL, updated_at = EXCLUDED.updated_at
+WHERE ride_trips.status = 'cancelled' AND ride_trips.cancel_source = 'schedule';
+
+-- Future, unbooked, still scheduled trips of a schedule take its new
+-- capacity and price; trips with reserved seats keep theirs.
+-- name: UpdateOpenScheduleTrips :execrows
+UPDATE ride_trips
+SET seat_capacity = @seat_capacity::int, price_per_seat = @price_per_seat::bigint, updated_at = @now::timestamptz
+WHERE schedule_id = @schedule_id::uuid AND departure_at > @now::timestamptz AND status = 'scheduled' AND seats_reserved = 0;
+
+-- Cancels the future, unbooked, still scheduled trips of a schedule that
+-- depart at or after @from_at.
+-- name: CancelOpenScheduleTrips :execrows
+UPDATE ride_trips
+SET status = 'cancelled', cancelled_reason = @reason::text, cancelled_at = @now::timestamptz,
+    cancelled_by = sqlc.narg(actor)::uuid, cancel_source = 'schedule', updated_at = @now::timestamptz
+WHERE schedule_id = @schedule_id::uuid AND departure_at > @now::timestamptz AND departure_at >= @from_at::timestamptz
+  AND status = 'scheduled' AND seats_reserved = 0;
+
+-- Scheduled ride: single trips and seat reservation.
+
+-- name: ListListingTrips :many
+SELECT * FROM ride_trips
+WHERE listing_id = @listing_id AND departure_at >= @from_at AND departure_at < @to_at
+ORDER BY departure_at;
+
+-- name: InsertOneOffTrip :one
+INSERT INTO ride_trips (id, listing_id, schedule_id, departure_at, seat_capacity, price_per_seat, created_at, updated_at)
+VALUES (@id, @listing_id, NULL, @departure_at, @seat_capacity, @price_per_seat, @now, @now)
+ON CONFLICT (listing_id, departure_at) DO NOTHING
+RETURNING *;
+
+-- name: LockListingTrip :one
+SELECT * FROM ride_trips WHERE id = @id AND listing_id = @listing_id FOR UPDATE;
+
+-- name: UpdateTripFields :one
+UPDATE ride_trips
+SET departure_at = @departure_at, seat_capacity = @seat_capacity, price_per_seat = @price_per_seat,
+    schedule_id = sqlc.narg(schedule_id), updated_at = @now
+WHERE id = @id
+RETURNING *;
+
+-- name: CancelTrip :one
+UPDATE ride_trips
+SET status = 'cancelled', cancelled_reason = @reason::text, cancelled_at = @now::timestamptz,
+    cancelled_by = @actor::uuid, cancel_source = @source::text, updated_at = @now::timestamptz
+WHERE id = @id AND status = 'scheduled'
+RETURNING *;
+
+-- name: TripListingIDs :many
+SELECT id, listing_id FROM ride_trips WHERE id = ANY(@ids::uuid[]);
+
+-- name: LockTrips :many
+SELECT * FROM ride_trips WHERE id = ANY(@ids::uuid[]) ORDER BY id FOR UPDATE;
+
+-- name: ReserveSeats :execrows
+UPDATE ride_trips SET seats_reserved = seats_reserved + @n::int, updated_at = @now
+WHERE id = @id AND status = 'scheduled' AND departure_at > @now
+  AND seats_reserved + @n::int <= seat_capacity;
+
+-- name: ReleaseSeats :execrows
+UPDATE ride_trips SET seats_reserved = seats_reserved - @n::int, updated_at = now()
+WHERE id = @id;
+
+-- Public trip search. The bookable cutoff is read from platform_settings in
+-- the same statement: departure_at > now + max(ride_booking_cutoff_minutes,
+-- hold_minutes + hold_grace_minutes). Ward filters are optional.
+-- name: SearchRideTrips :many
+SELECT t.id AS trip_id, l.id AS listing_id, l.slug, l.title,
+       r.origin_province_code, r.origin_ward_code, r.origin_name, r.origin_address,
+       r.dest_province_code, r.dest_ward_code, r.dest_name, r.dest_address,
+       r.duration_minutes, r.vehicle_description,
+       t.departure_at, t.price_per_seat,
+       (t.seat_capacity - t.seats_reserved)::int AS seats_left
+FROM ride_trips t
+JOIN ride_routes r ON r.listing_id = t.listing_id
+JOIN visible_listings l ON l.id = t.listing_id
+CROSS JOIN (SELECT sqlc.arg(now)::timestamptz + GREATEST(ride_booking_cutoff_minutes, hold_minutes + hold_grace_minutes) * interval '1 minute' AS earliest
+            FROM platform_settings WHERE id = 1) ps
+WHERE t.status = 'scheduled'
+  AND r.origin_province_code = @origin_province
+  AND r.dest_province_code = @dest_province
+  AND (sqlc.narg(origin_ward)::text IS NULL OR r.origin_ward_code = sqlc.narg(origin_ward))
+  AND (sqlc.narg(dest_ward)::text IS NULL OR r.dest_ward_code = sqlc.narg(dest_ward))
+  AND t.departure_at >= @day_start::timestamptz AND t.departure_at < @day_end::timestamptz
+  AND t.departure_at > ps.earliest
+  AND t.seat_capacity - t.seats_reserved >= @seats::int
+ORDER BY t.departure_at, t.price_per_seat, t.id
+LIMIT @lim OFFSET @off;

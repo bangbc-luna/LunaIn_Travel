@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/bangbc-luna/lunain-travel/internal/booking/store"
+	"github.com/bangbc-luna/lunain-travel/internal/listing"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/clock"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/db"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/httpx"
@@ -20,7 +21,18 @@ var (
 	ErrCheckInWrongDate  = httpx.NewError(http.StatusUnprocessableEntity, "checkin_wrong_date", "Vé này không dùng cho ngày hôm nay")
 	ErrCheckInNotAllowed = httpx.NewError(http.StatusConflict, "checkin_not_allowed", "Đơn đặt chỗ này không ở trạng thái có thể check-in")
 	ErrInvalidCheckIn    = httpx.NewError(http.StatusUnprocessableEntity, "invalid_checkin", "Cần gửi đúng một trong hai: qr_token hoặc code")
+	// ErrCheckInOutsideWindow is the code of a ride check-in outside
+	// departure ± ride_checkin_window_minutes; the message names the window
+	// (checkInOutsideWindow).
+	ErrCheckInOutsideWindow = httpx.NewError(http.StatusUnprocessableEntity, "checkin_outside_window", "Chỉ check-in được trong khoảng quanh giờ khởi hành")
+	// ErrTripCancelled: the booking's trip was cancelled.
+	ErrTripCancelled = httpx.NewError(http.StatusConflict, "trip_cancelled", "Chuyến xe này đã bị hủy, không thể check-in")
 )
+
+func checkInOutsideWindow(minutes int) error {
+	return httpx.NewError(ErrCheckInOutsideWindow.Status, ErrCheckInOutsideWindow.Code,
+		fmt.Sprintf("Chỉ check-in được trong khoảng ±%d phút quanh giờ khởi hành", minutes))
+}
 
 // CheckInResult is the outcome of a check-in. Already: the booking had been
 // checked in before (nothing changed); CheckedInAt is then the first time.
@@ -37,8 +49,8 @@ type CheckInResult struct {
 // recorded with the partner user as actor and the release is scheduled
 // release_delay_days later. It must be the visit date in Vietnam
 // (ErrCheckInWrongDate); a booking that is not confirmed is
-// ErrCheckInNotAllowed. Checking in again returns Already with the first
-// check-in time.
+// ErrCheckInNotAllowed. A scheduled ride booking follows checkInRide instead.
+// Checking in again returns Already with the first check-in time.
 func (s *Service) CheckIn(ctx context.Context, partnerID, userID uuid.UUID, qrToken string) (CheckInResult, error) {
 	return s.checkIn(ctx, partnerID, userID, func(q *store.Queries) (store.Booking, error) {
 		return q.LockPartnerBookingByQR(ctx, store.LockPartnerBookingByQRParams{QrToken: qrToken, PartnerID: partnerID})
@@ -69,10 +81,15 @@ func (s *Service) checkIn(ctx context.Context, partnerID, userID uuid.UUID, lock
 			res = CheckInResult{Already: true, CheckedInAt: *b.CheckedInAt}
 			return nil
 		}
+		now := s.clock.Now()
+		if b.ServiceType == serviceTypeRide {
+			var err error
+			res, err = s.checkInRide(ctx, tx, q, b, userID, now)
+			return err
+		}
 		if b.Status != StatusConfirmed || b.ServiceType != serviceTypeAttraction {
 			return ErrCheckInNotAllowed
 		}
-		now := s.clock.Now()
 		d, err := q.GetAttractionDetail(ctx, b.ID)
 		if err != nil {
 			return fmt.Errorf("get attraction detail: %w", err)
@@ -97,6 +114,52 @@ func (s *Service) checkIn(ctx context.Context, partnerID, userID uuid.UUID, lock
 	}
 	res.Booking, err = s.GetForPartner(ctx, partnerID, bookingID)
 	return res, err
+}
+
+// checkInRide checks in a locked, not yet checked-in scheduled ride booking:
+// the passenger boarded, so the confirmed booking becomes checked_in
+// (checked_in_at = now, history with the partner user as actor). Nothing is
+// released here: CompleteRides completes it at service_end_at and schedules
+// the release then. A booking whose trip was cancelled is ErrTripCancelled
+// (its legs were cancelled with the trip; a leg checked in before is
+// answered Already earlier and left to CompleteRides); one not confirmed is
+// ErrCheckInNotAllowed; now must be within departure ±
+// ride_checkin_window_minutes, both bounds included
+// (ErrCheckInOutsideWindow).
+//
+// The trip is read, not locked: the trip comes before the booking in the
+// lock order, and an admin trip cancel locks this booking before changing
+// it, so it either sees it checked in or cancels it first.
+func (s *Service) checkInRide(ctx context.Context, tx pgx.Tx, q *store.Queries, b store.Booking, userID uuid.UUID, now time.Time) (CheckInResult, error) {
+	d, err := q.GetRideDetails(ctx, b.ID)
+	if err != nil {
+		return CheckInResult{}, fmt.Errorf("get ride details: %w", err)
+	}
+	st, err := s.listings.TripStatus(ctx, tx, d.TripID)
+	if err != nil {
+		return CheckInResult{}, err
+	}
+	if st == listing.TripCancelled {
+		return CheckInResult{}, ErrTripCancelled
+	}
+	if b.Status != StatusConfirmed {
+		return CheckInResult{}, ErrCheckInNotAllowed
+	}
+	cfg, err := s.settings.GetTx(ctx, tx)
+	if err != nil {
+		return CheckInResult{}, err
+	}
+	window := time.Duration(cfg.RideCheckinWindowMinutes) * time.Minute
+	if now.Before(b.ServiceStartAt.Add(-window)) || now.After(b.ServiceStartAt.Add(window)) {
+		return CheckInResult{}, checkInOutsideWindow(cfg.RideCheckinWindowMinutes)
+	}
+	if err := q.CheckInRide(ctx, store.CheckInRideParams{Now: now, ID: b.ID}); err != nil {
+		return CheckInResult{}, fmt.Errorf("check in ride: %w", err)
+	}
+	if err := insertHistory(ctx, q, b, StatusCheckedIn, actorPartner, &userID, nil, now); err != nil {
+		return CheckInResult{}, err
+	}
+	return CheckInResult{CheckedInAt: now}, nil
 }
 
 // checkInInput is the POST /v1/partner/check-ins body: exactly one of

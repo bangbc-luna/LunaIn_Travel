@@ -5,6 +5,7 @@ package listing
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -64,6 +65,8 @@ type Deps struct {
 	Files    FileChecker
 	// BookingGuard may be nil (tests without bookings): the checks are skipped.
 	BookingGuard BookingGuard
+	// Log may be nil: slog.Default() is used.
+	Log *slog.Logger
 }
 
 // Service implements the listing use cases.
@@ -75,9 +78,14 @@ type Service struct {
 	geo      LocationValidator
 	files    FileChecker
 	bookings BookingGuard
+	log      *slog.Logger
 }
 
 // NewService builds a Service.
 func NewService(d Deps) *Service {
-	return &Service{pool: d.Pool, clock: d.Clock, partners: d.Partners, catalog: d.Catalog, geo: d.Geo, files: d.Files, bookings: d.BookingGuard}
+	log := d.Log
+	if log == nil {
+		log = slog.Default()
+	}
+	return &Service{pool: d.Pool, clock: d.Clock, partners: d.Partners, catalog: d.Catalog, geo: d.Geo, files: d.Files, bookings: d.BookingGuard, log: log}
 }

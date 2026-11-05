@@ -88,6 +88,8 @@ WHERE (sqlc.narg(customer_id)::uuid IS NULL OR b.customer_id = sqlc.narg(custome
   AND (sqlc.narg(partner_id)::uuid IS NULL OR b.partner_id = sqlc.narg(partner_id))
   AND (sqlc.narg(status)::text IS NULL OR b.status = sqlc.narg(status))
   AND (sqlc.narg(code)::text IS NULL OR b.code = sqlc.narg(code))
+  AND (sqlc.narg(trip_id)::uuid IS NULL OR EXISTS (
+        SELECT 1 FROM booking_ride_details d WHERE d.booking_id = b.id AND d.trip_id = sqlc.narg(trip_id)))
   AND (sqlc.narg(cursor)::uuid IS NULL OR b.id < sqlc.narg(cursor))
 ORDER BY b.id DESC
 LIMIT @lim;
@@ -105,9 +107,12 @@ SELECT sqlc.embed(b),
        COALESCE(to_char(d.visit_date, 'YYYY-MM-DD'), '')::text AS visit_date,
        d.time_slot_id,
        COALESCE(to_char(d.slot_start, 'HH24:MI'), '')::text AS slot_start,
-       COALESCE(to_char(d.slot_end, 'HH24:MI'), '')::text AS slot_end
+       COALESCE(to_char(d.slot_end, 'HH24:MI'), '')::text AS slot_end,
+       r.trip_id,
+       r.seats
 FROM bookings b
 LEFT JOIN booking_attraction_details d ON d.booking_id = b.id
+LEFT JOIN booking_ride_details r ON r.booking_id = b.id
 WHERE b.checkout_id = @checkout_id
 ORDER BY b.id;
 
@@ -141,6 +146,25 @@ LIMIT @lim;
 -- name: ListNoShowCandidates :many
 SELECT id FROM bookings
 WHERE status = 'confirmed' AND service_type = 'attraction_ticket' AND service_end_at < @now
+  AND NOT (id = ANY(@skip::uuid[]))
+ORDER BY service_end_at, id
+LIMIT @lim;
+
+-- No-show job, scheduled rides: confirmed (never checked in) ride bookings
+-- that departed before @cutoff = now − ride_no_show_after_minutes
+-- (bookings_ride_no_show_idx).
+-- name: ListRideNoShowCandidates :many
+SELECT id FROM bookings
+WHERE status = 'confirmed' AND service_type = 'scheduled_ride' AND service_start_at < @cutoff::timestamptz
+  AND NOT (id = ANY(@skip::uuid[]))
+ORDER BY service_start_at, id
+LIMIT @lim;
+
+-- Ride completion job: checked-in ride bookings whose service ended
+-- (bookings_service_end_idx).
+-- name: ListRidesToComplete :many
+SELECT id FROM bookings
+WHERE status = 'checked_in' AND service_type = 'scheduled_ride' AND service_end_at <= @now::timestamptz
   AND NOT (id = ANY(@skip::uuid[]))
 ORDER BY service_end_at, id
 LIMIT @lim;
@@ -202,6 +226,14 @@ UPDATE bookings
 SET status = 'completed', checked_in_at = @now::timestamptz, completed_at = @now::timestamptz, updated_at = @now
 WHERE id = @id;
 
+-- Ride check-in: the passenger boarded; completion comes at service_end_at
+-- (CompleteRide).
+-- name: CheckInRide :exec
+UPDATE bookings SET status = 'checked_in', checked_in_at = @now::timestamptz, updated_at = @now WHERE id = @id;
+
+-- name: CompleteRide :exec
+UPDATE bookings SET status = 'completed', completed_at = @now::timestamptz, updated_at = @now WHERE id = @id;
+
 -- BookingGuard: active (pending_payment, confirmed) bookings of a listing on
 -- a Vietnam calendar date.
 -- name: CountActiveBookingsOnDate :one
@@ -219,3 +251,57 @@ JOIN bookings b ON b.id = d.booking_id
 WHERE d.time_slot_id = @time_slot_id AND d.visit_date >= (@from_date::text)::date
   AND (@weekdays::int & (1 << (extract(isodow FROM d.visit_date)::int - 1))) <> 0
   AND b.status IN ('pending_payment', 'confirmed');
+
+-- name: GetRideDetails :one
+SELECT * FROM booking_ride_details WHERE booking_id = @booking_id;
+
+-- name: InsertRideDetail :exec
+INSERT INTO booking_ride_details (booking_id, listing_id, trip_id, seats, direction, origin_name, dest_name, created_at, updated_at)
+VALUES (@booking_id, @listing_id, @trip_id, @seats::int, @direction, @origin_name, @dest_name, @now, @now);
+
+-- Pending ride bookings on these trips whose hold passed release, except
+-- those of one checkout (booking_ride_details_trip_idx). The caller holds the
+-- trip locks.
+-- name: ListOverdueRideHolds :many
+SELECT b.id, b.checkout_id FROM bookings b
+JOIN booking_ride_details d ON d.booking_id = b.id
+WHERE d.trip_id = ANY(@trip_ids::uuid[])
+  AND b.status = 'pending_payment' AND b.hold_release_at <= @now::timestamptz
+  AND b.checkout_id <> @except_checkout
+ORDER BY b.id;
+
+-- Bookings locked in id order (DB §1.1).
+-- name: LockBookingsByIDs :many
+SELECT * FROM bookings WHERE id = ANY(@ids::uuid[]) ORDER BY id FOR UPDATE;
+
+-- Trips of a checkout's ride bookings, unlocked (a booking's trip never
+-- changes), so the caller can lock them before the checkout.
+-- name: ListCheckoutRideTrips :many
+SELECT DISTINCT d.trip_id FROM booking_ride_details d
+JOIN bookings b ON b.id = d.booking_id
+WHERE b.checkout_id = @checkout_id
+ORDER BY d.trip_id;
+
+-- The other ride booking of a round trip (same checkout).
+-- name: ListPairedRideBookings :many
+SELECT b.id FROM bookings b
+JOIN booking_ride_details d ON d.booking_id = b.id
+WHERE b.checkout_id = @checkout_id AND b.id <> @booking_id
+ORDER BY b.id;
+
+-- Checkouts holding a confirmed booking on a trip, unlocked
+-- (booking_ride_details_trip_idx): the checkouts an admin trip cancel
+-- affects. Re-read under the trip lock, which every status change of a
+-- pending or confirmed ride booking but check-in holds.
+-- name: ListTripCheckouts :many
+SELECT DISTINCT b.checkout_id FROM bookings b
+JOIN booking_ride_details d ON d.booking_id = b.id
+WHERE d.trip_id = @trip_id AND b.status = 'confirmed'
+ORDER BY b.checkout_id;
+
+-- The ride bookings of these checkouts with their trips, unlocked.
+-- name: ListCheckoutsRideBookings :many
+SELECT b.id, b.checkout_id, d.trip_id FROM bookings b
+JOIN booking_ride_details d ON d.booking_id = b.id
+WHERE b.checkout_id = ANY(@checkout_ids::uuid[])
+ORDER BY b.id;
