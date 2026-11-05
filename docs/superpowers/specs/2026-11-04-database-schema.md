@@ -99,7 +99,7 @@ Bảng chi tiết theo từng loại dịch vụ (`attraction_*`, `ride_*`, `cha
 
 | Bảng | Cột | Ghi chú |
 |---|---|---|
-| `customer_refund_accounts` ✅ plan 4 (migration `00013`) | `user_id` PK FK users, `bank_bin text` (`^[0-9]{6}$`), `account_number text` (`^[0-9]{6,19}$`), `account_holder text` (không rỗng) | Tài khoản nhận hoàn khách lưu sẵn (spec §6.3) |
+| `customer_refund_accounts` ✅ plan 4 (migration `00013`) | `user_id` PK FK users, `bank_bin text` (`^[0-9]{6}$`), `account_number text` (`^[0-9]{6,19}$`), `account_holder text` (không rỗng; từ plan 5, migration `00016`, thêm CHECK `^[A-Z]+( [A-Z]+)*$`) | Tài khoản nhận hoàn khách lưu sẵn (spec §6.3) |
 
 ---
 
@@ -141,6 +141,8 @@ Mỗi lần đổi đều ghi vào `admin_audit_log`. Booking không trỏ tới
 ### `admin_audit_log`
 `id`, `actor_user_id` FK users, `action text` (ví dụ `commission_rate.create`, `listing.hide`), `target_kind text`, `target_id uuid`, `before jsonb`, `after jsonb`, `reason text`, `created_at`. Index `(target_kind, target_id, created_at DESC)`.
 
+Plan 5 ghi audit trong cùng transaction với mọi thao tác admin lên tiền hoặc trạng thái: `payout.approve`, `payout.mark_paid`, `payout.reject`, `ledger.adjustment`, `refund.complete`, `payment.review_seen`, `payment.review_resolve`, `reconciliation.run` (chỉ khi admin bấm chạy tay; job theo lịch không ghi). Bảng này cũng ghi thao tác **đổi tài khoản ngân hàng của đối tác** (`partner.bank_account.set`), với `actor_user_id` là **user đối tác** đã đổi, không phải admin: tài khoản nhận tiền là dữ liệu nhạy cảm nên mọi lần đổi phải truy được.
+
 ### Danh mục địa giới (spec §5.4)
 - `provinces`: `code text PK` (mã chính thức), `name`, `slug UNIQUE`, `sort_order`.
 - `wards`: `code text PK`, `province_code` FK, `name`, `slug`, `UNIQUE(province_code, slug)`.
@@ -169,7 +171,7 @@ Dữ liệu là 34 tỉnh/thành sau sáp nhập 2025, không còn cấp huyện
 | `created_by` | uuid FK users | Super Admin tạo |
 
 - **`partner_members`**: `partner_id` FK, `user_id` FK **UNIQUE**, `role` (`owner`), PK `(partner_id, user_id)`. **[Builder]** Mỗi user thuộc tối đa một đối tác.
-- **`partner_bank_accounts`**: `id`, `partner_id`, `bank_bin`, `bank_name`, `account_number`, `account_holder`, `is_current bool`, cùng unique index `(partner_id) WHERE is_current`. Đổi tài khoản thì thêm dòng mới và tắt `is_current` của dòng cũ, để giữ lịch sử.
+- **`partner_bank_accounts`**: `id`, `partner_id`, `bank_bin`, `bank_name`, `account_number`, `account_holder`, `is_current bool`, cùng unique index `(partner_id) WHERE is_current`. Đổi tài khoản thì thêm dòng mới và tắt `is_current` của dòng cũ, để giữ lịch sử. Plan 5 (migration `00015`) thêm `created_by uuid NULL FK users` (NULL với các dòng cũ hơn migration) và CHECK `account_holder ~ '^[A-Z]+( [A-Z]+)*$'` (tên in hoa không dấu như trên thẻ). Mỗi lần đổi ghi `admin_audit_log` (mục 4).
 - **`partner_service_types`**: PK `(partner_id, service_type)`, `enabled_by`, `enabled_at`, `disabled_at NULL`. **[Chốt]** Super Admin bật từng loại dịch vụ cho từng đối tác.
 
 ### 5.2 Loại dịch vụ và hoa hồng 🔜 plan 2
@@ -349,18 +351,35 @@ Kết hợp với việc khóa dòng `rental_vehicle_models` (spec §7), phép �
 
 ---
 
-## 7. Payment 🔜 plan 4
+## 7. Payment ✅ plan 4, plan 5 (đối soát, xử lý `needs_review`, nhắc hoàn tiền)
 
 | Bảng | Cột chính | Ràng buộc |
 |---|---|---|
 | `payments` | `id`, `checkout_id` FK, `provider` (`payos`), `provider_order_code bigint UNIQUE`, `amount > 0`, `status` (`pending`\|`paid`\|`expired`\|`cancelled`\|`needs_review`), `checkout_url`, `qr_code`, `expires_at`, `paid_at`, `provider_reference`, `raw jsonb` | unique index `(checkout_id) WHERE status = 'pending'`: mỗi checkout chỉ có một link đang chờ. `needs_review` dùng khi số tiền không khớp (spec §8). `provider_order_code` lấy từ sequence bắt đầu từ 100000, tối đa 2^53 − 1. `CHECK (status <> 'paid' OR paid_at IS NOT NULL)`. `UNIQUE(id, checkout_id)` làm đích cho FK kép từ `refunds` và `checkouts.paid_payment_id` |
 | `payment_events` | `id`, `payment_id NULL`, `provider`, `dedupe_key text UNIQUE`, `signature_valid bool`, `payload jsonb`, `received_at`, `processed_at NULL`, `result text` | webhook gọi lặp thì bị chặn ở `dedupe_key` |
 | `refunds` | `id`, `payment_id` **NOT NULL**, `checkout_id` **NOT NULL**, `booking_id` **NULL**, `provider_reference` NULL (mã giao dịch chuyển vào mà khoản hoàn trả lại), `amount > 0`, `reason` (`customer_cancel`\|`admin_cancel`\|`late_payment`\|`payment_mismatch`\|`duplicate_payment`), `status` (`awaiting_bank_info`\|`pending`\|`completed`), `bank_bin`, `account_number`, `account_holder`, `transfer_reference`, `proof_file_id`, `completed_by`, `completed_at` | FK kép `(payment_id, checkout_id) → payments(id, checkout_id)` và `(booking_id, checkout_id) → bookings(id, checkout_id)`: payment và booking phải cùng checkout. `CHECK (booking_id IS NOT NULL OR provider_reference IS NOT NULL)`. `CHECK (status <> 'completed' OR transfer_reference IS NOT NULL)`. Ngoài `awaiting_bank_info` thì phải đủ thông tin ngân hàng; `completed_at` có đúng khi `completed` và đi cùng `completed_by`. Unique `(booking_id) WHERE booking_id IS NOT NULL`: mỗi booking tối đa một khoản hoàn, nên webhook và job đối soát không thể cùng tạo hai lần. Khoản hoàn không gắn booking (thanh toán thừa, trùng hoặc lệch tiền) thì unique `(payment_id, provider_reference) WHERE booking_id IS NULL`: mỗi lần chuyển tiền vào có tối đa một khoản hoàn (trả trùng là lần chuyển thứ hai trên cùng payment). Index `(status)`, `(payment_id)`, `(checkout_id)` |
-| `payment_reconciliations` 🔜 5 | `id`, `run_date date UNIQUE`, `status` (`ok`\|`mismatch`), `mismatches jsonb` | đối soát hằng ngày (spec §8). Chưa có trong migration `00013` |
+| `payment_reconciliations` ✅ plan 5 (migration `00016`) | `id`, `run_date date UNIQUE`, `status` (`ok`\|`mismatch`), `checked_payments int ≥ 0`, `mismatches jsonb` (mảng, mặc định `[]`), `started_at`, `finished_at`, `run_by NULL` FK users (NULL: job theo lịch), `created_at`, `updated_at` | đối soát hằng ngày (spec §8), xem bên dưới. `CHECK (jsonb_typeof(mismatches) = 'array')`. Chạy lại trong cùng ngày thì ghi đè dòng của ngày đó |
+
+**Bổ sung của plan 5 (migration `00016`):**
+- `payment_events.amount bigint NULL CHECK (> 0)`: số tiền của lần chuyển mà `HandlePaid` đã xử lý cho event này. Migration điền lại từ `payload->'data'->'amount'` cho các event đã xử lý có tiền. Đối soát cộng cột này để biết hệ thống đã ghi nhận bao nhiêu trên mỗi payment. Index partial `(result, received_at) WHERE result = 'awaiting_status'` cho bước phát lại event chờ trạng thái.
+- `payments.review_*` **[Chốt]** xử lý `needs_review` hai bước: `review_seen_at`/`review_seen_by` (admin mở chi tiết thì ghi **Đã xem**), `review_resolved_at`/`review_resolved_by` (nút **Hoàn thành**), `review_note text NULL` (ghi chú không bắt buộc). CHECK: mỗi cặp `_at`/`_by` cùng NULL hoặc cùng có; đã `resolved` thì phải `seen` trước; các cột review chỉ có giá trị khi `status = 'needs_review'`. Mọi lần đổi `status` (vào hoặc ra khỏi `needs_review`) đều xóa hết `review_*`, nên tiền mới tới thì review mở lại từ đầu. API trả `review_state` suy ra từ hai mốc: `new` → `seen` → `resolved`. Index partial `(id) WHERE status = 'needs_review' AND review_resolved_at IS NULL` cho danh sách việc cần xử lý.
+- `refunds.bank_info_reminder_count int NOT NULL DEFAULT 0 (≥ 0)`, `refunds.bank_info_reminded_at NULL`: job nhắc khách nhập tài khoản nhận hoàn **[Chốt]** 3 ngày một lần, tối đa 5 lần; sau đó refund vẫn nằm trong danh sách admin `awaiting_bank_info`. Index partial `(status, created_at) WHERE status = 'awaiting_bank_info'`. Thêm CHECK `account_holder IS NULL OR account_holder ~ '^[A-Z]+( [A-Z]+)*$'`.
+- `customer_refund_accounts`: CHECK `account_holder ~ '^[A-Z]+( [A-Z]+)*$'` (mục 3).
+
+**Đối soát hằng ngày** (job 02:30 giờ Việt Nam, hoặc admin bấm chạy tay; hai lần chạy không chồng nhau nhờ `pg_try_advisory_lock`: job thì bỏ qua, chạy tay thì 409 `reconciliation_running`). Đối soát **không bao giờ** ghi bút toán hay đổi booking trực tiếp: tiền chỉ vào qua `HandlePaid` với `DedupeKey(orderCode, reference)` như webhook. Các loại `mismatches[].kind`:
+- `stale_awaiting_processed`: event `awaiting_status` quá hạn được phát lại qua `ProcessWebhook`.
+- `missing_transfer`: PayOS báo đã nhận nhiều tiền hơn hệ thống ghi nhận, sau thời gian chờ webhook. **[Chốt]** Đối soát **không** tự ghi nhận khoản này từ trạng thái PayOS: tài liệu PayOS không cho thấy `transactions[].reference` trùng với `data.reference` của webhook, nên ghi theo một khóa khác có thể làm webhook tới sau bị tính là lần chuyển thứ hai và hoàn tiền hai lần. Admin nhận cảnh báo và xử lý tay. Mã `recovered_transfer` được giữ chỗ cho khi có payload PayOS thật để đối chiếu.
+- `recorded_exceeds_provider`: hệ thống ghi nhận nhiều hơn PayOS báo.
+- `provider_error`: không hỏi được PayOS, phát lại lỗi, hoặc lần chạy dừng sớm do hết giờ (15 phút).
+- `window_truncated`: số payment cần kiểm tra vượt giới hạn mỗi lần chạy; `detail` ghi đã kiểm tra bao nhiêu trên tổng số.
+- `needs_review_open`: payment `needs_review` chưa **Hoàn thành**.
+- `balance_drift`: `ledger.VerifyAll` (một snapshot chỉ đọc) thấy cache số dư hoặc chuỗi `seq` của đối tác lệch sổ cái, `booking_settlements.net_pending` lệch tổng bút toán `pending` của booking (hoặc đã giải phóng mà vẫn còn tiền `pending`), hoặc bút toán `pending` của booking không có dòng `booking_settlements`.
+
+Có mismatch thì `status = 'mismatch'` và Super Admin nhận email cảnh báo qua outbox.
 
 ---
 
-## 8. Ledger và Payout 🔜 plan 4 (bút toán), plan 5 (payout)
+## 8. Ledger và Payout ✅ plan 4 (bút toán), plan 5 (payout)
 
 ### `partner_balances`
 `partner_id` PK FK, `pending bigint`, `available bigint` (cả hai có thể âm), `last_seq bigint NOT NULL DEFAULT 0`, `updated_at`. Đây là bản cache, cập nhật cùng transaction với bút toán. `last_seq` dùng để cấp số thứ tự cho bút toán (xem bên dưới).
@@ -379,8 +398,13 @@ Kết hợp với việc khóa dòng `rental_vehicle_models` (spec §7), phép �
 | `reason`, `created_by NULL`, `created_at` | | |
 
 Ràng buộc:
-- `CHECK`: các kind theo booking thì `booking_id NOT NULL` (và `payout_id` NULL); các kind payout thì `payout_id NOT NULL` (và `booking_id` NULL); `adjustment` thì `reason` và `created_by NOT NULL`. FK `(booking_id, partner_id) → bookings(id, partner_id)`. FK từ `payout_id` tới `payouts` sẽ thêm ở plan 5.
-- `CHECK` bucket và dấu (plan 4): `booking_earning`, `refund_debit` và `commission_waiver` chỉ ghi vào `pending`; `booking_earning > 0`, `refund_debit < 0`, `commission_waiver > 0`. `release` không giới hạn dấu. Dấu của các kind payout để plan 5 quyết.
+- `CHECK`: các kind theo booking thì `booking_id NOT NULL` (và `payout_id` NULL); các kind payout thì `payout_id NOT NULL` (và `booking_id` NULL); `adjustment` thì `reason` và `created_by NOT NULL`. FK `(booking_id, partner_id) → bookings(id, partner_id)`. ✅ Plan 5 (migration `00015`) thêm FK kép `(payout_id, partner_id) → payouts(id, partner_id)` (`ledger_entries_payout_fk`): payout phải thuộc đúng đối tác của bút toán (mục 1.2).
+- `CHECK` bucket và dấu (plan 4): `booking_earning`, `refund_debit` và `commission_waiver` chỉ ghi vào `pending`; `booking_earning > 0`, `refund_debit < 0`, `commission_waiver > 0`. `release` không giới hạn dấu.
+- `CHECK` bucket và dấu (plan 5, migration `00015`):
+  - `payout_hold`: chỉ ngăn `available`, `amount < 0` (giữ tiền ngay khi đối tác yêu cầu rút).
+  - `payout_reversal`: chỉ ngăn `available`, `amount > 0` (trả lại tiền khi payout bị từ chối).
+  - `adjustment`: chỉ ngăn `available`, dấu tùy ý (≠ 0), `payout_id` NULL, `booking_id` không bắt buộc; cùng với CHECK ở trên là bắt buộc `reason` và `created_by`.
+  - `available` được phép âm (ví dụ điều chỉnh âm sau khi đã rút).
 - Unique index `(booking_id, kind, bucket) WHERE kind IN ('booking_earning','refund_debit','commission_waiver','release')`: mỗi booking ghi mỗi loại bút toán đúng một lần, giải phóng tiền đúng một lần. Bút toán `adjustment` không nằm trong index này, nên một booking có thể được điều chỉnh nhiều lần.
 - Unique index `(payout_id, kind) WHERE kind IN ('payout_hold','payout_reversal')`: một yêu cầu rút không thể giữ hoặc hoàn tiền hai lần.
 - Sao kê và đối soát đi theo `seq`, không theo `created_at`. Thời gian `created_at` lấy từ clock trước khi commit, nên một bút toán commit trễ có thể mang mốc giờ nằm trong một kỳ đã chốt. `seq` được cấp khi đang giữ khóa nên không bao giờ lọt.
@@ -392,17 +416,22 @@ Ràng buộc:
 ### `platform_commission_entries`: doanh thu sàn
 `id`, `booking_id`, `service_type`, `kind` (`commission` \| `waiver`), `amount` có dấu, `created_at`, `UNIQUE(booking_id, kind)`. `CHECK ((kind = 'commission' AND amount > 0) OR (kind = 'waiver' AND amount < 0))`. Hoa hồng bằng 0 (tỷ lệ 0 bps) thì không ghi dòng `commission`, và khi miễn hoa hồng cũng không ghi dòng `waiver`, đúng quy tắc "khoản bằng 0 thì không ghi".
 
-### `payouts`
+### `payouts` ✅ plan 5 (migration `00015`)
 | Cột | Ghi chú |
 |---|---|
-| `id`, `partner_id`, `amount > 0` | |
-| `status` | `requested` \| `approved` \| `paid` \| `rejected` |
-| `bank_bin`, `bank_name`, `account_number`, `account_holder` | chụp lại lúc đối tác yêu cầu |
-| `statement_seq_from`, `statement_seq_to` bigint | khoảng `seq` của sao kê (spec §9): từ ngay sau bút toán cuối của payout trước, tới bút toán `payout_hold` của chính payout này |
-| `opening_available`, `closing_available` | số dư đầu kỳ và cuối kỳ, lấy từ `available_after` |
-| `requested_by/at`, `approved_by/at`, `paid_by/at`, `transfer_reference`, `proof_file_id`, `rejected_by/at`, `reject_reason` | |
+| `id`, `partner_id` FK partners, `amount > 0` | `UNIQUE(id, partner_id)` làm đích cho FK kép từ `ledger_entries` |
+| `status` | `requested` \| `approved` \| `paid` \| `rejected`. Luồng: `requested → approved → paid`; `requested`/`approved → rejected` |
+| `bank_bin` (`^[0-9]{6}$`), `bank_name`, `account_number` (`^[0-9]{6,19}$`), `account_holder` (`^[A-Z]+( [A-Z]+)*$`) | chụp lại tài khoản hiện hành lúc đối tác yêu cầu. Payout chuyển theo bản chụp này, kể cả khi đối tác đổi tài khoản lúc payout đang mở |
+| `bank_account_id` uuid NOT NULL FK `partner_bank_accounts` | dòng tài khoản đã chụp, để truy lại lịch sử. Màn admin trả `current_bank_differs` khi tài khoản hiện hành khác bản chụp (so `bank_bin` và `account_number`) |
+| `statement_seq_from`, `statement_seq_to` bigint | khoảng `seq` của sao kê (spec §9): `from` = `statement_seq_to` của payout trước (bất kể trạng thái) + 1, hoặc 1 nếu là payout đầu; `to` = `seq` của bút toán `payout_hold` của chính payout này |
+| `opening_available`, `closing_available` | số dư đầu kỳ (`available_after` tại `from − 1`, 0 nếu là `seq` 0) và cuối kỳ (`available_after` của `payout_hold`) |
+| `requested_by/at`, `approved_by/at`, `paid_by/at`, `transfer_reference`, `proof_file_id` FK files, `rejected_by/at`, `reject_reason`, `created_at`, `updated_at` | |
 
-Unique index `(partner_id) WHERE status IN ('requested','approved')`: **[Chốt]** mỗi đối tác chỉ có một yêu cầu rút đang mở.
+Ràng buộc:
+- Bốn cột sao kê được phép NULL **chỉ trong lúc insert**: dòng payout phải có trước thì bút toán `payout_hold` mới tham chiếu được (FK), nên cùng transaction đó ghi `payout_hold` rồi điền sao kê ngay. CHECK bốn cột cùng NULL hoặc cùng có, và `statement_seq_from ≤ statement_seq_to`. Ngoài transaction tạo, mọi payout đều có đủ sao kê.
+- CHECK trạng thái: `approved`/`paid` thì có `approved_at` và `approved_by`; `(status = 'paid')` đúng khi có đủ `paid_at`, `paid_by`, `transfer_reference` và `proof_file_id` (**[Chốt]** chứng từ bắt buộc, spec §9); `(status = 'rejected')` đúng khi có đủ `rejected_at`, `rejected_by`, `reject_reason`.
+- Unique index `(partner_id) WHERE status IN ('requested','approved')`: **[Chốt]** mỗi đối tác chỉ có một yêu cầu rút đang mở. Index `(status, id DESC)` và `(partner_id, id DESC)` cho danh sách.
+- Tạo yêu cầu thì ghi `payout_hold` = −amount trong cùng transaction; từ chối thì ghi `payout_reversal` = +amount. `paid` không ghi bút toán nào (tiền đã rời `available` từ lúc giữ). Đối tác bị đình chỉ không tạo được payout mới.
 
 ---
 
@@ -429,7 +458,14 @@ Email không có bảng riêng, chạy qua job River (outbox) như plan 1.
 | Thanh toán không bị ghi hai lần | `payment_events.dedupe_key UNIQUE`, `payments.provider_order_code UNIQUE` |
 | Mỗi booking chỉ giải phóng tiền một lần | unique index `(booking_id, kind, bucket)` (theo các kind của booking) trên `ledger_entries` |
 | Payout không giữ hoặc hoàn tiền hai lần | unique index `(payout_id, kind)` |
+| Bút toán payout thuộc đúng đối tác | FK kép `(payout_id, partner_id) → payouts(id, partner_id)` |
+| Dấu và ngăn của `payout_hold`, `payout_reversal`, `adjustment` | `CHECK` trên `ledger_entries` (mục 8) |
 | Sao kê không lọt bút toán | `ledger_entries.seq` liên tục theo đối tác, cấp khi giữ khóa |
+| Sao kê `opening + Σ = closing` | sao kê đi theo `seq`: kỳ sau bắt đầu ngay sau `statement_seq_to` của payout trước, nên không bút toán `available` nào nằm ở hai sao kê hay bị lọt. `opening_available` + tổng các dòng ngăn `available` trong khoảng `seq` = `closing_available` (app kiểm tra, có test; `ledger.VerifyAll` trong job đối soát kiểm tra `available_after` của từng dòng) |
+| Payout `paid` có chứng từ | `CHECK` trên `payouts` (`transfer_reference` và `proof_file_id`) |
+| Tên chủ tài khoản đúng dạng in hoa không dấu | `CHECK ~ '^[A-Z]+( [A-Z]+)*$'` trên `partner_bank_accounts`, `payouts`, `refunds`, `customer_refund_accounts` |
+| `needs_review` đi đúng thứ tự Đã xem → Hoàn thành | `CHECK` trên `payments.review_*` |
+| Mỗi ngày một kết quả đối soát | `payment_reconciliations.run_date UNIQUE` |
 | Mỗi booking tối đa một khoản hoàn | unique index partial trên `refunds` |
 | Dữ liệu không bị gắn nhầm đối tác | khóa ngoại kép (mục 1.2) |
 | Không bán ghế cho chuyến đã hủy hoặc đã chạy | điều kiện `status` và `departure_at` trong lệnh UPDATE giữ ghế |
