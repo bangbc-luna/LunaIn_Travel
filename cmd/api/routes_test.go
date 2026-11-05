@@ -206,6 +206,7 @@ var adminRoutes = []route{
 	{"GET /v1/admin/bookings", "/v1/admin/bookings"},
 	{"GET /v1/admin/bookings/{id}", "/v1/admin/bookings/" + uuid.Nil.String()},
 	{"POST /v1/admin/bookings/{id}/cancel", "/v1/admin/bookings/" + uuid.Nil.String() + "/cancel"},
+	{"POST /v1/admin/ride-trips/{id}/cancel", "/v1/admin/ride-trips/" + uuid.Nil.String() + "/cancel"},
 	{"GET /v1/admin/payouts", "/v1/admin/payouts"},
 	{"GET /v1/admin/payouts/{id}", "/v1/admin/payouts/" + uuid.Nil.String()},
 	{"POST /v1/admin/payouts/{id}/approve", "/v1/admin/payouts/" + uuid.Nil.String() + "/approve"},

@@ -248,7 +248,19 @@ func (s *Service) load(ctx context.Context, row store.GetBookingDetailRow, aud a
 		v.CommissionRateBps, v.CommissionAmount = &rate, &amount
 	}
 	// The same predicates as CancelByCustomer and Reschedule.
-	v.CanCancel = canCancel(b, s.clock.Now())
+	if b.ServiceType == serviceTypeRide {
+		rows, err := q.ListCheckoutBookings(ctx, b.CheckoutID)
+		if err != nil {
+			return v, fmt.Errorf("list checkout bookings: %w", err)
+		}
+		legs := make([]store.Booking, len(rows))
+		for i, r := range rows {
+			legs[i] = r.Booking
+		}
+		v.CanCancel = rideCancelBlock(legs, s.clock.Now(), true) == nil
+	} else {
+		v.CanCancel = canCancel(b, s.clock.Now())
+	}
 	if b.Status == StatusConfirmed && b.ServiceType == serviceTypeAttraction {
 		cfg, err := s.settings.Get(ctx)
 		if err != nil {

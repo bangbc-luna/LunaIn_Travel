@@ -261,3 +261,20 @@ SELECT b.id FROM bookings b
 JOIN booking_ride_details d ON d.booking_id = b.id
 WHERE b.checkout_id = @checkout_id AND b.id <> @booking_id
 ORDER BY b.id;
+
+-- Checkouts holding a confirmed booking on a trip, unlocked
+-- (booking_ride_details_trip_idx): the checkouts an admin trip cancel
+-- affects. Re-read under the trip lock, which every status change of a
+-- pending or confirmed ride booking but check-in holds.
+-- name: ListTripCheckouts :many
+SELECT DISTINCT b.checkout_id FROM bookings b
+JOIN booking_ride_details d ON d.booking_id = b.id
+WHERE d.trip_id = @trip_id AND b.status = 'confirmed'
+ORDER BY b.checkout_id;
+
+-- The ride bookings of these checkouts with their trips, unlocked.
+-- name: ListCheckoutsRideBookings :many
+SELECT b.id, b.checkout_id, d.trip_id FROM bookings b
+JOIN booking_ride_details d ON d.booking_id = b.id
+WHERE b.checkout_id = ANY(@checkout_ids::uuid[])
+ORDER BY b.id;

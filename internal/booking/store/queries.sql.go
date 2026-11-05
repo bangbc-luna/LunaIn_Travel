@@ -869,6 +869,40 @@ func (q *Queries) ListCheckoutRideTrips(ctx context.Context, checkoutID uuid.UUI
 	return items, nil
 }
 
+const listCheckoutsRideBookings = `-- name: ListCheckoutsRideBookings :many
+SELECT b.id, b.checkout_id, d.trip_id FROM bookings b
+JOIN booking_ride_details d ON d.booking_id = b.id
+WHERE b.checkout_id = ANY($1::uuid[])
+ORDER BY b.id
+`
+
+type ListCheckoutsRideBookingsRow struct {
+	ID         uuid.UUID
+	CheckoutID uuid.UUID
+	TripID     uuid.UUID
+}
+
+// The ride bookings of these checkouts with their trips, unlocked.
+func (q *Queries) ListCheckoutsRideBookings(ctx context.Context, checkoutIds []uuid.UUID) ([]ListCheckoutsRideBookingsRow, error) {
+	rows, err := q.db.Query(ctx, listCheckoutsRideBookings, checkoutIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListCheckoutsRideBookingsRow
+	for rows.Next() {
+		var i ListCheckoutsRideBookingsRow
+		if err := rows.Scan(&i.ID, &i.CheckoutID, &i.TripID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listHoldsToRelease = `-- name: ListHoldsToRelease :many
 SELECT id, checkout_id FROM bookings
 WHERE status = 'pending_payment' AND hold_release_at <= $1::timestamptz
@@ -1048,6 +1082,37 @@ func (q *Queries) ListStatusHistory(ctx context.Context, bookingID uuid.UUID) ([
 			return nil, err
 		}
 		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listTripCheckouts = `-- name: ListTripCheckouts :many
+SELECT DISTINCT b.checkout_id FROM bookings b
+JOIN booking_ride_details d ON d.booking_id = b.id
+WHERE d.trip_id = $1 AND b.status = 'confirmed'
+ORDER BY b.checkout_id
+`
+
+// Checkouts holding a confirmed booking on a trip, unlocked
+// (booking_ride_details_trip_idx): the checkouts an admin trip cancel
+// affects. Re-read under the trip lock, which every status change of a
+// pending or confirmed ride booking but check-in holds.
+func (q *Queries) ListTripCheckouts(ctx context.Context, tripID uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listTripCheckouts, tripID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var checkout_id uuid.UUID
+		if err := rows.Scan(&checkout_id); err != nil {
+			return nil, err
+		}
+		items = append(items, checkout_id)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

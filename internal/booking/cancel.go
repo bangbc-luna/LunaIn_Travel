@@ -121,10 +121,9 @@ func (s *Service) CancelByAdmin(ctx context.Context, actor, bookingID uuid.UUID,
 		return BookingView{}, httpx.NewError(ErrInvalidCancel.Status, ErrInvalidCancel.Code,
 			"mode phải là force_majeure hoặc policy")
 	}
-	reason = strings.TrimSpace(reason)
-	if n := utf8.RuneCountInString(reason); n < 1 || n > maxCancelReason || strings.ContainsFunc(reason, unicode.IsControl) {
-		return BookingView{}, httpx.NewError(ErrInvalidCancel.Status, ErrInvalidCancel.Code,
-			fmt.Sprintf("Lý do hủy phải có từ 1 đến %d ký tự", maxCancelReason))
+	reason, err := normalizeAdminReason(reason)
+	if err != nil {
+		return BookingView{}, err
 	}
 	c.reason = &reason
 	if err := s.cancel(ctx, bookingID, nil, c); err != nil {
@@ -137,16 +136,24 @@ func (s *Service) CancelByAdmin(ctx context.Context, actor, bookingID uuid.UUID,
 	return s.load(ctx, row, forAdmin)
 }
 
+// normalizeAdminReason trims an admin cancellation reason, which must have
+// 1..500 characters and no control character (ErrInvalidCancel).
+func normalizeAdminReason(reason string) (string, error) {
+	reason = strings.TrimSpace(reason)
+	if n := utf8.RuneCountInString(reason); n < 1 || n > maxCancelReason || strings.ContainsFunc(reason, unicode.IsControl) {
+		return "", httpx.NewError(ErrInvalidCancel.Status, ErrInvalidCancel.Code,
+			fmt.Sprintf("Lý do hủy phải có từ 1 đến %d ký tự", maxCancelReason))
+	}
+	return reason, nil
+}
+
 // cancel runs one cancellation in a tx. owner, when set, must own the
-// booking (else ErrBookingNotFound).
+// booking (else ErrBookingNotFound). A ride booking goes to
+// cancelRideCheckout (both legs of a round trip together).
 //
 // Lock order (DB §1.1): the customer's refund account (a users child) is
 // saved first, then the checkout and the booking are locked FOR UPDATE and
-// the state re-checked; the refund row (FK to the payment) comes before the
-// ledger postings, which lock partner_balances last. In one tx: booking
-// cancelled + history, refund (if > 0) and ledger.PostRefund, the
-// commission waiver (force majeure), ledger.Release at once (the booking's
-// pending returns to 0), the audit row (admin) and the customer email.
+// the state re-checked, then cancelLocked does the rest.
 func (s *Service) cancel(ctx context.Context, bookingID uuid.UUID, owner *uuid.UUID, c cancellation) error {
 	b, err := store.New(s.pool).GetBooking(ctx, bookingID)
 	if errors.Is(err, pgx.ErrNoRows) || (err == nil && owner != nil && b.CustomerID != *owner) {
@@ -154,6 +161,9 @@ func (s *Service) cancel(ctx context.Context, bookingID uuid.UUID, owner *uuid.U
 	}
 	if err != nil {
 		return fmt.Errorf("get booking: %w", err)
+	}
+	if b.ServiceType == serviceTypeRide {
+		return s.cancelRideCheckout(ctx, bookingID, owner, c)
 	}
 	// Ownership (404) first, then the bank account (422), then the state (409).
 	if c.bank != nil {
@@ -185,61 +195,87 @@ func (s *Service) cancel(ctx context.Context, bookingID uuid.UUID, owner *uuid.U
 		if err := cancelBlock(b, now); err != nil {
 			return err
 		}
-		refund := b.GrossAmount
-		if !c.forceMajeure {
-			if refund, err = policyRefund(b, now); err != nil {
-				return err
-			}
-		}
-
-		if err := q.CancelBooking(ctx, store.CancelBookingParams{
-			Now: now, CancelKind: c.kind, CancelReason: c.reason, CancelledBy: &c.actor, ID: b.ID,
-		}); err != nil {
-			return fmt.Errorf("cancel booking: %w", err)
-		}
-		if err := insertHistory(ctx, q, b, StatusCancelled, c.actorKind, &c.actor, c.reason, now); err != nil {
-			return err
-		}
-		var r *payment.Refund
-		if refund > 0 {
-			// Refunded against the payment that confirmed the checkout.
-			if co.PaidPaymentID == nil {
-				return fmt.Errorf("booking: confirmed booking %s has no paid checkout", b.ID)
-			}
-			id := b.ID
-			created, err := s.payments.CreateRefund(ctx, tx, payment.RefundInput{
-				PaymentID: *co.PaidPaymentID, CheckoutID: co.ID, CustomerID: co.CustomerID,
-				BookingID: &id, Amount: refund, Reason: c.refundReason,
-			})
-			if err != nil {
-				return err
-			}
-			r = &created
-		}
-		if err := s.ledger.PostRefund(ctx, tx, b.ID, b.PartnerID, refund); err != nil {
-			return fmt.Errorf("post refund: %w", err)
-		}
-		if c.forceMajeure {
-			if err := s.ledger.PostCommissionWaiver(ctx, tx, b.ID, b.PartnerID, b.ServiceType, b.CommissionAmount); err != nil {
-				return fmt.Errorf("post commission waiver: %w", err)
-			}
-		}
-		if err := s.ledger.Release(ctx, tx, b.ID); err != nil {
-			return fmt.Errorf("release: %w", err)
-		}
-		if c.actorKind == actorAdmin {
-			id := b.ID
-			if err := audit.Record(ctx, tx, now, audit.Entry{
-				ActorUserID: c.actor, Action: auditActionCancel, TargetKind: auditKindBooking, TargetID: &id,
-				Before: map[string]any{"status": b.Status},
-				After:  map[string]any{"status": StatusCancelled, "cancel_kind": c.kind, "refund_amount": refund},
-				Reason: *c.reason,
-			}); err != nil {
-				return err
-			}
-		}
-		return s.enqueueEmail(ctx, tx, cancelEmail(b, r))
+		_, err = s.cancelLocked(ctx, tx, co, b, c, now)
+		return err
 	})
+}
+
+// cancelLocked cancels one confirmed booking whose checkout (and, for a ride,
+// trips) and booking rows the caller's tx already holds FOR UPDATE, after the
+// caller re-checked that it may be cancelled, and returns the amount
+// refunded. The refund is 100% in force majeure, else the policy snapshot
+// against the booking's own original_service_start_at. In the tx: booking
+// cancelled + history, refund (if > 0) against the payment that confirmed the
+// checkout and ledger.PostRefund, the commission waiver (force majeure),
+// ledger.Release at once (the booking's pending returns to 0), the seats of a
+// ride booking back to its trip, the audit row (admin) and the customer
+// email. The refund row (FK to the payment) comes before the ledger
+// postings, which lock partner_balances last (DB §1.1).
+func (s *Service) cancelLocked(ctx context.Context, tx pgx.Tx, co store.Checkout, b store.Booking, c cancellation, now time.Time) (int64, error) {
+	q := store.New(tx)
+	refund := b.GrossAmount
+	if !c.forceMajeure {
+		var err error
+		if refund, err = policyRefund(b, now); err != nil {
+			return 0, err
+		}
+	}
+
+	if err := q.CancelBooking(ctx, store.CancelBookingParams{
+		Now: now, CancelKind: c.kind, CancelReason: c.reason, CancelledBy: &c.actor, ID: b.ID,
+	}); err != nil {
+		return 0, fmt.Errorf("cancel booking: %w", err)
+	}
+	if err := insertHistory(ctx, q, b, StatusCancelled, c.actorKind, &c.actor, c.reason, now); err != nil {
+		return 0, err
+	}
+	var r *payment.Refund
+	if refund > 0 {
+		// Refunded against the payment that confirmed the checkout.
+		if co.PaidPaymentID == nil {
+			return 0, fmt.Errorf("booking: confirmed booking %s has no paid checkout", b.ID)
+		}
+		id := b.ID
+		created, err := s.payments.CreateRefund(ctx, tx, payment.RefundInput{
+			PaymentID: *co.PaidPaymentID, CheckoutID: co.ID, CustomerID: co.CustomerID,
+			BookingID: &id, Amount: refund, Reason: c.refundReason,
+		})
+		if err != nil {
+			return 0, err
+		}
+		r = &created
+	}
+	if err := s.ledger.PostRefund(ctx, tx, b.ID, b.PartnerID, refund); err != nil {
+		return 0, fmt.Errorf("post refund: %w", err)
+	}
+	if c.forceMajeure {
+		if err := s.ledger.PostCommissionWaiver(ctx, tx, b.ID, b.PartnerID, b.ServiceType, b.CommissionAmount); err != nil {
+			return 0, fmt.Errorf("post commission waiver: %w", err)
+		}
+	}
+	if err := s.ledger.Release(ctx, tx, b.ID); err != nil {
+		return 0, fmt.Errorf("release: %w", err)
+	}
+	// A ride booking's seats go back to its trip (the caller holds the trip
+	// lock); nothing for an attraction.
+	if err := s.releaseRideSeats(ctx, tx, b); err != nil {
+		return 0, err
+	}
+	if c.actorKind == actorAdmin {
+		id := b.ID
+		if err := audit.Record(ctx, tx, now, audit.Entry{
+			ActorUserID: c.actor, Action: auditActionCancel, TargetKind: auditKindBooking, TargetID: &id,
+			Before: map[string]any{"status": b.Status},
+			After:  map[string]any{"status": StatusCancelled, "cancel_kind": c.kind, "refund_amount": refund},
+			Reason: *c.reason,
+		}); err != nil {
+			return 0, err
+		}
+	}
+	if err := s.enqueueEmail(ctx, tx, cancelEmail(b, r)); err != nil {
+		return 0, err
+	}
+	return refund, nil
 }
 
 // policyRefund is MulBps(gross, RefundBps(snapshot, original_service_start_at
