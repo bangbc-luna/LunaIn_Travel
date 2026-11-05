@@ -143,9 +143,11 @@ func (p *PickupPointPatch) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-// RentalDetail is the store (nil until set) and the pickup points of a listing.
+// RentalDetail is the store (nil until set), the vehicle models and the
+// pickup points of a listing.
 type RentalDetail struct {
 	Store        *RentalStore  `json:"store"`
+	Models       []RentalModel `json:"models"`
 	PickupPoints []PickupPoint `json:"pickup_points"`
 }
 
@@ -278,8 +280,8 @@ func (s *Service) SetRentalStore(ctx context.Context, partnerID, actor, listingI
 	return out, nil
 }
 
-// GetRental returns the store and every pickup point (inactive included) of
-// the partner's rental listing.
+// GetRental returns the store, every vehicle model and every pickup point
+// (inactive included) of the partner's rental listing.
 func (s *Service) GetRental(ctx context.Context, partnerID, listingID uuid.UUID) (RentalDetail, error) {
 	l, err := s.Get(ctx, partnerID, listingID)
 	if err != nil {
@@ -291,8 +293,9 @@ func (s *Service) GetRental(ctx context.Context, partnerID, listingID uuid.UUID)
 	return s.rentalDetail(ctx, s.pool, listingID, true)
 }
 
-// RentalDetail reads the store and the pickup points (oldest first) of a
-// listing; inactive points only when includeInactive is set.
+// RentalDetail reads the store, the vehicle models and the pickup points
+// (oldest first) of a listing; inactive models and points only when
+// includeInactive is set.
 func (s *Service) RentalDetail(ctx context.Context, tx pgx.Tx, listingID uuid.UUID, includeInactive bool) (RentalDetail, error) {
 	return s.rentalDetail(ctx, tx, listingID, includeInactive)
 }
@@ -307,6 +310,9 @@ func (s *Service) rentalDetail(ctx context.Context, dbtx store.DBTX, listingID u
 		out.Store = &st
 	case !errors.Is(err, pgx.ErrNoRows):
 		return out, fmt.Errorf("get rental store: %w", err)
+	}
+	if out.Models, err = listRentalModels(ctx, dbtx, listingID, includeInactive); err != nil {
+		return out, err
 	}
 	rows, err := q.ListRentalPickupPoints(ctx, store.ListRentalPickupPointsParams{ListingID: listingID, IncludeInactive: includeInactive})
 	if err != nil {

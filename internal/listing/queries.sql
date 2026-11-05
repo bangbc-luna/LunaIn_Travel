@@ -557,3 +557,33 @@ SELECT count(*) FROM rental_pickup_points WHERE listing_id = @listing_id AND act
 
 -- name: CountRentableRentalModels :one
 SELECT count(*) FROM rental_vehicle_models WHERE listing_id = @listing_id AND active AND quantity > 0;
+
+-- name: InsertRentalModel :one
+INSERT INTO rental_vehicle_models (id, listing_id, vehicle_kind, name, model_year, seats, included_items, tags,
+    price_per_day, quantity, cover_file_id, active, created_at, updated_at)
+VALUES (@id, @listing_id, @vehicle_kind, @name, @model_year, @seats, sqlc.narg(included_items), @tags::text[],
+    @price_per_day, @quantity, sqlc.narg(cover_file_id), true, @now, @now)
+RETURNING *;
+
+-- name: LockRentalModel :one
+SELECT * FROM rental_vehicle_models WHERE id = @id AND listing_id = @listing_id FOR UPDATE;
+
+-- name: UpdateRentalModel :one
+UPDATE rental_vehicle_models
+SET name = @name, model_year = @model_year, seats = @seats, included_items = sqlc.narg(included_items),
+    tags = @tags::text[], price_per_day = @price_per_day, quantity = @quantity,
+    cover_file_id = sqlc.narg(cover_file_id), active = @active, updated_at = @now
+WHERE id = @id
+RETURNING *;
+
+-- name: ListRentalModels :many
+SELECT * FROM rental_vehicle_models
+WHERE listing_id = @listing_id AND (@include_inactive::bool OR active)
+ORDER BY created_at, id;
+
+-- name: GetRentalModelListingID :one
+SELECT listing_id FROM rental_vehicle_models WHERE id = @id;
+
+-- Lock order (DB §1.1): id ascending.
+-- name: LockRentalModels :many
+SELECT * FROM rental_vehicle_models WHERE id = ANY(@ids::uuid[]) ORDER BY id FOR UPDATE;

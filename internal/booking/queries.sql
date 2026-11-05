@@ -308,3 +308,20 @@ ORDER BY b.id;
 
 -- name: GetRentalDetails :one
 SELECT * FROM booking_rental_details WHERE booking_id = @booking_id;
+
+-- Peak number of bookings holding a vehicle of each model at the same instant
+-- inside the window [from, to) (to NULL: open-ended). Each holding period is
+-- clipped to the window; the peak is always reached at the lower bound of a
+-- clipped period, so counting the periods that contain each lower bound is
+-- enough. Models without holds are absent. Callers hold the models FOR UPDATE.
+-- name: PeakRentalHolds :many
+WITH win AS (SELECT tstzrange(@window_from::timestamptz, sqlc.narg(window_to)::timestamptz, '[)') AS r),
+held AS (
+  SELECT d.vehicle_model_id AS m, d.period * win.r AS p
+  FROM booking_rental_details d, win
+  WHERE d.vehicle_model_id = ANY(@model_ids::uuid[]) AND d.holds_vehicle
+    AND (d.hold_until IS NULL OR d.hold_until > @now::timestamptz) AND d.booking_id <> @except_booking_id::uuid
+    AND d.period && win.r)
+SELECT h1.m AS vehicle_model_id,
+       max((SELECT count(*) FROM held h2 WHERE h2.m = h1.m AND h2.p @> lower(h1.p)))::int AS peak
+FROM held h1 GROUP BY h1.m;

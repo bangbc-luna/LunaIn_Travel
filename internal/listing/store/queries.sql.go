@@ -434,6 +434,17 @@ func (q *Queries) GetPublicListingBySlug(ctx context.Context, slug string) (GetP
 	return i, err
 }
 
+const getRentalModelListingID = `-- name: GetRentalModelListingID :one
+SELECT listing_id FROM rental_vehicle_models WHERE id = $1
+`
+
+func (q *Queries) GetRentalModelListingID(ctx context.Context, id uuid.UUID) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, getRentalModelListingID, id)
+	var listing_id uuid.UUID
+	err := row.Scan(&listing_id)
+	return listing_id, err
+}
+
 const getRentalPickupPoint = `-- name: GetRentalPickupPoint :one
 SELECT id, listing_id, name, address, province_code, ward_code, delivery_fee, active, created_at, updated_at FROM rental_pickup_points WHERE id = $1 AND listing_id = $2
 `
@@ -881,6 +892,64 @@ func (q *Queries) InsertOneOffTrip(ctx context.Context, arg InsertOneOffTripPara
 		&i.CancelledAt,
 		&i.CancelledBy,
 		&i.CancelSource,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const insertRentalModel = `-- name: InsertRentalModel :one
+INSERT INTO rental_vehicle_models (id, listing_id, vehicle_kind, name, model_year, seats, included_items, tags,
+    price_per_day, quantity, cover_file_id, active, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8::text[],
+    $9, $10, $11, true, $12, $12)
+RETURNING id, listing_id, vehicle_kind, name, model_year, seats, included_items, tags, price_per_day, quantity, cover_file_id, active, created_at, updated_at
+`
+
+type InsertRentalModelParams struct {
+	ID            uuid.UUID
+	ListingID     uuid.UUID
+	VehicleKind   string
+	Name          string
+	ModelYear     int16
+	Seats         int32
+	IncludedItems *string
+	Tags          []string
+	PricePerDay   int64
+	Quantity      int32
+	CoverFileID   *uuid.UUID
+	Now           time.Time
+}
+
+func (q *Queries) InsertRentalModel(ctx context.Context, arg InsertRentalModelParams) (RentalVehicleModel, error) {
+	row := q.db.QueryRow(ctx, insertRentalModel,
+		arg.ID,
+		arg.ListingID,
+		arg.VehicleKind,
+		arg.Name,
+		arg.ModelYear,
+		arg.Seats,
+		arg.IncludedItems,
+		arg.Tags,
+		arg.PricePerDay,
+		arg.Quantity,
+		arg.CoverFileID,
+		arg.Now,
+	)
+	var i RentalVehicleModel
+	err := row.Scan(
+		&i.ID,
+		&i.ListingID,
+		&i.VehicleKind,
+		&i.Name,
+		&i.ModelYear,
+		&i.Seats,
+		&i.IncludedItems,
+		&i.Tags,
+		&i.PricePerDay,
+		&i.Quantity,
+		&i.CoverFileID,
+		&i.Active,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -1609,6 +1678,52 @@ func (q *Queries) ListRecentAuditLog(ctx context.Context, listingID uuid.UUID) (
 	return items, nil
 }
 
+const listRentalModels = `-- name: ListRentalModels :many
+SELECT id, listing_id, vehicle_kind, name, model_year, seats, included_items, tags, price_per_day, quantity, cover_file_id, active, created_at, updated_at FROM rental_vehicle_models
+WHERE listing_id = $1 AND ($2::bool OR active)
+ORDER BY created_at, id
+`
+
+type ListRentalModelsParams struct {
+	ListingID       uuid.UUID
+	IncludeInactive bool
+}
+
+func (q *Queries) ListRentalModels(ctx context.Context, arg ListRentalModelsParams) ([]RentalVehicleModel, error) {
+	rows, err := q.db.Query(ctx, listRentalModels, arg.ListingID, arg.IncludeInactive)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []RentalVehicleModel
+	for rows.Next() {
+		var i RentalVehicleModel
+		if err := rows.Scan(
+			&i.ID,
+			&i.ListingID,
+			&i.VehicleKind,
+			&i.Name,
+			&i.ModelYear,
+			&i.Seats,
+			&i.IncludedItems,
+			&i.Tags,
+			&i.PricePerDay,
+			&i.Quantity,
+			&i.CoverFileID,
+			&i.Active,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listRentalPickupPoints = `-- name: ListRentalPickupPoints :many
 SELECT id, listing_id, name, address, province_code, ward_code, delivery_fee, active, created_at, updated_at FROM rental_pickup_points
 WHERE listing_id = $1 AND ($2::bool OR active)
@@ -1947,6 +2062,77 @@ func (q *Queries) LockOwnedListing(ctx context.Context, arg LockOwnedListingPara
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const lockRentalModel = `-- name: LockRentalModel :one
+SELECT id, listing_id, vehicle_kind, name, model_year, seats, included_items, tags, price_per_day, quantity, cover_file_id, active, created_at, updated_at FROM rental_vehicle_models WHERE id = $1 AND listing_id = $2 FOR UPDATE
+`
+
+type LockRentalModelParams struct {
+	ID        uuid.UUID
+	ListingID uuid.UUID
+}
+
+func (q *Queries) LockRentalModel(ctx context.Context, arg LockRentalModelParams) (RentalVehicleModel, error) {
+	row := q.db.QueryRow(ctx, lockRentalModel, arg.ID, arg.ListingID)
+	var i RentalVehicleModel
+	err := row.Scan(
+		&i.ID,
+		&i.ListingID,
+		&i.VehicleKind,
+		&i.Name,
+		&i.ModelYear,
+		&i.Seats,
+		&i.IncludedItems,
+		&i.Tags,
+		&i.PricePerDay,
+		&i.Quantity,
+		&i.CoverFileID,
+		&i.Active,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const lockRentalModels = `-- name: LockRentalModels :many
+SELECT id, listing_id, vehicle_kind, name, model_year, seats, included_items, tags, price_per_day, quantity, cover_file_id, active, created_at, updated_at FROM rental_vehicle_models WHERE id = ANY($1::uuid[]) ORDER BY id FOR UPDATE
+`
+
+// Lock order (DB §1.1): id ascending.
+func (q *Queries) LockRentalModels(ctx context.Context, ids []uuid.UUID) ([]RentalVehicleModel, error) {
+	rows, err := q.db.Query(ctx, lockRentalModels, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []RentalVehicleModel
+	for rows.Next() {
+		var i RentalVehicleModel
+		if err := rows.Scan(
+			&i.ID,
+			&i.ListingID,
+			&i.VehicleKind,
+			&i.Name,
+			&i.ModelYear,
+			&i.Seats,
+			&i.IncludedItems,
+			&i.Tags,
+			&i.PricePerDay,
+			&i.Quantity,
+			&i.CoverFileID,
+			&i.Active,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const lockRentalPickupPoint = `-- name: LockRentalPickupPoint :one
@@ -2816,6 +3002,63 @@ func (q *Queries) UpdateOpenScheduleTrips(ctx context.Context, arg UpdateOpenSch
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const updateRentalModel = `-- name: UpdateRentalModel :one
+UPDATE rental_vehicle_models
+SET name = $1, model_year = $2, seats = $3, included_items = $4,
+    tags = $5::text[], price_per_day = $6, quantity = $7,
+    cover_file_id = $8, active = $9, updated_at = $10
+WHERE id = $11
+RETURNING id, listing_id, vehicle_kind, name, model_year, seats, included_items, tags, price_per_day, quantity, cover_file_id, active, created_at, updated_at
+`
+
+type UpdateRentalModelParams struct {
+	Name          string
+	ModelYear     int16
+	Seats         int32
+	IncludedItems *string
+	Tags          []string
+	PricePerDay   int64
+	Quantity      int32
+	CoverFileID   *uuid.UUID
+	Active        bool
+	Now           time.Time
+	ID            uuid.UUID
+}
+
+func (q *Queries) UpdateRentalModel(ctx context.Context, arg UpdateRentalModelParams) (RentalVehicleModel, error) {
+	row := q.db.QueryRow(ctx, updateRentalModel,
+		arg.Name,
+		arg.ModelYear,
+		arg.Seats,
+		arg.IncludedItems,
+		arg.Tags,
+		arg.PricePerDay,
+		arg.Quantity,
+		arg.CoverFileID,
+		arg.Active,
+		arg.Now,
+		arg.ID,
+	)
+	var i RentalVehicleModel
+	err := row.Scan(
+		&i.ID,
+		&i.ListingID,
+		&i.VehicleKind,
+		&i.Name,
+		&i.ModelYear,
+		&i.Seats,
+		&i.IncludedItems,
+		&i.Tags,
+		&i.PricePerDay,
+		&i.Quantity,
+		&i.CoverFileID,
+		&i.Active,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }
 
 const updateRentalPickupPoint = `-- name: UpdateRentalPickupPoint :one

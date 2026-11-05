@@ -253,6 +253,8 @@ var partnerRoutes = []route{
 	{"PUT /v1/partner/listings/{id}/rental-store", "/v1/partner/listings/" + uuid.Nil.String() + "/rental-store"},
 	{"POST /v1/partner/listings/{id}/rental-pickup-points", "/v1/partner/listings/" + uuid.Nil.String() + "/rental-pickup-points"},
 	{"PATCH /v1/partner/listings/{id}/rental-pickup-points/{pointID}", "/v1/partner/listings/" + uuid.Nil.String() + "/rental-pickup-points/" + uuid.Nil.String()},
+	{"POST /v1/partner/listings/{id}/rental-models", "/v1/partner/listings/" + uuid.Nil.String() + "/rental-models"},
+	{"PATCH /v1/partner/listings/{id}/rental-models/{modelID}", "/v1/partner/listings/" + uuid.Nil.String() + "/rental-models/" + uuid.Nil.String()},
 	{"GET /v1/partner/listings/{id}/ride-trips", "/v1/partner/listings/" + uuid.Nil.String() + "/ride-trips"},
 	{"POST /v1/partner/listings/{id}/ride-trips", "/v1/partner/listings/" + uuid.Nil.String() + "/ride-trips"},
 	{"PATCH /v1/partner/listings/{id}/ride-trips/{tripID}", "/v1/partner/listings/" + uuid.Nil.String() + "/ride-trips/" + uuid.Nil.String()},
