@@ -526,3 +526,36 @@ internal/booking/{queries.sql,create.go,confirm.go,checkin.go,cancel.go,reschedu
 - Admin duyệt payout, đánh dấu đã chuyển khoản refund, đối soát PayOS hằng ngày, sao kê (plan 5).
 - Xe tuyến, xe bao chuyến, thuê xe (plan 6–8).
 - Review, khiếu nại, thông báo trong web (plan 9). Plan này chỉ gửi email qua outbox.
+
+---
+
+## Phụ lục: Hướng dẫn tạo key PayOS
+
+PayOS **không có sandbox riêng**: mọi giao dịch thử là giao dịch thật, nên hãy thử với số tiền nhỏ (vài nghìn đồng). Khi chưa có key, hệ thống chạy với `PAYMENT_PROVIDER=fake` và route chỉ dùng khi dev `POST /v1/dev/payments/{order_code}/simulate-paid`. Route này chạy đúng luồng webhook thật và bị chặn hoàn toàn khi `APP_ENV=prod`.
+
+**Các bước lấy key:**
+1. Đăng ký tại https://my.payos.vn/login. Bấm **Đăng ký**, điền thông tin, bấm **Tạo tài khoản**, rồi bấm **Xác thực** trong email PayOS gửi về.
+2. Xác thực tổ chức hoặc cá nhân (cần CCCD) theo hướng dẫn trên my.payos.vn.
+3. Liên kết tài khoản ngân hàng nhận tiền.
+4. Ở màn hình chính, chọn **Tạo kênh thanh toán** và điền thông tin kênh.
+5. Mở kênh vừa tạo để lấy **Client ID**, **API Key**, **Checksum Key**.
+6. Trong cài đặt kênh, khai báo **Webhook URL** là `https://<domain-backend>/v1/payments/payos/webhook`. URL này phải truy cập được từ internet. Khi chạy ở máy thì dùng ngrok hoặc Cloudflare Tunnel. PayOS sẽ gửi một webhook thử, và backend trả 200 cho `orderCode` không tồn tại.
+
+**Điền vào `.env`** (không commit, `.env` đã được git bỏ qua):
+```
+PAYMENT_PROVIDER=payos
+PAYOS_CLIENT_ID=...
+PAYOS_API_KEY=...
+PAYOS_CHECKSUM_KEY=...
+PAYOS_BASE_URL=https://api-merchant.payos.vn
+PAYOS_RETURN_URL=https://<frontend>/thanh-toan/thanh-cong
+PAYOS_CANCEL_URL=https://<frontend>/thanh-toan/huy
+```
+
+**Kiểm tra sau khi có key:**
+1. Đặt một vé giá nhỏ.
+2. Mở `checkout_url` và quét QR chuyển khoản.
+3. Đợi webhook về, booking phải chuyển sang `confirmed`.
+4. `GET /v1/partner/balance` phải thấy tiền ở mục `pending`.
+
+**Nguồn:** [payOS docs](https://payos.vn/docs/), [Môi trường test](https://payos.vn/docs/moi-truong-test/), [Tạo tài khoản](https://payos.vn/docs/huong-dan-su-dung/tao-tai-khoan-payos/), [Webhook](https://payos.vn/docs/du-lieu-tra-ve/webhook/).
