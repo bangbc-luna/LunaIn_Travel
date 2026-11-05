@@ -8,12 +8,15 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/bangbc-luna/lunain-travel/internal/booking"
 	"github.com/bangbc-luna/lunain-travel/internal/catalog"
 	"github.com/bangbc-luna/lunain-travel/internal/files"
 	"github.com/bangbc-luna/lunain-travel/internal/geo"
 	"github.com/bangbc-luna/lunain-travel/internal/identity"
+	"github.com/bangbc-luna/lunain-travel/internal/ledger"
 	"github.com/bangbc-luna/lunain-travel/internal/listing"
 	"github.com/bangbc-luna/lunain-travel/internal/partner"
+	"github.com/bangbc-luna/lunain-travel/internal/payment"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/auth"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/httpx"
 	"github.com/bangbc-luna/lunain-travel/internal/settings"
@@ -31,6 +34,11 @@ type muxDeps struct {
 	Catalog  *catalog.Service
 	Partner  *partner.Service
 	Listing  *listing.Service
+	Ledger   *ledger.Service
+	Payment  *payment.Service
+	Booking  *booking.Service
+	// AppEnv gates the dev-only payment simulation route (never in prod).
+	AppEnv string
 }
 
 // buildMux registers every HTTP route and returns the mux plus every pattern
@@ -48,6 +56,11 @@ func buildMux(d muxDeps) (*http.ServeMux, []string) {
 	d.Listing.PartnerRoutes(rr, d.Issuer, d.Partner.RequireMember())
 	d.Listing.AdminRoutes(rr, d.Issuer)
 	d.Listing.PublicRoutes(rr)
+	d.Ledger.PartnerRoutes(rr, d.Issuer, d.Partner.RequireMember())
+	d.Booking.CustomerRoutes(rr, d.Issuer)
+	d.Booking.PartnerRoutes(rr, d.Issuer, d.Partner.RequireMember())
+	d.Booking.AdminRoutes(rr, d.Issuer)
+	d.Payment.Routes(rr, payment.RouteDeps{Handler: d.Booking, ClientIP: d.ClientIP, AppEnv: d.AppEnv})
 	rr.HandleFunc("GET /healthz", healthz)
 	rr.HandleFunc("GET /readyz", readyz(d.Pool))
 	rr.HandleFunc("/", httpx.NotFound)

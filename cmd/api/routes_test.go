@@ -15,12 +15,15 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 
+	"github.com/bangbc-luna/lunain-travel/internal/booking"
 	"github.com/bangbc-luna/lunain-travel/internal/catalog"
 	"github.com/bangbc-luna/lunain-travel/internal/files"
 	"github.com/bangbc-luna/lunain-travel/internal/geo"
 	"github.com/bangbc-luna/lunain-travel/internal/identity"
+	"github.com/bangbc-luna/lunain-travel/internal/ledger"
 	"github.com/bangbc-luna/lunain-travel/internal/listing"
 	"github.com/bangbc-luna/lunain-travel/internal/partner"
+	"github.com/bangbc-luna/lunain-travel/internal/payment"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/auth"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/clock"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/db"
@@ -46,6 +49,12 @@ type testApp struct {
 // a fixed clock.
 func newTestApp(t *testing.T) *testApp {
 	t.Helper()
+	return newTestAppEnv(t, "test")
+}
+
+// newTestAppEnv is newTestApp with APP_ENV = appEnv (payment.Fake provider).
+func newTestAppEnv(t *testing.T, appEnv string) *testApp {
+	t.Helper()
 	pool := testutil.Postgres(t)
 	clk := &clock.Fixed{T: testNow}
 	issuer := auth.NewIssuer([]byte("test-secret-test-secret-test-secret"), 15*time.Minute, clk)
@@ -61,11 +70,20 @@ func newTestApp(t *testing.T) *testApp {
 	})
 	listingSvc := listing.NewService(listing.Deps{
 		Pool: pool, Clock: clk, Partners: partnerSvc, Catalog: catSvc, Geo: geoSvc, Files: fileSvc,
+		BookingGuard: booking.Guard{},
+	})
+	settingsSvc := settings.NewService(pool, clk)
+	paymentSvc := payment.NewService(pool, clk, payment.NewFake(), nil)
+	ledgerSvc := ledger.NewService(pool, clk)
+	bookingSvc := booking.NewService(booking.Deps{
+		Pool: pool, Clock: clk, Listings: listingSvc, Catalog: catSvc, Settings: settingsSvc,
+		Identity: idSvc, Payments: paymentSvc, Ledger: ledgerSvc,
 	})
 	mux, patterns := buildMux(muxDeps{
 		Pool: pool, Issuer: issuer, ClientIP: httpx.ClientIPFunc(0),
-		Identity: idSvc, Settings: settings.NewService(pool, clk), Files: fileSvc,
+		Identity: idSvc, Settings: settingsSvc, Files: fileSvc,
 		Geo: geoSvc, Catalog: catSvc, Partner: partnerSvc, Listing: listingSvc,
+		Ledger: ledgerSvc, Payment: paymentSvc, Booking: bookingSvc, AppEnv: appEnv,
 	})
 	return &testApp{
 		handler: httpx.Chain(mux, httpx.RequestID, httpx.Recover), issuer: issuer,
@@ -173,6 +191,9 @@ var adminRoutes = []route{
 	{"POST /v1/admin/listings/{id}/reject", "/v1/admin/listings/" + uuid.Nil.String() + "/reject"},
 	{"POST /v1/admin/listings/{id}/hide", "/v1/admin/listings/" + uuid.Nil.String() + "/hide"},
 	{"POST /v1/admin/listings/{id}/unhide", "/v1/admin/listings/" + uuid.Nil.String() + "/unhide"},
+	{"GET /v1/admin/bookings", "/v1/admin/bookings"},
+	{"GET /v1/admin/bookings/{id}", "/v1/admin/bookings/" + uuid.Nil.String()},
+	{"POST /v1/admin/bookings/{id}/cancel", "/v1/admin/bookings/" + uuid.Nil.String() + "/cancel"},
 }
 
 // partnerRoutes lists every /v1/partner/* route, like adminRoutes.
@@ -199,6 +220,10 @@ var partnerRoutes = []route{
 	{"POST /v1/partner/listings/{id}/submit", "/v1/partner/listings/" + uuid.Nil.String() + "/submit"},
 	{"POST /v1/partner/listings/{id}/publish", "/v1/partner/listings/" + uuid.Nil.String() + "/publish"},
 	{"POST /v1/partner/listings/{id}/unpublish", "/v1/partner/listings/" + uuid.Nil.String() + "/unpublish"},
+	{"GET /v1/partner/balance", "/v1/partner/balance"},
+	{"GET /v1/partner/bookings", "/v1/partner/bookings"},
+	{"GET /v1/partner/bookings/{id}", "/v1/partner/bookings/" + uuid.Nil.String()},
+	{"POST /v1/partner/check-ins", "/v1/partner/check-ins"},
 }
 
 // recordedUnder returns the recorded patterns whose path starts with prefix.
@@ -291,4 +316,59 @@ func TestPublicRoutes(t *testing.T) {
 	rec = app.do("GET", "/nope", "")
 	require.Equal(t, http.StatusNotFound, rec.Code)
 	require.Contains(t, rec.Body.String(), `"error"`)
+}
+
+// customerBookingRoutes are the customer-only booking routes.
+var customerBookingRoutes = []route{
+	{"POST /v1/bookings/attraction", "/v1/bookings/attraction"},
+	{"GET /v1/bookings", "/v1/bookings"},
+	{"GET /v1/bookings/{id}", "/v1/bookings/" + uuid.Nil.String()},
+	{"POST /v1/bookings/{id}/pay", "/v1/bookings/" + uuid.Nil.String() + "/pay"},
+	{"POST /v1/bookings/{id}/cancel", "/v1/bookings/" + uuid.Nil.String() + "/cancel"},
+	{"POST /v1/bookings/{id}/reschedule", "/v1/bookings/" + uuid.Nil.String() + "/reschedule"},
+	{"GET /v1/refunds", "/v1/refunds"},
+	{"PUT /v1/refunds/{id}/bank-account", "/v1/refunds/" + uuid.Nil.String() + "/bank-account"},
+	{"GET /v1/customer/refund-account", "/v1/customer/refund-account"},
+	{"PUT /v1/customer/refund-account", "/v1/customer/refund-account"},
+}
+
+func TestCustomerBookingRoutesRequireCustomer(t *testing.T) {
+	app := newTestApp(t)
+	var recorded []string
+	for _, prefix := range []string{"/v1/bookings", "/v1/refunds", "/v1/customer/refund-account"} {
+		recorded = append(recorded, recordedUnder(app.patterns, prefix)...)
+	}
+	sort.Strings(recorded)
+	require.Equal(t, declaredPatterns(customerBookingRoutes), recorded)
+	adminID := app.superAdmin(t)
+	adminTok := app.tokenFor(t, adminID, auth.RoleSuperAdmin)
+	member := app.tokenFor(t, app.partnerMember(t, adminID), auth.RolePartner)
+	customer := app.token(t, auth.RoleCustomer)
+	for _, r := range customerBookingRoutes {
+		t.Run(r.pattern, func(t *testing.T) {
+			m := r.method()
+			requireError(t, app.do(m, r.sample, ""), http.StatusUnauthorized, "unauthorized", "no token")
+			requireError(t, app.do(m, r.sample, member), http.StatusForbidden, "forbidden", "partner member")
+			requireError(t, app.do(m, r.sample, adminTok), http.StatusForbidden, "forbidden", "super_admin")
+			requireAuthorized(t, app.do(m, r.sample, customer), "customer")
+		})
+	}
+}
+
+const simulatePaidRoute = "POST /v1/dev/payments/{order_code}/simulate-paid"
+
+func TestPaymentWebhookIsPublic(t *testing.T) {
+	app := newTestApp(t)
+	require.Contains(t, app.patterns, "POST /v1/payments/payos/webhook")
+	// No token needed: a bad body is rejected by the signature check, not auth.
+	requireError(t, app.do("POST", "/v1/payments/payos/webhook", ""), http.StatusBadRequest, "invalid_signature",
+		"webhook without token")
+}
+
+func TestDevSimulateRoute_FakeOutsideProdOnly(t *testing.T) {
+	require.Contains(t, newTestAppEnv(t, "dev").patterns, simulatePaidRoute)
+	require.Contains(t, newTestAppEnv(t, "test").patterns, simulatePaidRoute)
+	prod := newTestAppEnv(t, "prod")
+	require.NotContains(t, prod.patterns, simulatePaidRoute)
+	require.Equal(t, http.StatusNotFound, prod.do("POST", "/v1/dev/payments/100000/simulate-paid", "").Code)
 }

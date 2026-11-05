@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/caarlos0/env/v11"
 )
@@ -37,8 +38,44 @@ type Config struct {
 	S3SecretKey       string
 	S3UsePathStyle    bool
 	PublicFileBaseURL string
+	// PayOS payment gateway. PaymentProvider is "payos" or "fake".
+	PaymentProvider  string
+	PayOSClientID    string
+	PayOSAPIKey      string
+	PayOSChecksumKey string
+	PayOSBaseURL     string
+	PayOSReturnURL   string
+	PayOSCancelURL   string
 
-	trustedProxyHopsSet bool
+	trustedProxyHopsSet      bool
+	paymentProviderDefaulted bool
+}
+
+// PaymentWarnings returns startup warnings about the payment setup: the fake
+// provider is active, and PayOS variables that are missing when only some of
+// the keys/URLs were provided without an explicit PAYMENT_PROVIDER.
+func (c Config) PaymentWarnings() []string {
+	if c.PaymentProvider != "fake" {
+		return nil
+	}
+	w := []string{"payment provider is FAKE — webhooks signed with a public test key"}
+	var missing []string
+	set := 0
+	for _, f := range []struct{ name, val string }{
+		{"PAYOS_CLIENT_ID", c.PayOSClientID}, {"PAYOS_API_KEY", c.PayOSAPIKey},
+		{"PAYOS_CHECKSUM_KEY", c.PayOSChecksumKey},
+		{"PAYOS_RETURN_URL", c.PayOSReturnURL}, {"PAYOS_CANCEL_URL", c.PayOSCancelURL},
+	} {
+		if f.val == "" {
+			missing = append(missing, f.name)
+		} else {
+			set++
+		}
+	}
+	if c.paymentProviderDefaulted && set > 0 && len(missing) > 0 {
+		w = append(w, "PayOS settings partially configured, falling back to fake; missing: "+strings.Join(missing, ", "))
+	}
+	return w
 }
 
 // rawEnv mirrors the environment; secrets are strings because env would
@@ -63,6 +100,13 @@ type rawEnv struct {
 	S3SecretKey       string `env:"S3_SECRET_KEY"`
 	S3UsePathStyle    bool   `env:"S3_USE_PATH_STYLE" envDefault:"true"`
 	PublicFileBaseURL string `env:"PUBLIC_FILE_BASE_URL"`
+	PaymentProvider   string `env:"PAYMENT_PROVIDER"`
+	PayOSClientID     string `env:"PAYOS_CLIENT_ID"`
+	PayOSAPIKey       string `env:"PAYOS_API_KEY"`
+	PayOSChecksumKey  string `env:"PAYOS_CHECKSUM_KEY"`
+	PayOSBaseURL      string `env:"PAYOS_BASE_URL" envDefault:"https://api-merchant.payos.vn"`
+	PayOSReturnURL    string `env:"PAYOS_RETURN_URL"`
+	PayOSCancelURL    string `env:"PAYOS_CANCEL_URL"`
 }
 
 // Load reads the environment and validates it.
@@ -92,6 +136,26 @@ func Load() (Config, error) {
 		S3SecretKey:       raw.S3SecretKey,
 		S3UsePathStyle:    raw.S3UsePathStyle,
 		PublicFileBaseURL: raw.PublicFileBaseURL,
+
+		PaymentProvider:  raw.PaymentProvider,
+		PayOSClientID:    raw.PayOSClientID,
+		PayOSAPIKey:      raw.PayOSAPIKey,
+		PayOSChecksumKey: raw.PayOSChecksumKey,
+		PayOSBaseURL:     raw.PayOSBaseURL,
+		PayOSReturnURL:   raw.PayOSReturnURL,
+		PayOSCancelURL:   raw.PayOSCancelURL,
+	}
+	cfg.paymentProviderDefaulted = cfg.PaymentProvider == ""
+	if cfg.PaymentProvider == "" {
+		// Unset: use PayOS when fully keyed, otherwise fake outside prod.
+		// In prod, missing keys are reported by validate.
+		hasKeys := cfg.PayOSClientID != "" && cfg.PayOSAPIKey != "" && cfg.PayOSChecksumKey != "" &&
+			cfg.PayOSReturnURL != "" && cfg.PayOSCancelURL != ""
+		if hasKeys || cfg.AppEnv == "prod" {
+			cfg.PaymentProvider = "payos"
+		} else {
+			cfg.PaymentProvider = "fake"
+		}
 	}
 	_, cfg.trustedProxyHopsSet = os.LookupEnv("TRUSTED_PROXY_HOPS")
 	if err := cfg.validate(); err != nil {
@@ -131,6 +195,27 @@ func (c Config) validate() error {
 				return fmt.Errorf("%s is required when APP_ENV=prod", f.name)
 			}
 		}
+	}
+	switch c.PaymentProvider {
+	case "fake":
+		if c.AppEnv == "prod" {
+			return errors.New("PAYMENT_PROVIDER must be payos when APP_ENV=prod")
+		}
+	case "payos":
+		for _, f := range []struct{ name, val string }{
+			{"PAYOS_CLIENT_ID", c.PayOSClientID}, {"PAYOS_API_KEY", c.PayOSAPIKey},
+			{"PAYOS_CHECKSUM_KEY", c.PayOSChecksumKey}, {"PAYOS_BASE_URL", c.PayOSBaseURL},
+			{"PAYOS_RETURN_URL", c.PayOSReturnURL}, {"PAYOS_CANCEL_URL", c.PayOSCancelURL},
+		} {
+			if f.val == "" {
+				return fmt.Errorf("%s is required when PAYMENT_PROVIDER=payos", f.name)
+			}
+		}
+		if c.AppEnv == "prod" && !strings.HasPrefix(c.PayOSBaseURL, "https://") {
+			return errors.New("PAYOS_BASE_URL must start with https:// when APP_ENV=prod")
+		}
+	default:
+		return fmt.Errorf("PAYMENT_PROVIDER must be payos or fake, got %q", c.PaymentProvider)
 	}
 	return nil
 }

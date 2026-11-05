@@ -64,6 +64,126 @@ type AttractionTimeSlot struct {
 	UpdatedAt time.Time
 }
 
+type Booking struct {
+	ID                         uuid.UUID
+	Code                       string
+	CheckoutID                 uuid.UUID
+	CustomerID                 uuid.UUID
+	PartnerID                  uuid.UUID
+	ListingID                  uuid.UUID
+	ServiceType                string
+	BookingMode                string
+	Status                     string
+	ServiceStartAt             time.Time
+	ServiceEndAt               time.Time
+	OriginalServiceStartAt     time.Time
+	GrossAmount                int64
+	CommissionRateBps          int32
+	CommissionAmount           int64
+	CancellationPolicySnapshot []byte
+	ContactName                string
+	ContactPhone               string
+	ContactEmail               string
+	CustomerNote               *string
+	HoldExpiresAt              *time.Time
+	HoldReleaseAt              *time.Time
+	ResponseDueAt              *time.Time
+	PaymentDueAt               *time.Time
+	AcceptedAt                 *time.Time
+	RejectedAt                 *time.Time
+	RejectReason               *string
+	ConfirmedAt                *time.Time
+	CheckedInAt                *time.Time
+	InServiceAt                *time.Time
+	CompletedAt                *time.Time
+	NoShowAt                   *time.Time
+	CancelledAt                *time.Time
+	CancelKind                 *string
+	CancelReason               *string
+	CancelledBy                pgtype.UUID
+	QrToken                    string
+	CreatedAt                  time.Time
+	UpdatedAt                  time.Time
+}
+
+type BookingAttractionDetail struct {
+	BookingID  uuid.UUID
+	ListingID  uuid.UUID
+	VisitDate  pgtype.Date
+	TimeSlotID uuid.UUID
+	SlotStart  pgtype.Time
+	SlotEnd    pgtype.Time
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
+}
+
+type BookingItem struct {
+	ID          uuid.UUID
+	BookingID   uuid.UUID
+	LineKind    string
+	Description string
+	UnitPrice   int64
+	Quantity    pgtype.Numeric
+	LineTotal   int64
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
+type BookingReschedule struct {
+	ID            uuid.UUID
+	BookingID     uuid.UUID
+	ListingID     uuid.UUID
+	FromVisitDate pgtype.Date
+	FromSlotID    uuid.UUID
+	ToVisitDate   pgtype.Date
+	ToSlotID      uuid.UUID
+	CreatedBy     uuid.UUID
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+}
+
+type BookingSettlement struct {
+	BookingID    uuid.UUID
+	PartnerID    uuid.UUID
+	NetPending   int64
+	ReleaseDueAt *time.Time
+	ReleasedAt   *time.Time
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
+type BookingStatusHistory struct {
+	ID          uuid.UUID
+	BookingID   uuid.UUID
+	FromStatus  *string
+	ToStatus    string
+	ActorKind   string
+	ActorUserID pgtype.UUID
+	Reason      *string
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
+type BookingTicketLine struct {
+	BookingItemID uuid.UUID
+	BookingID     uuid.UUID
+	ListingID     uuid.UUID
+	TicketTypeID  uuid.UUID
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+}
+
+type Checkout struct {
+	ID            uuid.UUID
+	Code          string
+	CustomerID    uuid.UUID
+	TotalAmount   int64
+	Status        string
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+	PaidPaymentID pgtype.UUID
+}
+
 type CommissionRate struct {
 	ID            uuid.UUID
 	ServiceType   string
@@ -81,6 +201,15 @@ type CustomerProfile struct {
 	DateOfBirth pgtype.Date
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
+}
+
+type CustomerRefundAccount struct {
+	UserID        uuid.UUID
+	BankBin       string
+	AccountNumber string
+	AccountHolder string
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
 }
 
 type EmailVerification struct {
@@ -113,6 +242,33 @@ type Holiday struct {
 	Name      string
 	CreatedAt time.Time
 	UpdatedAt time.Time
+}
+
+type IdempotencyKey struct {
+	UserID         uuid.UUID
+	Key            string
+	Endpoint       string
+	RequestHash    []byte
+	ResponseStatus *int32
+	ResponseBody   []byte
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
+type LedgerEntry struct {
+	ID             uuid.UUID
+	PartnerID      uuid.UUID
+	Seq            int64
+	AvailableAfter int64
+	BookingID      pgtype.UUID
+	PayoutID       pgtype.UUID
+	Kind           string
+	Bucket         string
+	Amount         int64
+	Reason         *string
+	CreatedBy      pgtype.UUID
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 type Listing struct {
@@ -195,6 +351,15 @@ type Partner struct {
 	UpdatedAt             time.Time
 }
 
+type PartnerBalance struct {
+	PartnerID uuid.UUID
+	Pending   int64
+	Available int64
+	LastSeq   int64
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
 type PartnerBankAccount struct {
 	ID            uuid.UUID
 	PartnerID     uuid.UUID
@@ -222,6 +387,47 @@ type PartnerServiceType struct {
 	EnabledAt   time.Time
 	DisabledAt  *time.Time
 	DisabledBy  pgtype.UUID
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
+type Payment struct {
+	ID                uuid.UUID
+	CheckoutID        uuid.UUID
+	Provider          string
+	ProviderOrderCode int64
+	Amount            int64
+	Status            string
+	CheckoutUrl       *string
+	QrCode            *string
+	ExpiresAt         time.Time
+	PaidAt            *time.Time
+	ProviderReference *string
+	Raw               []byte
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+}
+
+type PaymentEvent struct {
+	ID             uuid.UUID
+	PaymentID      pgtype.UUID
+	Provider       string
+	DedupeKey      string
+	SignatureValid bool
+	Payload        []byte
+	ReceivedAt     time.Time
+	ProcessedAt    *time.Time
+	Result         *string
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
+type PlatformCommissionEntry struct {
+	ID          uuid.UUID
+	BookingID   uuid.UUID
+	ServiceType string
+	Kind        string
+	Amount      int64
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
 }
@@ -263,6 +469,26 @@ type RefreshToken struct {
 	RevokedAt *time.Time
 	CreatedAt time.Time
 	UpdatedAt time.Time
+}
+
+type Refund struct {
+	ID                uuid.UUID
+	PaymentID         uuid.UUID
+	CheckoutID        uuid.UUID
+	BookingID         pgtype.UUID
+	ProviderReference *string
+	Amount            int64
+	Reason            string
+	Status            string
+	BankBin           *string
+	AccountNumber     *string
+	AccountHolder     *string
+	TransferReference *string
+	ProofFileID       pgtype.UUID
+	CompletedBy       pgtype.UUID
+	CompletedAt       *time.Time
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
 }
 
 type ServiceType struct {

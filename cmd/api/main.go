@@ -16,12 +16,15 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/riverqueue/river"
 
+	"github.com/bangbc-luna/lunain-travel/internal/booking"
 	"github.com/bangbc-luna/lunain-travel/internal/catalog"
 	"github.com/bangbc-luna/lunain-travel/internal/files"
 	"github.com/bangbc-luna/lunain-travel/internal/geo"
 	"github.com/bangbc-luna/lunain-travel/internal/identity"
+	"github.com/bangbc-luna/lunain-travel/internal/ledger"
 	"github.com/bangbc-luna/lunain-travel/internal/listing"
 	"github.com/bangbc-luna/lunain-travel/internal/partner"
+	"github.com/bangbc-luna/lunain-travel/internal/payment"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/auth"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/clock"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/config"
@@ -112,6 +115,18 @@ func (rejectingGoogle) Verify(context.Context, string) (identity.GoogleIdentity,
 	return identity.GoogleIdentity{}, identity.ErrGoogleTokenInvalid
 }
 
+// paymentProvider is the in-memory fake when PAYMENT_PROVIDER=fake (never in
+// prod: config.Load refuses it), otherwise the PayOS REST client.
+func paymentProvider(cfg config.Config) payment.Provider {
+	if cfg.PaymentProvider == "fake" {
+		return payment.NewFake()
+	}
+	return payment.NewPayOS(payment.PayOSConfig{
+		ClientID: cfg.PayOSClientID, APIKey: cfg.PayOSAPIKey, ChecksumKey: cfg.PayOSChecksumKey,
+		BaseURL: cfg.PayOSBaseURL, ReturnURL: cfg.PayOSReturnURL, CancelURL: cfg.PayOSCancelURL,
+	}, nil)
+}
+
 func serve(log *slog.Logger) error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -119,6 +134,9 @@ func serve(log *slog.Logger) error {
 	}
 
 	log.Info("config loaded", "env", cfg.AppEnv, "trusted_proxy_hops", cfg.TrustedProxyHops)
+	for _, w := range cfg.PaymentWarnings() {
+		log.Warn(w)
+	}
 
 	connectCtx, cancelConnect := context.WithTimeout(context.Background(), 30*time.Second)
 	pool, err := db.Connect(connectCtx, cfg.DatabaseURL)
@@ -141,22 +159,18 @@ func serve(log *slog.Logger) error {
 			User: cfg.SMTPUser, Password: cfg.SMTPPassword, From: cfg.MailFrom,
 		}
 	}
+	// The booking workers get their Service once it is built (it needs the
+	// job client for emails); the client is started only after that.
+	expireHolds, noShow, release := &booking.ExpireHoldsWorker{}, &booking.NoShowWorker{}, &booking.ReleaseWorker{}
 	workers := river.NewWorkers()
 	river.AddWorker(workers, &mailer.SendEmailWorker{Mailer: mail})
-	jobClient, err := jobs.NewClient(pool, workers, log)
+	river.AddWorker(workers, expireHolds)
+	river.AddWorker(workers, noShow)
+	river.AddWorker(workers, release)
+	jobClient, err := jobs.NewClient(pool, workers, log, booking.PeriodicJobs()...)
 	if err != nil {
 		return err
 	}
-	if err := jobClient.Start(context.Background()); err != nil {
-		return err
-	}
-	defer func() {
-		stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := jobClient.Stop(stopCtx); err != nil {
-			log.Error("stop job client", "err", err)
-		}
-	}()
 
 	var google identity.GoogleVerifier = rejectingGoogle{}
 	if cfg.GoogleClientID == "" {
@@ -193,12 +207,34 @@ func serve(log *slog.Logger) error {
 
 	listingSvc := listing.NewService(listing.Deps{
 		Pool: pool, Clock: clock.Real{}, Partners: partnerSvc, Catalog: catSvc, Geo: geoSvc, Files: fileSvc,
+		BookingGuard: booking.Guard{},
 	})
+
+	settingsSvc := settings.NewService(pool, clock.Real{})
+	paymentSvc := payment.NewService(pool, clock.Real{}, paymentProvider(cfg), log)
+	ledgerSvc := ledger.NewService(pool, clock.Real{})
+	bookingSvc := booking.NewService(booking.Deps{
+		Pool: pool, Clock: clock.Real{}, Listings: listingSvc, Catalog: catSvc, Settings: settingsSvc,
+		Identity: idSvc, Payments: paymentSvc, Ledger: ledgerSvc, Jobs: jobClient, Log: log,
+	})
+	expireHolds.Service, noShow.Service, release.Service = bookingSvc, bookingSvc, bookingSvc
+
+	if err := jobClient.Start(context.Background()); err != nil {
+		return err
+	}
+	defer func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := jobClient.Stop(stopCtx); err != nil {
+			log.Error("stop job client", "err", err)
+		}
+	}()
 
 	mux, _ := buildMux(muxDeps{
 		Pool: pool, Issuer: issuer, ClientIP: httpx.ClientIPFunc(cfg.TrustedProxyHops),
-		Identity: idSvc, Settings: settings.NewService(pool, clock.Real{}), Files: fileSvc,
+		Identity: idSvc, Settings: settingsSvc, Files: fileSvc,
 		Geo: geoSvc, Catalog: catSvc, Partner: partnerSvc, Listing: listingSvc,
+		Ledger: ledgerSvc, Payment: paymentSvc, Booking: bookingSvc, AppEnv: cfg.AppEnv,
 	})
 
 	srv := &http.Server{

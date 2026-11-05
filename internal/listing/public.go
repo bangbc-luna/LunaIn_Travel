@@ -240,3 +240,20 @@ func (s *Service) BookableListing(ctx context.Context, tx pgx.Tx, listingID uuid
 	}
 	return fromRow(r), nil
 }
+
+// ShareListingLock takes the listing row FOR SHARE in tx without any
+// visibility check. A booking tx that reads a listing's schedule but does not
+// need it to be bookable (reschedule) calls it before SlotsForDate, so it
+// serializes with partner schedule writes, which hold the listing FOR NO KEY
+// UPDATE while the booking guard counts (see guardDate). An unknown id is
+// ErrListingNotFound.
+func (s *Service) ShareListingLock(ctx context.Context, tx pgx.Tx, listingID uuid.UUID) error {
+	_, err := store.New(tx).ShareListing(ctx, listingID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrListingNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("share listing: %w", err)
+	}
+	return nil
+}

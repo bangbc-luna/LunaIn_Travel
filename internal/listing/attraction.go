@@ -47,6 +47,9 @@ var (
 	ErrInvalidTicketType   = httpx.NewError(http.StatusUnprocessableEntity, "invalid_ticket_type", "Loại vé không hợp lệ")
 	ErrInvalidClosedDate   = httpx.NewError(http.StatusUnprocessableEntity, "invalid_closed_date", "Không thể đặt ngày nghỉ trong quá khứ")
 	ErrClosedDateExists    = httpx.NewError(http.StatusConflict, "closed_date_exists", "Ngày nghỉ này đã tồn tại")
+	// ErrHasActiveBookings: closing a date or moving/disabling a slot that
+	// customers hold active bookings on.
+	ErrHasActiveBookings = httpx.NewError(http.StatusConflict, "has_active_bookings", "Đã có đơn đặt chỗ đang hiệu lực, không thể thay đổi lịch này")
 )
 
 var hhmm = regexp.MustCompile(`^([01][0-9]|2[0-3]):([0-5][0-9])$`)
@@ -203,6 +206,51 @@ func (s *Service) lockAttraction(ctx context.Context, tx pgx.Tx, partnerID, id u
 	}
 	if l.ServiceType != attractionServiceType {
 		return ErrWrongServiceType
+	}
+	return nil
+}
+
+// Booking guards (spec: a partner cannot close a date or move/disable a slot
+// that active bookings stand on). Race with booking create/reschedule: every
+// caller holds the listing FOR NO KEY UPDATE (lockAttraction) before asking,
+// and every booking path that reads the schedule takes the listing FOR SHARE
+// first (create/confirm via BookableListing, reschedule via ShareListingLock)
+// in the same tx. The two lock modes conflict, so either the booking tx
+// committed before the lock was granted (the count, a later statement in READ
+// COMMITTED, sees it) or it waits until this write commits and then reads the
+// new schedule. With a nil guard the checks are skipped.
+
+// guardDate rejects a closed date on the Vietnam date of day with active
+// bookings of listingID.
+func (s *Service) guardDate(ctx context.Context, tx pgx.Tx, listingID uuid.UUID, day time.Time) error {
+	if s.bookings == nil {
+		return nil
+	}
+	n, err := s.bookings.ActiveBookingsOnDate(ctx, tx, listingID, day)
+	if err != nil {
+		return err
+	}
+	if n > 0 {
+		return ErrHasActiveBookings
+	}
+	return nil
+}
+
+// allWeekdays is the weekday mask of every day (Monday = bit 0, weekdayBit).
+const allWeekdays = 0b1111111
+
+// guardSlot rejects a change to slotID while it has active bookings from today
+// (Vietnam) on whose visit date falls on a weekday in the weekdays mask.
+func (s *Service) guardSlot(ctx context.Context, tx pgx.Tx, slotID uuid.UUID, now time.Time, weekdays int) error {
+	if s.bookings == nil {
+		return nil
+	}
+	n, err := s.bookings.ActiveBookingsForSlot(ctx, tx, slotID, vnDate(now).Time, weekdays)
+	if err != nil {
+		return err
+	}
+	if n > 0 {
+		return ErrHasActiveBookings
 	}
 	return nil
 }
@@ -564,6 +612,19 @@ func (s *Service) UpdateTimeSlot(ctx context.Context, partnerID, actor, listingI
 		if err := checkOverlap(ctx, q, listingID, slotID, f); err != nil {
 			return err
 		}
+		// A time change or deactivation strands every booking on the slot; a
+		// weekday edit only those on removed weekdays; adding weekdays none.
+		guard := 0
+		if removed := old.Weekdays &^ f.Weekdays; f.Start != old.Start || f.End != old.End || (old.Active && !f.Active) {
+			guard = allWeekdays
+		} else if removed != 0 {
+			guard = removed
+		}
+		if guard != 0 {
+			if err := s.guardSlot(ctx, tx, slotID, now, guard); err != nil {
+				return err
+			}
+		}
 		row, err := q.UpdateTimeSlot(ctx, store.UpdateTimeSlotParams{
 			ID: slotID, ListingID: listingID, StartTime: pgTime(f.Start), EndTime: pgTime(f.End),
 			Weekdays: int16(f.Weekdays), Active: f.Active, Now: now,
@@ -601,6 +662,9 @@ func (s *Service) AddClosedDate(ctx context.Context, partnerID, actor, listingID
 		}
 		if d.Time.After(today.AddDate(0, 0, maxClosedDateAheadDays)) {
 			return withMessage(ErrInvalidClosedDate, fmt.Sprintf("Chỉ đặt được ngày nghỉ trong vòng %d ngày tới", maxClosedDateAheadDays))
+		}
+		if err := s.guardDate(ctx, tx, listingID, d.Time); err != nil {
+			return err
 		}
 		q := store.New(tx)
 		if err := q.EnsureAttraction(ctx, store.EnsureAttractionParams{ListingID: listingID, Now: now}); err != nil {
