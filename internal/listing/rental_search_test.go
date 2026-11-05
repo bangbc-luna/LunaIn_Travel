@@ -56,6 +56,12 @@ func TestCheckRentalPeriod(t *testing.T) {
 	_, err = check(pickup, pickup.Add(-time.Hour))
 	requireErr(t, err, http.StatusUnprocessableEntity, "invalid_rental_period")
 
+	// A return centuries away must not saturate into 1 day.
+	far := time.Date(9999, 1, 1, 8, 0, 0, 0, time.UTC)
+	_, err = check(pickup, far)
+	requireErr(t, err, http.StatusUnprocessableEntity, "invalid_rental_period")
+	require.Greater(t, listing.RentalDays(pickup, far), 30)
+
 	limit := now.AddDate(0, 0, 180)
 	_, err = check(limit, limit.Add(24*time.Hour))
 	require.NoError(t, err)
@@ -147,6 +153,31 @@ func TestSearchRental_UnitsLeftByOverlap(t *testing.T) {
 	cards = e.searchRental(t, q)
 	require.Equal(t, []uuid.UUID{f.Vision.ID}, modelIDs(cards))
 	require.Equal(t, 1, cards[0].UnitsLeft)
+}
+
+// Two sequential holds inside the window never overlap, so a quantity-2 model
+// has one vehicle left (peak 1), not zero (raw count 2).
+func TestSearchRental_PeakNotRawCount(t *testing.T) {
+	e, p := rentalEnv(t)
+	f := e.approvedRentalShop(t, p, "Thuê xe Đà Lạt")
+	e.hold(t, f.L, f.Vision, "confirmed", vn(11, 9, 8), vn(11, 10, 8), nil)  // Mon-Tue
+	e.hold(t, f.L, f.Vision, "confirmed", vn(11, 11, 8), vn(11, 12, 8), nil) // Wed-Thu
+	cards := e.searchRental(t, dalatSearch(vn(11, 9, 8), vn(11, 12, 8)))
+	require.Equal(t, []uuid.UUID{f.Vision.ID, f.Vios.ID}, modelIDs(cards))
+	require.Equal(t, 1, cards[0].UnitsLeft)
+}
+
+// A pending hold whose hold_until has passed is not counted.
+func TestSearchRental_ExpiredHoldIgnored(t *testing.T) {
+	e, p := rentalEnv(t)
+	f := e.approvedRentalShop(t, p, "Thuê xe Đà Lạt")
+	past := e.Clock.Now().Add(-time.Minute)
+	e.hold(t, f.L, f.Vios, "requested", vn(11, 7, 9), vn(11, 7, 12), &past)
+	cards := e.searchRental(t, dalatSearch(vn(11, 7, 8), vn(11, 8, 8)))
+	require.Equal(t, []uuid.UUID{f.Vision.ID, f.Vios.ID}, modelIDs(cards))
+	live := e.Clock.Now().Add(time.Hour)
+	e.hold(t, f.L, f.Vios, "requested", vn(11, 7, 9), vn(11, 7, 12), &live)
+	require.Equal(t, []uuid.UUID{f.Vision.ID}, modelIDs(e.searchRental(t, dalatSearch(vn(11, 7, 8), vn(11, 8, 8)))))
 }
 
 func TestSearchRental_PriceAndDays(t *testing.T) {
@@ -284,6 +315,7 @@ func TestSearchRental_BadParams400(t *testing.T) {
 		"seats 51":        func(f *listing.RentalSearchFilter) { f.MinSeats = 51 },
 		"limit -1":        func(f *listing.RentalSearchFilter) { f.Limit = -1 },
 		"offset 1001":     func(f *listing.RentalSearchFilter) { f.Offset = 1001 },
+		"year 9999":       func(f *listing.RentalSearchFilter) { f.ReturnAt = time.Date(9999, 1, 1, 8, 0, 0, 0, time.UTC) },
 		"31 days":         func(f *listing.RentalSearchFilter) { f.ReturnAt = f.PickupAt.Add(31 * 24 * time.Hour) },
 		"seconds":         func(f *listing.RentalSearchFilter) { f.PickupAt = f.PickupAt.Add(time.Second) },
 		"pickup too soon": func(f *listing.RentalSearchFilter) {

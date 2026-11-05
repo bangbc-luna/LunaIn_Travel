@@ -96,7 +96,11 @@ func (s *Service) SearchRentalVehicles(ctx context.Context, f RentalSearchFilter
 			ids[i] = r.RentalVehicleModel.ID
 		}
 		var peak map[uuid.UUID]int
-		if s.bookings != nil && len(ids) > 0 {
+		if s.bookings == nil {
+			// Without the guard the held vehicles are unknown: fail closed.
+			return fmt.Errorf("rental search needs a BookingGuard")
+		}
+		if len(ids) > 0 {
 			ret := f.ReturnAt
 			if peak, err = s.bookings.RentalPeakHeld(ctx, tx, ids, f.PickupAt, &ret, now); err != nil {
 				return err

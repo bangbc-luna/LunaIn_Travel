@@ -64,8 +64,11 @@ func asInvalidRental(err error) error {
 // RentalDays is the number of rental days of [pickup, ret): 24-hour blocks
 // rounded up, at least 1.
 func RentalDays(pickup, ret time.Time) int {
-	d := ret.Sub(pickup)
-	days := int((d + rentalDayLength - 1) / rentalDayLength)
+	d := ret.Sub(pickup) // saturates for periods beyond ~292 years
+	days := int(d / rentalDayLength)
+	if d%rentalDayLength != 0 {
+		days++
+	}
 	return max(days, 1)
 }
 
@@ -78,10 +81,11 @@ func CheckRentalPeriod(pickup, ret, now time.Time, paymentHours int) (int, error
 	if !pickup.Equal(pickup.Truncate(time.Minute)) || !ret.Equal(ret.Truncate(time.Minute)) || !ret.After(pickup) {
 		return 0, ErrInvalidRentalPeriod
 	}
-	days := RentalDays(pickup, ret)
-	if days > maxRentalDays || pickup.After(now.AddDate(0, 0, rentalHorizonDays)) {
+	// Bounds are time comparisons: a Duration would saturate for far dates.
+	if pickup.After(now.AddDate(0, 0, rentalHorizonDays)) || ret.After(pickup.Add(maxRentalDays*rentalDayLength)) {
 		return 0, ErrInvalidRentalPeriod
 	}
+	days := RentalDays(pickup, ret)
 	if pickup.Before(now.Add(time.Duration(paymentHours)*time.Hour + minPartnerResponse)) {
 		return 0, ErrPickupTooSoon
 	}
