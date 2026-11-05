@@ -33,9 +33,13 @@ const (
 	// MismatchRecordedExceedsProvider: more money was recorded than the
 	// provider reports, StatusLagLimit after the last transfer.
 	MismatchRecordedExceedsProvider = "recorded_exceeds_provider"
-	// MismatchProviderError: the provider could not be asked, or replaying a
-	// stale transfer failed.
+	// MismatchProviderError: the provider could not be asked, replaying a
+	// stale transfer failed, or the run stopped early (context timeout or
+	// cancellation; Detail "timeout/cancelled after n/m ...").
 	MismatchProviderError = "provider_error"
+	// MismatchWindowTruncated: more payments were due for a check than the
+	// per-run cap; Detail gives checked/total.
+	MismatchWindowTruncated = "window_truncated"
 	// MismatchNeedsReviewOpen: a needs_review payment not resolved yet.
 	MismatchNeedsReviewOpen = "needs_review_open"
 	// MismatchBalanceDrift: ledger.VerifyAll found a drift.
@@ -52,9 +56,9 @@ const (
 	// reconcileWindow: payments created this recently are checked with the
 	// provider every run.
 	reconcileWindow = 72 * time.Hour
-	// reconcileBatch bounds the stale transfers replayed and the payments
-	// checked per run.
-	reconcileBatch = 500
+	// defaultReconcileBatch bounds the stale transfers replayed and the
+	// payments checked per run (Service.reconcileBatch).
+	defaultReconcileBatch = 500
 	// statusCallTimeout bounds each provider call of a reconciliation.
 	statusCallTimeout  = 15 * time.Second
 	maxReconciliations = 100
@@ -112,55 +116,95 @@ func pgDay(d time.Time) pgtype.Date {
 // payment at a time; it never writes ledger entries or bookings itself.
 //
 //	(a) Every awaiting_status tracking row received at least StatusLagLimit
-//	    before now whose transfer has no main event yet (at most
-//	    reconcileBatch) is replayed through ProcessWebhook with its stored
-//	    payload: the normal webhook path, which now processes it flagged
-//	    needs_review (or normally if the provider's status caught up).
+//	    before now whose transfer has no main event yet (at most the batch
+//	    cap) is replayed through ProcessWebhook with its stored payload: the
+//	    normal webhook path, which now processes it flagged needs_review (or
+//	    normally if the provider's status caught up).
 //	    stale_awaiting_processed (Detail: the result), provider_error when
 //	    ProcessWebhook fails.
 //	(b) Every payment created in the last reconcileWindow, plus every
-//	    unresolved needs_review payment (at most reconcileBatch, these are
-//	    the checked payments): GetStatus. An order code the provider does not
-//	    know is skipped when no link was ever stored for it; any other error
-//	    is provider_error. recorded = sum of the payment's event amounts,
-//	    provider = Status.AmountPaid:
-//	    - provider > recorded: missing_transfer. The money is NOT recorded
-//	      from the status: the PayOS docs ("Lấy thông tin link thanh toán")
-//	      document no fields for transactions[], so nothing establishes that
-//	      a listed reference is the webhook's data.reference; recording it
-//	      under another dedupe key would count the later webhook as a second
-//	      transfer and refund the customer twice. Admins act on the alert.
+//	    unresolved needs_review payment — the unresolved needs_review ones
+//	    first, then oldest first, at most the batch cap (window_truncated
+//	    with checked/total when there are more): GetStatus. An order code the
+//	    provider does not know is skipped when no link was ever stored for
+//	    it; any other error is provider_error. recorded = sum of the
+//	    payment's event amounts, provider = Status.AmountPaid:
+//	    - provider > recorded: missing_transfer, once the gap is
+//	      StatusLagLimit old (the newest unrecorded listed transfer, else the
+//	      later of the payment's creation and its last recorded transfer):
+//	      before that the webhook, or its retries, may still come. The money
+//	      is NOT recorded from the status: the PayOS docs ("Lấy thông tin
+//	      link thanh toán") document no fields for transactions[], so nothing
+//	      establishes that a listed reference is the webhook's
+//	      data.reference; recording it under another dedupe key would count
+//	      the later webhook as a second transfer and refund the customer
+//	      twice. Admins act on the alert.
 //	    - provider < recorded, the last recorded transfer at least
 //	      StatusLagLimit old: recorded_exceeds_provider.
 //	(c) Every unresolved needs_review payment of (b): needs_review_open.
 //
-// err is only returned when the candidates cannot be listed; a problem with
-// one item is a Mismatch.
+// When ctx ends (job timeout, cancelled request) the provider is no longer
+// called: what was found so far is returned, plus a provider_error
+// "timeout/cancelled after n/m ...", with checked = the payments actually
+// checked. err is only returned when a listing query fails for another
+// reason; a problem with one item is a Mismatch.
 func (s *Service) ReconcilePayments(ctx context.Context, now time.Time, h PaymentHandler) (int, []Mismatch, error) {
 	ms := []Mismatch{}
 	q := store.New(s.pool)
+	stopped := func(what string, done, total int) Mismatch {
+		return Mismatch{Kind: MismatchProviderError, Detail: fmt.Sprintf(
+			"đối soát dừng giữa chừng (timeout/cancelled after %d/%d %s): %v", done, total, what, context.Cause(ctx))}
+	}
 
 	stale, err := q.ListStaleAwaitingEvents(ctx, store.ListStaleAwaitingEventsParams{
-		Cutoff: now.Add(-StatusLagLimit), Lim: reconcileBatch,
+		Cutoff: now.Add(-StatusLagLimit), Lim: int32(s.reconcileBatch),
 	})
 	if err != nil {
+		if ctx.Err() != nil {
+			return 0, append(ms, stopped("stale transfers", 0, 0)), nil
+		}
 		return 0, nil, fmt.Errorf("list stale awaiting events: %w", err)
 	}
-	for _, ev := range stale {
+	for i, ev := range stale {
+		if ctx.Err() != nil {
+			return 0, append(ms, stopped("stale transfers", i, len(stale))), nil
+		}
 		ms = append(ms, s.replayAwaiting(ctx, q, ev, h))
 	}
 
-	pays, err := q.ListPaymentsToReconcile(ctx, store.ListPaymentsToReconcileParams{
-		Since: now.Add(-reconcileWindow), Lim: reconcileBatch,
-	})
-	if err != nil {
-		return 0, nil, fmt.Errorf("list payments to reconcile: %w", err)
+	since := now.Add(-reconcileWindow)
+	total, err := q.CountPaymentsToReconcile(ctx, since)
+	if err == nil {
+		var rows []store.Payment
+		rows, err = q.ListPaymentsToReconcile(ctx, store.ListPaymentsToReconcileParams{
+			Since: since, Lim: int32(s.reconcileBatch),
+		})
+		if err == nil {
+			return s.checkPayments(ctx, q, rows, int(total), now, ms, stopped)
+		}
 	}
-	for _, row := range pays {
+	if ctx.Err() != nil {
+		return 0, append(ms, stopped("payments", 0, 0)), nil
+	}
+	return 0, nil, fmt.Errorf("list payments to reconcile: %w", err)
+}
+
+// checkPayments is steps (b) and (c) of ReconcilePayments over rows (total
+// candidates in all).
+func (s *Service) checkPayments(ctx context.Context, q *store.Queries, rows []store.Payment, total int, now time.Time,
+	ms []Mismatch, stopped func(string, int, int) Mismatch) (int, []Mismatch, error) {
+	for i, row := range rows {
+		if ctx.Err() != nil {
+			return i, append(ms, stopped("payments", i, len(rows))), nil
+		}
 		p := fromRow(row)
 		m, err := s.checkPayment(ctx, q, p, now)
 		if err != nil {
-			return 0, nil, err
+			if ctx.Err() != nil {
+				return i, append(ms, stopped("payments", i, len(rows))), nil
+			}
+			s.log.Error("payment: reconcile check failed", "payment_id", p.ID, "err", err)
+			m = &Mismatch{Kind: MismatchProviderError, PaymentID: &p.ID, OrderCode: &p.OrderCode, Detail: err.Error()}
 		}
 		if m != nil {
 			ms = append(ms, *m)
@@ -172,7 +216,11 @@ func (s *Service) ReconcilePayments(ctx context.Context, now time.Time, h Paymen
 			})
 		}
 	}
-	return len(pays), ms, nil
+	if total > len(rows) {
+		ms = append(ms, Mismatch{Kind: MismatchWindowTruncated, Detail: fmt.Sprintf(
+			"đã kiểm tra %d/%d thanh toán (giới hạn mỗi lần chạy), phần còn lại chưa được đối soát", len(rows), total)})
+	}
+	return len(rows), ms, nil
 }
 
 // replayAwaiting runs the stored payload of a stale awaiting_status row
@@ -204,8 +252,8 @@ func (s *Service) replayAwaiting(ctx context.Context, q *store.Queries, ev store
 }
 
 // checkPayment compares one payment with the provider (step (b) of
-// ReconcilePayments). The provider is called outside any tx. Only a failed
-// database read is an error.
+// ReconcilePayments). The provider is called outside any tx. A failed
+// database read, or the provider failing because ctx ended, is an error.
 func (s *Service) checkPayment(ctx context.Context, q *store.Queries, p Payment, now time.Time) (*Mismatch, error) {
 	base := Mismatch{PaymentID: &p.ID, OrderCode: &p.OrderCode}
 	cctx, cancel := context.WithTimeout(ctx, statusCallTimeout)
@@ -229,20 +277,30 @@ func (s *Service) checkPayment(ctx context.Context, q *store.Queries, p Payment,
 	provider, recorded := st.AmountPaid, rec.Recorded
 	m := base
 	m.ProviderAmount, m.RecordedAmount = &provider, &recorded
+	cutoff := now.Add(-StatusLagLimit)
 	switch {
 	case provider > recorded:
-		m.Kind = MismatchMissingTransfer
-		m.Detail = fmt.Sprintf("cổng thanh toán báo đã nhận %d, hệ thống ghi nhận %d", provider, recorded)
-		refs, err := s.unrecordedReferences(ctx, q, p.OrderCode, st.Transactions)
+		refs, newest, err := s.unrecordedTransfers(ctx, q, p.OrderCode, st.Transactions)
 		if err != nil {
 			return nil, err
 		}
+		if newest.IsZero() {
+			newest = p.CreatedAt
+			if rec.LastReceivedAt.After(newest) {
+				newest = rec.LastReceivedAt
+			}
+		}
+		if newest.After(cutoff) {
+			return nil, nil // grace: the webhook (or its retries) may still come
+		}
+		m.Kind = MismatchMissingTransfer
+		m.Detail = fmt.Sprintf("cổng thanh toán báo đã nhận %d, hệ thống ghi nhận %d", provider, recorded)
 		if len(refs) > 0 {
 			m.Reference = &refs[0]
 			m.Detail += "; giao dịch chưa ghi nhận: " + strings.Join(refs, ", ")
 		}
 		return &m, nil
-	case provider < recorded && !rec.LastReceivedAt.After(now.Add(-StatusLagLimit)):
+	case provider < recorded && !rec.LastReceivedAt.After(cutoff):
 		m.Kind = MismatchRecordedExceedsProvider
 		m.Detail = fmt.Sprintf("hệ thống ghi nhận %d, cổng thanh toán chỉ báo %d", recorded, provider)
 		return &m, nil
@@ -250,24 +308,28 @@ func (s *Service) checkPayment(ctx context.Context, q *store.Queries, p Payment,
 	return nil, nil
 }
 
-// unrecordedReferences lists, for the alert only, the non-empty references
+// unrecordedTransfers lists, for the alert only, the non-empty references
 // of the provider's transactions with no event under DedupeKey(orderCode,
-// reference).
-func (s *Service) unrecordedReferences(ctx context.Context, q *store.Queries, orderCode int64, txs []StatusTransaction) ([]string, error) {
+// reference), and the newest non-zero time among them (zero when none).
+func (s *Service) unrecordedTransfers(ctx context.Context, q *store.Queries, orderCode int64, txs []StatusTransaction) ([]string, time.Time, error) {
 	var out []string
+	var newest time.Time
 	for _, tx := range txs {
 		if tx.Reference == "" {
 			continue
 		}
 		seen, err := q.PaymentEventExists(ctx, DedupeKey(orderCode, tx.Reference))
 		if err != nil {
-			return nil, fmt.Errorf("payment event exists: %w", err)
+			return nil, time.Time{}, fmt.Errorf("payment event exists: %w", err)
 		}
 		if !seen {
 			out = append(out, tx.Reference)
+			if tx.At.After(newest) {
+				newest = tx.At
+			}
 		}
 	}
-	return out, nil
+	return out, newest, nil
 }
 
 // SaveReconciliation stores the result of the run of runDate (its calendar

@@ -3,6 +3,8 @@ package reconcile_test
 import (
 	"bytes"
 	"context"
+	"image"
+	"image/png"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -52,6 +54,12 @@ type env struct {
 	Admin     uuid.UUID
 	PartnerID uuid.UUID
 	Owner     uuid.UUID
+	Booking   *booking.Service
+	Listings  *listing.Service
+	Files     *files.Service
+	Catalog   *catalog.Service
+
+	listingID, adult, slot, customer uuid.UUID
 }
 
 // newEnv wires the real services with payment.Fake, a fixed clock and a
@@ -108,7 +116,63 @@ func newEnv(t *testing.T) *env {
 	})
 	require.NoError(t, err)
 	e.PartnerID, e.Owner = p.ID, p.OwnerUserID
+	e.Booking, e.Listings, e.Files, e.Catalog = bSvc, lSvc, fileSvc, cat
 	return e
+}
+
+// book creates a bookable listing (once) and a pending 150.000 booking with
+// an activated payment link; it returns the payment's order code.
+func (e *env) book(t *testing.T, key string) int64 {
+	t.Helper()
+	ctx := context.Background()
+	if e.listingID == uuid.Nil {
+		var province, ward string
+		require.NoError(t, e.Pool.QueryRow(ctx, `SELECT province_code, code FROM wards ORDER BY code LIMIT 1`).Scan(&province, &ward))
+		l, err := e.Listings.Create(ctx, e.PartnerID, e.Owner, listing.CreateInput{ServiceType: "attraction_ticket", Title: "Vé tham quan"})
+		require.NoError(t, err)
+		desc, addr := "Mô tả chi tiết", "1 Đường A"
+		_, err = e.Listings.Update(ctx, e.PartnerID, e.Owner, l.ID, listing.UpdateInput{
+			Description: &desc, Address: &addr, ProvinceCode: &province, WardCode: &ward,
+		})
+		require.NoError(t, err)
+		var buf bytes.Buffer
+		require.NoError(t, png.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 1, 1))))
+		f, err := e.Files.Upload(ctx, auth.Principal{UserID: e.Owner, Role: auth.RolePartner}, "listing_image", &buf)
+		require.NoError(t, err)
+		_, _, err = e.Listings.SetImages(ctx, e.PartnerID, e.Owner, l.ID, []uuid.UUID{f.ID}, nil)
+		require.NoError(t, err)
+		adult, err := e.Listings.CreateTicketType(ctx, e.PartnerID, e.Owner, l.ID,
+			listing.TicketTypeInput{Name: "Vé vào cổng", Audience: "adult", Price: 150_000})
+		require.NoError(t, err)
+		slot, err := e.Listings.CreateTimeSlot(ctx, e.PartnerID, e.Owner, l.ID,
+			listing.TimeSlotInput{StartTime: "08:00", EndTime: "17:00", Weekdays: 0b1111111})
+		require.NoError(t, err)
+		_, err = e.Listings.SetCancellationPolicy(ctx, e.PartnerID, e.Owner, l.ID, []listing.CancellationTier{
+			{HoursBefore: 48, RefundBps: 10000},
+		})
+		require.NoError(t, err)
+		_, err = e.Catalog.CreateCommissionRate(ctx, e.Admin, "attraction_ticket", 1000, nil)
+		require.NoError(t, err)
+		_, err = e.Listings.Submit(ctx, e.PartnerID, e.Owner, l.ID)
+		require.NoError(t, err)
+		_, err = e.Listings.Approve(ctx, e.Admin, l.ID)
+		require.NoError(t, err)
+		e.listingID, e.adult, e.slot = l.ID, adult.ID, slot.ID
+		e.customer = uuid.Must(uuid.NewV7())
+		e.exec(t, `INSERT INTO users (id, email, role, email_verified_at) VALUES ($1, 'khach@gmail.com', 'customer', $2)`,
+			e.customer, testNow)
+		e.exec(t, `INSERT INTO customer_profiles (user_id) VALUES ($1)`, e.customer)
+	}
+	v, err := e.Booking.CreateAttraction(ctx, e.customer, key, booking.CreateAttractionInput{
+		ListingID: e.listingID, VisitDate: "2026-11-10", TimeSlotID: e.slot,
+		Items:       []booking.TicketLine{{TicketTypeID: e.adult, Quantity: 1}},
+		ContactName: "Nguyễn Văn An", ContactPhone: "+84 912 345 678", ContactEmail: "an@gmail.com",
+	})
+	require.NoError(t, err)
+	var oc int64
+	require.NoError(t, e.Pool.QueryRow(ctx, `SELECT p.provider_order_code FROM payments p
+		JOIN bookings b ON b.checkout_id = p.checkout_id WHERE b.id = $1 AND p.status = 'pending'`, v.ID).Scan(&oc))
+	return oc
 }
 
 func (e *env) exec(t *testing.T, q string, args ...any) {

@@ -86,6 +86,9 @@ type Service struct {
 	provider Provider
 	log      *slog.Logger
 	ops      OpsDeps
+	// reconcileBatch caps a ReconcilePayments run (defaultReconcileBatch;
+	// lowered by tests).
+	reconcileBatch int
 }
 
 // NewService builds a Service. log may be nil (slog.Default).
@@ -93,7 +96,7 @@ func NewService(pool *pgxpool.Pool, c clock.Clock, provider Provider, log *slog.
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Service{pool: pool, clock: c, provider: provider, log: log}
+	return &Service{pool: pool, clock: c, provider: provider, log: log, reconcileBatch: defaultReconcileBatch}
 }
 
 // OpsDeps are the collaborators of the Super Admin payment operations

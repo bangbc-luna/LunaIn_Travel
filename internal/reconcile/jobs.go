@@ -2,6 +2,8 @@ package reconcile
 
 import (
 	"context"
+	"errors"
+	"time"
 
 	"github.com/riverqueue/river"
 
@@ -25,8 +27,21 @@ type DailyWorker struct {
 	Service *Service
 }
 
+// DailyTimeout replaces River's 1 minute default: a run makes up to 500
+// provider calls. When it expires, the run still stores what it found.
+const DailyTimeout = 15 * time.Minute
+
+// Timeout is the job's time budget (DailyTimeout).
+func (w *DailyWorker) Timeout(*river.Job[DailyArgs]) time.Duration { return DailyTimeout }
+
+// Work runs the reconciliation; while another run holds the lock it skips
+// (logged): that run does the same work.
 func (w *DailyWorker) Work(ctx context.Context, _ *river.Job[DailyArgs]) error {
 	_, err := w.Service.Run(ctx, nil)
+	if errors.Is(err, ErrRunning) {
+		w.Service.d.Log.Info("reconcile: daily run skipped, another run is in progress")
+		return nil
+	}
 	return err
 }
 

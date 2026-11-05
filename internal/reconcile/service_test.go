@@ -5,9 +5,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/riverqueue/river"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bangbc-luna/lunain-travel/internal/payment"
+	"github.com/bangbc-luna/lunain-travel/internal/reconcile"
 )
 
 func (e *env) alerts(t *testing.T) int {
@@ -95,4 +97,47 @@ func TestRun_ManualRunAudited(t *testing.T) {
 		WHERE action = 'reconciliation.run' AND actor_user_id = $1 AND target_id = $2
 		AND target_kind = 'payment_reconciliation'`, e.Admin, r.ID))
 	require.Equal(t, 1, e.alerts(t))
+}
+
+// The job's context expires while the provider hangs: the run stops calling
+// it, but the result is still stored and the admins alerted.
+func TestRun_TimeoutStillSavedAndAlerted(t *testing.T) {
+	e := newEnv(t)
+	e.book(t, "a")
+	e.book(t, "b")
+	e.Fake.SetStatusDelay(5 * time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	r, err := e.Svc.Run(ctx, nil)
+	require.NoError(t, err)
+	require.Equal(t, "mismatch", r.Status)
+	require.Len(t, r.Mismatches, 1)
+	require.Equal(t, "provider_error", r.Mismatches[0].Kind)
+	require.Contains(t, r.Mismatches[0].Detail, "timeout/cancelled after 0/2 payments")
+	require.Equal(t, 1, e.count(t, `SELECT count(*) FROM payment_reconciliations
+		WHERE run_date = '2026-11-05' AND mismatches->0->>'kind' = 'provider_error'`))
+	require.Equal(t, 1, e.alerts(t))
+}
+
+// The daily job skips quietly while another run holds the lock.
+func TestDailyWorker_SkipsWhenLocked(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	conn, err := e.Pool.Acquire(ctx)
+	require.NoError(t, err)
+	defer conn.Release()
+	_, err = conn.Exec(ctx, `SELECT pg_advisory_lock($1)`, reconcile.RunLockKey)
+	require.NoError(t, err)
+
+	_, err = e.Svc.Run(ctx, &e.Admin)
+	require.ErrorIs(t, err, reconcile.ErrRunning)
+	w := &reconcile.DailyWorker{Service: e.Svc}
+	require.NoError(t, w.Work(ctx, &river.Job[reconcile.DailyArgs]{}))
+	require.Equal(t, 0, e.count(t, `SELECT count(*) FROM payment_reconciliations`))
+	require.GreaterOrEqual(t, w.Timeout(nil), 15*time.Minute, "longer than River's 1 minute default")
+
+	_, err = conn.Exec(ctx, `SELECT pg_advisory_unlock($1)`, reconcile.RunLockKey)
+	require.NoError(t, err)
+	require.NoError(t, w.Work(ctx, &river.Job[reconcile.DailyArgs]{}))
+	require.Equal(t, 1, e.count(t, `SELECT count(*) FROM payment_reconciliations`))
 }

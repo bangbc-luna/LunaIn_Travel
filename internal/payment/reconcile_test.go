@@ -311,3 +311,70 @@ func TestReconcile_OutsideWindowSkipped(t *testing.T) {
 	require.Empty(t, ms)
 	require.Equal(t, calls, e.Fake.StatusCalls(), "no GetStatus outside the window")
 }
+
+// A transfer the webhook has not delivered yet is not reported before it is
+// StatusLagLimit old (the webhook, or its retries, may still come).
+func TestReconcile_MissingTransferGrace(t *testing.T) {
+	e := newOpsEnv(t)
+	_, oc := e.book(t, "a", opsVisitOver48h)
+	e.Fake.MarkPaidRef(oc, opsGross, "LATE-REF") // transfer at opsNow, no webhook
+
+	e.Clock.T = opsNow.Add(29 * time.Minute)
+	_, ms := e.reconcile(t)
+	require.Empty(t, ms, "the newest unrecorded transfer is 29 minutes old")
+	e.Clock.T = opsNow.Add(31 * time.Minute)
+	_, ms = e.reconcile(t)
+	require.Equal(t, []string{"missing_transfer"}, kinds(ms))
+
+	// No unrecorded transfer listed: the payment's last event (or its
+	// creation) is the reference time.
+	_, oc2 := e.book(t, "b", opsVisitOver48h)
+	e.pay(t, oc2, opsGross) // created and paid at opsNow+31m
+	e.Fake.SetAmountPaid(oc2, opsGross+50_000)
+	e.Clock.T = opsNow.Add(31*time.Minute + 29*time.Minute)
+	_, ms = e.reconcile(t)
+	require.Equal(t, []string{"missing_transfer"}, kinds(ms), "only the first payment")
+	require.Equal(t, oc, *ms[0].OrderCode)
+	e.Clock.T = opsNow.Add(31*time.Minute + 31*time.Minute)
+	_, ms = e.reconcile(t)
+	require.Equal(t, []string{"missing_transfer", "missing_transfer"}, kinds(ms))
+	require.Equal(t, oc2, *ms[1].OrderCode)
+}
+
+// When the context ends mid-run (job timeout, cancelled request), the
+// provider is no longer called and what was found so far is returned with a
+// provider_error saying the run is incomplete.
+func TestReconcile_StopsWhenContextEnds(t *testing.T) {
+	e := newOpsEnv(t)
+	e.book(t, "a", opsVisitOver48h)
+	e.book(t, "b", opsVisitOver48h)
+	e.Fake.SetStatusDelay(5 * time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	n, ms, err := e.Payments.ReconcilePayments(ctx, e.Clock.Now(), e.Booking)
+	require.NoError(t, err)
+	require.Less(t, time.Since(start), 3*time.Second, "stopped instead of waiting for every payment")
+	require.Equal(t, 0, n)
+	require.Equal(t, []string{"provider_error"}, kinds(ms))
+	require.Contains(t, ms[0].Detail, "timeout/cancelled after 0/2 payments")
+	require.Equal(t, 1, e.Fake.StatusCalls())
+}
+
+// Beyond the batch cap, the unresolved needs_review payments come first,
+// oldest first, and the truncation is reported.
+func TestReconcile_WindowTruncated(t *testing.T) {
+	e := newOpsEnv(t)
+	payment.SetReconcileBatch(e.Payments, 1)
+	e.book(t, "a", opsVisitOver48h)
+	_, review := e.book(t, "b", opsVisitOver48h)
+	e.pay(t, review, 400_000) // overpaid: needs_review, created after "a"
+
+	calls := e.Fake.StatusCalls()
+	n, ms := e.reconcile(t)
+	require.Equal(t, 1, n)
+	require.Equal(t, []string{"needs_review_open", "window_truncated"}, kinds(ms))
+	require.Equal(t, review, *ms[0].OrderCode)
+	require.Contains(t, ms[1].Detail, "1/2")
+	require.Equal(t, calls+1, e.Fake.StatusCalls(), "only the review payment was checked")
+}

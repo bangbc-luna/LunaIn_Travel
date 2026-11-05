@@ -92,6 +92,18 @@ func (q *Queries) CompleteRefund(ctx context.Context, arg CompleteRefundParams) 
 	return i, err
 }
 
+const countPaymentsToReconcile = `-- name: CountPaymentsToReconcile :one
+SELECT count(*) FROM payments
+WHERE created_at >= $1 OR (status = 'needs_review' AND review_resolved_at IS NULL)
+`
+
+func (q *Queries) CountPaymentsToReconcile(ctx context.Context, since time.Time) (int64, error) {
+	row := q.db.QueryRow(ctx, countPaymentsToReconcile, since)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const finishPaymentEvent = `-- name: FinishPaymentEvent :exec
 UPDATE payment_events
 SET processed_at = $1::timestamptz, result = $2::text,
@@ -768,7 +780,7 @@ func (q *Queries) ListPaymentRefunds(ctx context.Context, paymentID uuid.UUID) (
 const listPaymentsToReconcile = `-- name: ListPaymentsToReconcile :many
 SELECT id, checkout_id, provider, provider_order_code, amount, status, checkout_url, qr_code, expires_at, paid_at, provider_reference, raw, created_at, updated_at, review_seen_at, review_seen_by, review_resolved_at, review_resolved_by, review_note FROM payments
 WHERE created_at >= $1 OR (status = 'needs_review' AND review_resolved_at IS NULL)
-ORDER BY id
+ORDER BY (status = 'needs_review' AND review_resolved_at IS NULL) DESC, id
 LIMIT $2
 `
 
@@ -778,7 +790,7 @@ type ListPaymentsToReconcileParams struct {
 }
 
 // Payments created at or after @since, plus every unresolved needs_review
-// payment.
+// payment: the unresolved needs_review ones first, then oldest first.
 func (q *Queries) ListPaymentsToReconcile(ctx context.Context, arg ListPaymentsToReconcileParams) ([]Payment, error) {
 	rows, err := q.db.Query(ctx, listPaymentsToReconcile, arg.Since, arg.Lim)
 	if err != nil {

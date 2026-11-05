@@ -220,12 +220,16 @@ LIMIT @lim;
 SELECT result FROM payment_events WHERE dedupe_key = @dedupe_key;
 
 -- Payments created at or after @since, plus every unresolved needs_review
--- payment.
+-- payment: the unresolved needs_review ones first, then oldest first.
 -- name: ListPaymentsToReconcile :many
 SELECT * FROM payments
 WHERE created_at >= @since OR (status = 'needs_review' AND review_resolved_at IS NULL)
-ORDER BY id
+ORDER BY (status = 'needs_review' AND review_resolved_at IS NULL) DESC, id
 LIMIT @lim;
+
+-- name: CountPaymentsToReconcile :one
+SELECT count(*) FROM payments
+WHERE created_at >= @since OR (status = 'needs_review' AND review_resolved_at IS NULL);
 
 -- Money recorded on a payment (awaiting rows carry no amount) and when the
 -- last transfer with an amount was received (epoch when none).

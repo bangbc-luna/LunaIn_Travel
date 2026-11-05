@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,14 +25,59 @@ import (
 	"github.com/bangbc-luna/lunain-travel/internal/platform/audit"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/clock"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/db"
+	"github.com/bangbc-luna/lunain-travel/internal/platform/httpx"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/mailer"
 )
 
 // vnZone is Vietnam time (UTC+7, no DST): run dates are Vietnam days.
 var vnZone = time.FixedZone("ICT", 7*3600)
 
-// maxAlertLines bounds the mismatches listed one by one in the alert email.
-const maxAlertLines = 50
+const (
+	// maxAlertLines bounds the mismatches listed one by one in the alert
+	// email.
+	maxAlertLines = 50
+	// finishTimeout bounds the ledger check, the save and the alert, which
+	// run even when the run's own context ended.
+	finishTimeout = 2 * time.Minute
+	// unlockTimeout bounds releasing the run lock.
+	unlockTimeout = 10 * time.Second
+)
+
+// RunLockKey is the Postgres advisory lock key held while a reconciliation
+// runs.
+const RunLockKey int64 = 0x4c756e6152656331
+
+// ErrRunning: another reconciliation is running.
+var ErrRunning = httpx.NewError(http.StatusConflict, "reconciliation_running",
+	"Đối soát đang chạy, vui lòng thử lại sau ít phút")
+
+// lock takes the run lock (session-level, on a connection held until
+// unlock) or answers ErrRunning. If the unlock fails, the connection is
+// closed, which releases the lock too.
+func (s *Service) lock(ctx context.Context) (func(), error) {
+	conn, err := s.d.Pool.Acquire(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("acquire reconcile lock connection: %w", err)
+	}
+	var ok bool
+	if err := conn.QueryRow(ctx, `SELECT pg_try_advisory_lock($1)`, RunLockKey).Scan(&ok); err != nil {
+		conn.Release()
+		return nil, fmt.Errorf("take reconcile lock: %w", err)
+	}
+	if !ok {
+		conn.Release()
+		return nil, ErrRunning
+	}
+	return func() {
+		uctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), unlockTimeout)
+		defer cancel()
+		if _, err := conn.Exec(uctx, `SELECT pg_advisory_unlock($1)`, RunLockKey); err != nil {
+			s.d.Log.Error("reconcile: unlock failed, closing the connection", "err", err)
+			_ = conn.Conn().Close(uctx)
+		}
+		conn.Release()
+	}, nil
+}
 
 // Deps are the collaborators of Service. Jobs may be nil (tests): the alert
 // is then only logged.
@@ -69,13 +115,27 @@ func NewService(d Deps) *Service {
 //     day), an alert listing the mismatches by kind is queued to every
 //     active Super Admin when there are any, and a manual run is audited
 //     (reconciliation.run).
+//
+// Only one run at a time (a session advisory lock on a pinned connection):
+// another one gets ErrRunning. When ctx ends during step 2 the provider is
+// no longer called (payment.ReconcilePayments records it as a
+// provider_error); steps 3 and 4 then run on a detached context bounded by
+// finishTimeout, so the result is still stored and the admins alerted.
 func (s *Service) Run(ctx context.Context, runBy *uuid.UUID) (payment.Reconciliation, error) {
+	unlock, err := s.lock(ctx)
+	if err != nil {
+		return payment.Reconciliation{}, err
+	}
+	defer unlock()
+
 	started := s.d.Clock.Now()
 	runDate := started.In(vnZone)
 	checked, ms, err := s.d.Payments.ReconcilePayments(ctx, started, s.d.Handler)
 	if err != nil {
 		return payment.Reconciliation{}, err
 	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), finishTimeout)
+	defer cancel()
 	drifts, err := s.d.Ledger.VerifyAll(ctx)
 	if err != nil {
 		return payment.Reconciliation{}, err

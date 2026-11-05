@@ -11,9 +11,10 @@ import (
 	"github.com/bangbc-luna/lunain-travel/internal/platform/httpx"
 )
 
-// manualRunTimeout bounds a manual run, which goes on if the client leaves
-// (a half-done run would only be redone).
-const manualRunTimeout = 10 * time.Minute
+// manualRunTimeout bounds the provider calls of a manual run, which goes on
+// if the client leaves (a half-done run would only be redone). The response
+// write deadline is extended past it (the server's WriteTimeout is 30s).
+const manualRunTimeout = DailyTimeout
 
 // AdminRoutes registers the Super Admin reconciliation API
 // (Authenticate -> RequireRole(super_admin)):
@@ -77,6 +78,9 @@ func (s *Service) AdminRoutes(mux httpx.Router, iss *auth.Issuer) {
 			httpx.WriteError(w, r, err)
 			return
 		}
+		// The run outlasts the server's WriteTimeout: extend this response's
+		// deadline (unsupported writers, e.g. in tests, are fine as they are).
+		_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(manualRunTimeout + finishTimeout + time.Minute))
 		p, _ := auth.PrincipalFrom(r.Context())
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), manualRunTimeout)
 		defer cancel()

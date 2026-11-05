@@ -95,3 +95,32 @@ func TestHTTP_PartnerRole403(t *testing.T) {
 	}
 	require.Equal(t, 0, e.count(t, `SELECT count(*) FROM payment_reconciliations`))
 }
+
+// A manual run while another one is running answers 409; only the first
+// one stores a result and emails the admins.
+func TestHTTP_ConcurrentRunsConflict(t *testing.T) {
+	e := newEnv(t)
+	tok := e.token(t, e.Admin, auth.RoleSuperAdmin)
+	e.book(t, "a")
+	e.breakBalance(t)
+	e.Fake.SetStatusDelay(time.Second) // keeps the first run busy
+
+	first := make(chan int, 1)
+	go func() {
+		first <- e.do(t, http.MethodPost, "/v1/admin/reconciliations/run", tok, "").Code
+	}()
+	require.Eventually(t, func() bool {
+		return e.count(t, `SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND granted
+			AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`) == 1
+	}, 5*time.Second, 10*time.Millisecond, "the first run holds the lock")
+
+	rec := e.do(t, http.MethodPost, "/v1/admin/reconciliations/run", tok, "")
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), `"reconciliation_running"`)
+	require.Equal(t, http.StatusOK, <-first)
+
+	require.Equal(t, 1, e.alerts(t), "one set of alert emails")
+	require.Equal(t, 1, e.count(t, `SELECT count(*) FROM admin_audit_log WHERE action = 'reconciliation.run'`))
+	require.Equal(t, 0, e.count(t, `SELECT count(*) FROM pg_locks WHERE locktype = 'advisory'
+		AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`), "lock released")
+}

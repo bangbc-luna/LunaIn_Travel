@@ -42,6 +42,9 @@ type Fake struct {
 	statusErrs []error
 	// statusCalls counts GetStatus calls.
 	statusCalls int
+	// statusDelay: every GetStatus waits this long first, or until its ctx
+	// ends (a slow or hanging provider).
+	statusDelay time.Duration
 }
 
 // Fake provider error codes (PayOS-like).
@@ -93,6 +96,14 @@ func (f *Fake) StatusCalls() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.statusCalls
+}
+
+// SetStatusDelay makes every following GetStatus wait d (or until its
+// context ends, returning the context's error) before answering.
+func (f *Fake) SetStatusDelay(d time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.statusDelay = d
 }
 
 // SetAmountPaid overrides the amount paid the provider reports for an order.
@@ -154,10 +165,22 @@ func (f *Fake) Request(orderCode int64) (LinkRequest, bool) {
 
 // GetStatus returns the recorded state; an unknown order is a
 // *ProviderError, as PayOS answers it.
-func (f *Fake) GetStatus(_ context.Context, orderCode int64) (Status, error) {
+func (f *Fake) GetStatus(ctx context.Context, orderCode int64) (Status, error) {
+	f.mu.Lock()
+	f.statusCalls++
+	delay := f.statusDelay
+	f.mu.Unlock()
+	if delay > 0 {
+		t := time.NewTimer(delay)
+		select {
+		case <-t.C:
+		case <-ctx.Done():
+			t.Stop()
+			return Status{}, fmt.Errorf("fake payos: order %d: %w", orderCode, ctx.Err())
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.statusCalls++
 	if len(f.statusErrs) > 0 {
 		err := f.statusErrs[0]
 		f.statusErrs = f.statusErrs[1:]
