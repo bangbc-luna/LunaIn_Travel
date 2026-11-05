@@ -162,17 +162,18 @@ func PeriodicJobs() []*river.PeriodicJob {
 	purge := river.NewPeriodicJob(river.PeriodicInterval(time.Hour),
 		func() (river.JobArgs, *river.InsertOpts) { return PurgeIdempotencyArgs{}, opts },
 		&river.PeriodicJobOpts{RunOnStart: false})
-	return []*river.PeriodicJob{job(ExpireHoldsArgs{}), job(NoShowArgs{}), job(CompleteRidesArgs{}), job(ReleaseArgs{}), purge}
+	return []*river.PeriodicJob{job(ExpireHoldsArgs{}), job(ExpireRequestsArgs{}), job(NoShowArgs{}), job(CompleteRidesArgs{}), job(ReleaseArgs{}), purge}
 }
 
-// ExpireHolds expires the pending_payment bookings whose hold passed release
-// (hold_release_at <= now) and returns how many it expired.
+// ExpireHolds expires the unpaid bookings (pending_payment, or an accepted
+// request awaiting_payment) whose hold passed release (hold_release_at <=
+// now) and returns how many it expired.
 //
 // Candidates are read unlocked, then each checkout is handled in its own tx
-// with the webhook's lock order (ride trips -> checkout -> bookings ->
-// payments; an expired ride booking returns its seats) so that a
+// with the webhook's lock order (capacity rows -> checkout -> bookings ->
+// payments; an expired booking gives back its seats or vehicle) so that a
 // concurrent HandlePaid serializes with it; the state is re-checked under the
-// locks: every still-pending booking past release becomes expired (history,
+// locks: every still-unpaid booking past release becomes expired (history,
 // actor system). When no booking of the checkout remains pending or went past
 // payment (confirmed or later), its pending payments become expired and the
 // checkout closed. After commit the expired payments' links are cancelled at
@@ -247,7 +248,8 @@ func (s *Service) expireCheckout(ctx context.Context, tx pgx.Tx, checkoutID uuid
 	done := true
 	reason := reasonHoldExpired
 	for i, b := range bookings {
-		if b.Status == StatusPendingPayment && b.HoldReleaseAt != nil && !b.HoldReleaseAt.After(now) {
+		unpaid := b.Status == StatusPendingPayment || b.Status == StatusAwaitingPayment
+		if unpaid && b.HoldReleaseAt != nil && !b.HoldReleaseAt.After(now) {
 			if err := q.ExpireBooking(ctx, store.ExpireBookingParams{Now: now, ID: b.ID}); err != nil {
 				return 0, nil, fmt.Errorf("expire booking: %w", err)
 			}
@@ -260,7 +262,7 @@ func (s *Service) expireCheckout(ctx context.Context, tx pgx.Tx, checkoutID uuid
 			bookings[i].Status = StatusExpired
 			n++
 		}
-		if st := bookings[i].Status; st != StatusExpired && st != StatusCancelled {
+		if !bookingEnded(bookings[i].Status) {
 			done = false
 		}
 	}

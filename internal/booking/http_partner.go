@@ -53,6 +53,34 @@ func (s *Service) PartnerRoutes(mux httpx.Router, iss *auth.Issuer, requireMembe
 		writeView(w, r, http.StatusOK, v, err)
 	}))
 
+	// Request Booking answers (no body for accept).
+	mux.Handle("POST /v1/partner/bookings/{id}/accept", member(func(w http.ResponseWriter, r *http.Request, partnerID uuid.UUID) {
+		id, ok := pathID(w, r)
+		if !ok {
+			return
+		}
+		p, _ := auth.PrincipalFrom(r.Context())
+		v, err := s.AcceptRequest(r.Context(), partnerID, p.UserID, id)
+		writeView(w, r, http.StatusOK, v, err)
+	}))
+
+	mux.Handle("POST /v1/partner/bookings/{id}/reject", member(func(w http.ResponseWriter, r *http.Request, partnerID uuid.UUID) {
+		id, ok := pathID(w, r)
+		if !ok {
+			return
+		}
+		var in struct {
+			Reason string `json:"reason"`
+		}
+		if err := httpx.DecodeJSON(r, &in); err != nil {
+			httpx.WriteError(w, r, err)
+			return
+		}
+		p, _ := auth.PrincipalFrom(r.Context())
+		v, err := s.RejectRequest(r.Context(), partnerID, p.UserID, id, in.Reason)
+		writeView(w, r, http.StatusOK, v, err)
+	}))
+
 	mux.Handle("POST /v1/partner/check-ins", member(func(w http.ResponseWriter, r *http.Request, partnerID uuid.UUID) {
 		var in checkInInput
 		if err := httpx.DecodeJSON(r, &in); err != nil {

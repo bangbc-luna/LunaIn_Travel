@@ -154,10 +154,11 @@ UPDATE checkouts SET status = @status, updated_at = @now WHERE id = @id;
 -- name: ExpireBooking :exec
 UPDATE bookings SET status = 'expired', updated_at = @now WHERE id = @id;
 
--- Hold expiry job: bookings past their hold release (bookings_hold_release_idx).
+-- Hold expiry job: unpaid bookings (Instant pending_payment, accepted
+-- Request awaiting_payment) past their hold release (bookings_hold_release_idx).
 -- name: ListHoldsToRelease :many
 SELECT id, checkout_id FROM bookings
-WHERE status = 'pending_payment' AND hold_release_at <= @now::timestamptz
+WHERE status IN ('pending_payment', 'awaiting_payment') AND hold_release_at <= @now::timestamptz
   AND NOT (checkout_id = ANY(@skip::uuid[]))
 ORDER BY hold_release_at, id
 LIMIT @lim;
@@ -375,3 +376,26 @@ ORDER BY d.vehicle_model_id;
 
 -- name: ProvinceExists :one
 SELECT EXISTS (SELECT 1 FROM provinces WHERE code = @code);
+
+-- The partner accepts a Request Booking: the customer pays before
+-- payment_due_at (= hold_expires_at); the hold is released at hold_release_at.
+-- name: AcceptRequest :exec
+UPDATE bookings
+SET status = 'awaiting_payment', accepted_at = @now::timestamptz,
+    payment_due_at = @payment_due_at::timestamptz, hold_expires_at = @payment_due_at::timestamptz,
+    hold_release_at = @hold_release_at::timestamptz, updated_at = @now
+WHERE id = @id;
+
+-- name: RejectRequest :exec
+UPDATE bookings
+SET status = 'rejected', rejected_at = @now::timestamptz, reject_reason = @reject_reason::text, updated_at = @now
+WHERE id = @id;
+
+-- Request expiry job: requests the partner did not answer by response_due_at
+-- (bookings_response_due_idx).
+-- name: ListRequestsToExpire :many
+SELECT id, checkout_id FROM bookings
+WHERE status = 'requested' AND response_due_at <= @now::timestamptz
+  AND NOT (checkout_id = ANY(@skip::uuid[]))
+ORDER BY response_due_at, id
+LIMIT @lim;

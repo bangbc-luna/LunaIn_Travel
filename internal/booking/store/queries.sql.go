@@ -12,6 +12,33 @@ import (
 	"github.com/google/uuid"
 )
 
+const acceptRequest = `-- name: AcceptRequest :exec
+UPDATE bookings
+SET status = 'awaiting_payment', accepted_at = $1::timestamptz,
+    payment_due_at = $2::timestamptz, hold_expires_at = $2::timestamptz,
+    hold_release_at = $3::timestamptz, updated_at = $1
+WHERE id = $4
+`
+
+type AcceptRequestParams struct {
+	Now           time.Time
+	PaymentDueAt  time.Time
+	HoldReleaseAt time.Time
+	ID            uuid.UUID
+}
+
+// The partner accepts a Request Booking: the customer pays before
+// payment_due_at (= hold_expires_at); the hold is released at hold_release_at.
+func (q *Queries) AcceptRequest(ctx context.Context, arg AcceptRequestParams) error {
+	_, err := q.db.Exec(ctx, acceptRequest,
+		arg.Now,
+		arg.PaymentDueAt,
+		arg.HoldReleaseAt,
+		arg.ID,
+	)
+	return err
+}
+
 const cancelBooking = `-- name: CancelBooking :exec
 UPDATE bookings
 SET status = 'cancelled', cancelled_at = $1::timestamptz, cancel_kind = $2::text,
@@ -1119,7 +1146,7 @@ func (q *Queries) ListCheckoutsRideBookings(ctx context.Context, checkoutIds []u
 
 const listHoldsToRelease = `-- name: ListHoldsToRelease :many
 SELECT id, checkout_id FROM bookings
-WHERE status = 'pending_payment' AND hold_release_at <= $1::timestamptz
+WHERE status IN ('pending_payment', 'awaiting_payment') AND hold_release_at <= $1::timestamptz
   AND NOT (checkout_id = ANY($2::uuid[]))
 ORDER BY hold_release_at, id
 LIMIT $3
@@ -1136,7 +1163,8 @@ type ListHoldsToReleaseRow struct {
 	CheckoutID uuid.UUID
 }
 
-// Hold expiry job: bookings past their hold release (bookings_hold_release_idx).
+// Hold expiry job: unpaid bookings (Instant pending_payment, accepted
+// Request awaiting_payment) past their hold release (bookings_hold_release_idx).
 func (q *Queries) ListHoldsToRelease(ctx context.Context, arg ListHoldsToReleaseParams) ([]ListHoldsToReleaseRow, error) {
 	rows, err := q.db.Query(ctx, listHoldsToRelease, arg.Now, arg.Skip, arg.Lim)
 	if err != nil {
@@ -1262,6 +1290,47 @@ func (q *Queries) ListPairedRideBookings(ctx context.Context, arg ListPairedRide
 			return nil, err
 		}
 		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRequestsToExpire = `-- name: ListRequestsToExpire :many
+SELECT id, checkout_id FROM bookings
+WHERE status = 'requested' AND response_due_at <= $1::timestamptz
+  AND NOT (checkout_id = ANY($2::uuid[]))
+ORDER BY response_due_at, id
+LIMIT $3
+`
+
+type ListRequestsToExpireParams struct {
+	Now  time.Time
+	Skip []uuid.UUID
+	Lim  int32
+}
+
+type ListRequestsToExpireRow struct {
+	ID         uuid.UUID
+	CheckoutID uuid.UUID
+}
+
+// Request expiry job: requests the partner did not answer by response_due_at
+// (bookings_response_due_idx).
+func (q *Queries) ListRequestsToExpire(ctx context.Context, arg ListRequestsToExpireParams) ([]ListRequestsToExpireRow, error) {
+	rows, err := q.db.Query(ctx, listRequestsToExpire, arg.Now, arg.Skip, arg.Lim)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListRequestsToExpireRow
+	for rows.Next() {
+		var i ListRequestsToExpireRow
+		if err := rows.Scan(&i.ID, &i.CheckoutID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -1828,6 +1897,23 @@ func (q *Queries) PurgeIdempotencyKeys(ctx context.Context, arg PurgeIdempotency
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const rejectRequest = `-- name: RejectRequest :exec
+UPDATE bookings
+SET status = 'rejected', rejected_at = $1::timestamptz, reject_reason = $2::text, updated_at = $1
+WHERE id = $3
+`
+
+type RejectRequestParams struct {
+	Now          time.Time
+	RejectReason string
+	ID           uuid.UUID
+}
+
+func (q *Queries) RejectRequest(ctx context.Context, arg RejectRequestParams) error {
+	_, err := q.db.Exec(ctx, rejectRequest, arg.Now, arg.RejectReason, arg.ID)
+	return err
 }
 
 const rescheduleBooking = `-- name: RescheduleBooking :exec

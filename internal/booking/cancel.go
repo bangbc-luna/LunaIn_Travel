@@ -89,7 +89,9 @@ type cancellation struct {
 	bank         *BankAccount // customer only: refund account, saved as default
 }
 
-// CancelByCustomer cancels the customer's own confirmed booking. Another
+// CancelByCustomer cancels the customer's own confirmed booking, or
+// withdraws for free an unpaid Request Booking (requested or
+// awaiting_payment, see withdrawRequest; bank is then ignored). Another
 // customer's booking is ErrBookingNotFound; any other status is
 // ErrInvalidBookingState. The refund follows the policy snapshot against
 // original_service_start_at; with bank the refund is pending (and the account
@@ -165,6 +167,11 @@ func (s *Service) cancel(ctx context.Context, bookingID uuid.UUID, owner *uuid.U
 	}
 	if b.ServiceType == serviceTypeRide {
 		return s.cancelRideCheckout(ctx, bookingID, owner, c)
+	}
+	// An unpaid Request Booking is withdrawn by its customer for free; the
+	// bank account is ignored (nothing to refund).
+	if c.kind == cancelKindCustomer && owner != nil && requestWithdrawable(b) {
+		return s.withdrawRequest(ctx, *owner, b.CheckoutID, bookingID)
 	}
 	// Ownership (404) first, then the bank account (422), then the state (409).
 	if c.bank != nil {

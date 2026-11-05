@@ -165,13 +165,14 @@ func serve(log *slog.Logger) error {
 	// once it is built (some need the job client for emails); the client is
 	// started only after that.
 	expireHolds, noShow, release := &booking.ExpireHoldsWorker{}, &booking.NoShowWorker{}, &booking.ReleaseWorker{}
-	completeRides := &booking.CompleteRidesWorker{}
+	completeRides, expireRequests := &booking.CompleteRidesWorker{}, &booking.ExpireRequestsWorker{}
 	purgeIdem := &booking.PurgeIdempotencyWorker{}
 	reconcileDaily, remindRefunds := &reconcile.DailyWorker{}, &reconcile.RemindRefundsWorker{}
 	generateTrips := &listing.GenerateTripsWorker{}
 	workers := river.NewWorkers()
 	river.AddWorker(workers, &mailer.SendEmailWorker{Mailer: mail})
 	river.AddWorker(workers, expireHolds)
+	river.AddWorker(workers, expireRequests)
 	river.AddWorker(workers, noShow)
 	river.AddWorker(workers, completeRides)
 	river.AddWorker(workers, release)
@@ -234,7 +235,7 @@ func serve(log *slog.Logger) error {
 		Identity: idSvc, Payments: paymentSvc, Ledger: ledgerSvc, Partners: partnerSvc, Jobs: jobClient, Log: log,
 	})
 	expireHolds.Service, noShow.Service, release.Service, purgeIdem.Service = bookingSvc, bookingSvc, bookingSvc, bookingSvc
-	completeRides.Service = bookingSvc
+	completeRides.Service, expireRequests.Service = bookingSvc, bookingSvc
 	payoutSvc := payout.NewService(payout.Deps{
 		Pool: pool, Clock: clock.Real{}, Ledger: ledgerSvc, Partners: partnerSvc, Settings: settingsSvc,
 		Files: fileSvc, Jobs: jobClient, Log: log,

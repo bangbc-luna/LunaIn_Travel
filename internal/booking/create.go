@@ -115,7 +115,7 @@ type Service struct {
 	log      *slog.Logger
 
 	// Periodic jobs: rows backing off after a failure, one tracker per job.
-	holdBackoff, noShowBackoff, completeBackoff, releaseBackoff jobBackoff
+	holdBackoff, noShowBackoff, completeBackoff, releaseBackoff, requestBackoff jobBackoff
 	// batchSize overrides jobBatchSize when > 0 (tests).
 	batchSize int32
 	// beforeItem, when set (tests), runs inside each job item's transaction
@@ -626,8 +626,8 @@ func (s *Service) insertCheckout(ctx context.Context, q *store.Queries, customer
 	return uuid.Nil, errors.New("checkout code: too many collisions")
 }
 
-// Pay (re)creates the payment link of the customer's pending_payment
-// booking and returns the booking. Without a pending payment (a refunded
+// Pay (re)creates the payment link of the customer's pending_payment (or
+// awaiting_payment) booking and returns the booking. Without a pending payment (a refunded
 // underpayment) payment.ReissueAfterMismatch reserves a new one first.
 // Another customer's booking is ErrBookingNotFound. No DB tx is open while the provider is called.
 func (s *Service) Pay(ctx context.Context, customerID, id uuid.UUID) (BookingView, error) {
@@ -638,7 +638,10 @@ func (s *Service) Pay(ctx context.Context, customerID, id uuid.UUID) (BookingVie
 	if err != nil {
 		return BookingView{}, fmt.Errorf("get booking: %w", err)
 	}
-	if b.Status != StatusPendingPayment {
+	// An accepted request is paid like a pending_payment booking, before its
+	// hold_expires_at (= payment_due_at); past it the hold has lapsed even if
+	// ExpireHolds has not run yet.
+	if b.Status != StatusPendingPayment && b.Status != StatusAwaitingPayment {
 		return BookingView{}, ErrBookingNotPayable
 	}
 	if b.HoldExpiresAt == nil || !s.clock.Now().Before(*b.HoldExpiresAt) {

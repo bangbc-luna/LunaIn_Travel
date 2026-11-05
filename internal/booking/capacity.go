@@ -74,3 +74,15 @@ func (s *Service) setRentalHold(ctx context.Context, tx pgx.Tx, bookingID uuid.U
 	}
 	return nil
 }
+
+// keepHoldUntil keeps the capacity a booking holds until until, in the
+// caller's tx, which holds its capacity lock and moves it to a status whose
+// hold ends then (an accepted request: hold_release_at). A rental booking's
+// vehicle hold gets hold_until = until; nothing else is held per booking
+// with an end.
+func (s *Service) keepHoldUntil(ctx context.Context, tx pgx.Tx, b store.Booking, until time.Time) error {
+	if b.ServiceType == serviceTypeRental {
+		return s.setRentalHold(ctx, tx, b.ID, true, &until)
+	}
+	return nil
+}
