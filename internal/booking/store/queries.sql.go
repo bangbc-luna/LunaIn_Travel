@@ -12,6 +12,32 @@ import (
 	"github.com/google/uuid"
 )
 
+const cancelBooking = `-- name: CancelBooking :exec
+UPDATE bookings
+SET status = 'cancelled', cancelled_at = $1::timestamptz, cancel_kind = $2::text,
+    cancel_reason = $3, cancelled_by = $4, updated_at = $1
+WHERE id = $5
+`
+
+type CancelBookingParams struct {
+	Now          time.Time
+	CancelKind   string
+	CancelReason *string
+	CancelledBy  *uuid.UUID
+	ID           uuid.UUID
+}
+
+func (q *Queries) CancelBooking(ctx context.Context, arg CancelBookingParams) error {
+	_, err := q.db.Exec(ctx, cancelBooking,
+		arg.Now,
+		arg.CancelKind,
+		arg.CancelReason,
+		arg.CancelledBy,
+		arg.ID,
+	)
+	return err
+}
+
 const completeCheckIn = `-- name: CompleteCheckIn :exec
 UPDATE bookings
 SET status = 'completed', checked_in_at = $1::timestamptz, completed_at = $1::timestamptz, updated_at = $1
@@ -240,6 +266,17 @@ func (q *Queries) GetIdempotencyKey(ctx context.Context, arg GetIdempotencyKeyPa
 	return i, err
 }
 
+const hasReschedule = `-- name: HasReschedule :one
+SELECT EXISTS (SELECT 1 FROM booking_reschedules WHERE booking_id = $1)
+`
+
+func (q *Queries) HasReschedule(ctx context.Context, bookingID uuid.UUID) (bool, error) {
+	row := q.db.QueryRow(ctx, hasReschedule, bookingID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const insertAttractionDetail = `-- name: InsertAttractionDetail :exec
 INSERT INTO booking_attraction_details (booking_id, listing_id, visit_date, time_slot_id, slot_start, slot_end, created_at, updated_at)
 VALUES ($1, $2, ($3::text)::date, $4,
@@ -397,6 +434,40 @@ func (q *Queries) InsertPendingBooking(ctx context.Context, arg InsertPendingBoo
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const insertReschedule = `-- name: InsertReschedule :exec
+INSERT INTO booking_reschedules (id, booking_id, listing_id, from_visit_date, from_slot_id, to_visit_date, to_slot_id,
+                                 created_by, created_at, updated_at)
+VALUES ($1, $2, $3, ($4::text)::date, $5, ($6::text)::date,
+        $7, $8, $9, $9)
+`
+
+type InsertRescheduleParams struct {
+	ID            uuid.UUID
+	BookingID     uuid.UUID
+	ListingID     uuid.UUID
+	FromVisitDate string
+	FromSlotID    uuid.UUID
+	ToVisitDate   string
+	ToSlotID      uuid.UUID
+	CreatedBy     uuid.UUID
+	Now           time.Time
+}
+
+func (q *Queries) InsertReschedule(ctx context.Context, arg InsertRescheduleParams) error {
+	_, err := q.db.Exec(ctx, insertReschedule,
+		arg.ID,
+		arg.BookingID,
+		arg.ListingID,
+		arg.FromVisitDate,
+		arg.FromSlotID,
+		arg.ToVisitDate,
+		arg.ToSlotID,
+		arg.CreatedBy,
+		arg.Now,
+	)
+	return err
 }
 
 const insertStatusHistory = `-- name: InsertStatusHistory :exec
@@ -1025,6 +1096,29 @@ func (q *Queries) MarkNoShow(ctx context.Context, arg MarkNoShowParams) error {
 	return err
 }
 
+const rescheduleBooking = `-- name: RescheduleBooking :exec
+UPDATE bookings SET service_start_at = $1, service_end_at = $2, updated_at = $3
+WHERE id = $4
+`
+
+type RescheduleBookingParams struct {
+	ServiceStartAt time.Time
+	ServiceEndAt   time.Time
+	Now            time.Time
+	ID             uuid.UUID
+}
+
+// A reschedule moves the service; original_service_start_at never changes.
+func (q *Queries) RescheduleBooking(ctx context.Context, arg RescheduleBookingParams) error {
+	_, err := q.db.Exec(ctx, rescheduleBooking,
+		arg.ServiceStartAt,
+		arg.ServiceEndAt,
+		arg.Now,
+		arg.ID,
+	)
+	return err
+}
+
 const reserveIdempotencyKey = `-- name: ReserveIdempotencyKey :execrows
 INSERT INTO idempotency_keys (user_id, key, endpoint, request_hash, created_at, updated_at)
 VALUES ($1, $2, $3, $4, $5, $5)
@@ -1092,6 +1186,34 @@ func (q *Queries) StoreIdempotencyResponse(ctx context.Context, arg StoreIdempot
 		arg.Now,
 		arg.UserID,
 		arg.Key,
+	)
+	return err
+}
+
+const updateAttractionDetail = `-- name: UpdateAttractionDetail :exec
+UPDATE booking_attraction_details
+SET visit_date = ($1::text)::date, time_slot_id = $2,
+    slot_start = ($3::text)::time, slot_end = ($4::text)::time, updated_at = $5
+WHERE booking_id = $6
+`
+
+type UpdateAttractionDetailParams struct {
+	VisitDate  string
+	TimeSlotID uuid.UUID
+	SlotStart  string
+	SlotEnd    string
+	Now        time.Time
+	BookingID  uuid.UUID
+}
+
+func (q *Queries) UpdateAttractionDetail(ctx context.Context, arg UpdateAttractionDetailParams) error {
+	_, err := q.db.Exec(ctx, updateAttractionDetail,
+		arg.VisitDate,
+		arg.TimeSlotID,
+		arg.SlotStart,
+		arg.SlotEnd,
+		arg.Now,
+		arg.BookingID,
 	)
 	return err
 }

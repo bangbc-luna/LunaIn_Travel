@@ -154,12 +154,6 @@ func validStatus(s string) bool {
 	return false
 }
 
-// canCancel / canReschedule are stubs.
-// TODO(plan4 Task 8): implement the cancellation and reschedule rules
-// (status, time before original_service_start_at, one reschedule).
-func canCancel(store.Booking, time.Time) bool     { return false }
-func canReschedule(store.Booking, time.Time) bool { return false }
-
 // load reads a booking and builds the view for aud; the caller has already
 // checked who may see it.
 func (s *Service) load(ctx context.Context, row store.GetBookingDetailRow, aud audience) (BookingView, error) {
@@ -216,8 +210,19 @@ func (s *Service) load(ctx context.Context, row store.GetBookingDetailRow, aud a
 		rate, amount := int(b.CommissionRateBps), b.CommissionAmount
 		v.CommissionRateBps, v.CommissionAmount = &rate, &amount
 	}
-	now := s.clock.Now()
-	v.CanCancel, v.CanReschedule = canCancel(b, now), canReschedule(b, now)
+	// The same predicates as CancelByCustomer and Reschedule.
+	v.CanCancel = canCancel(b)
+	if b.Status == StatusConfirmed && b.ServiceType == serviceTypeAttraction {
+		cfg, err := s.settings.Get(ctx)
+		if err != nil {
+			return v, err
+		}
+		msg, err := s.rescheduleState(ctx, q, b, cfg.RescheduleWindowDays, s.clock.Now())
+		if err != nil {
+			return v, err
+		}
+		v.CanReschedule = msg == ""
+	}
 	return v, nil
 }
 

@@ -151,6 +151,32 @@ SELECT * FROM bookings WHERE code = @code AND partner_id = @partner_id FOR UPDAT
 -- name: MarkNoShow :exec
 UPDATE bookings SET status = 'no_show', no_show_at = @now::timestamptz, updated_at = @now WHERE id = @id;
 
+-- name: CancelBooking :exec
+UPDATE bookings
+SET status = 'cancelled', cancelled_at = @now::timestamptz, cancel_kind = @cancel_kind::text,
+    cancel_reason = sqlc.narg(cancel_reason), cancelled_by = sqlc.narg(cancelled_by), updated_at = @now
+WHERE id = @id;
+
+-- name: HasReschedule :one
+SELECT EXISTS (SELECT 1 FROM booking_reschedules WHERE booking_id = @booking_id);
+
+-- name: InsertReschedule :exec
+INSERT INTO booking_reschedules (id, booking_id, listing_id, from_visit_date, from_slot_id, to_visit_date, to_slot_id,
+                                 created_by, created_at, updated_at)
+VALUES (@id, @booking_id, @listing_id, (@from_visit_date::text)::date, @from_slot_id, (@to_visit_date::text)::date,
+        @to_slot_id, @created_by, @now, @now);
+
+-- A reschedule moves the service; original_service_start_at never changes.
+-- name: RescheduleBooking :exec
+UPDATE bookings SET service_start_at = @service_start_at, service_end_at = @service_end_at, updated_at = @now
+WHERE id = @id;
+
+-- name: UpdateAttractionDetail :exec
+UPDATE booking_attraction_details
+SET visit_date = (@visit_date::text)::date, time_slot_id = @time_slot_id,
+    slot_start = (@slot_start::text)::time, slot_end = (@slot_end::text)::time, updated_at = @now
+WHERE booking_id = @booking_id;
+
 -- Attraction check-in completes the booking at once.
 -- name: CompleteCheckIn :exec
 UPDATE bookings

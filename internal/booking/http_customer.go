@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/bangbc-luna/lunain-travel/internal/payment"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/auth"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/httpx"
 )
@@ -120,4 +121,81 @@ func (s *Service) CustomerRoutes(mux httpx.Router, iss *auth.Issuer) {
 		v, err := s.Pay(r.Context(), userID, id)
 		writeView(w, r, http.StatusOK, v, err)
 	}))
+
+	mux.Handle("POST /v1/bookings/{id}/cancel", customer(func(w http.ResponseWriter, r *http.Request, userID uuid.UUID) {
+		id, ok := pathID(w, r)
+		if !ok {
+			return
+		}
+		var in struct {
+			BankAccount *BankAccount `json:"bank_account"`
+		}
+		// The body is optional: no body cancels without a bank account.
+		if r.ContentLength != 0 {
+			if err := httpx.DecodeJSON(r, &in); err != nil {
+				httpx.WriteError(w, r, err)
+				return
+			}
+		}
+		v, err := s.CancelByCustomer(r.Context(), userID, id, in.BankAccount)
+		writeView(w, r, http.StatusOK, v, err)
+	}))
+
+	mux.Handle("POST /v1/bookings/{id}/reschedule", customer(func(w http.ResponseWriter, r *http.Request, userID uuid.UUID) {
+		id, ok := pathID(w, r)
+		if !ok {
+			return
+		}
+		var in RescheduleInput
+		if err := httpx.DecodeJSON(r, &in); err != nil {
+			httpx.WriteError(w, r, err)
+			return
+		}
+		v, err := s.Reschedule(r.Context(), userID, id, in.VisitDate, in.TimeSlotID)
+		writeView(w, r, http.StatusOK, v, err)
+	}))
+
+	// Refunds (payment module) of the customer.
+	mux.Handle("GET /v1/refunds", customer(func(w http.ResponseWriter, r *http.Request, userID uuid.UUID) {
+		items, err := s.payments.ListMine(r.Context(), userID)
+		writeView(w, r, http.StatusOK, refundList{Items: items}, err)
+	}))
+
+	mux.Handle("PUT /v1/refunds/{id}/bank-account", customer(func(w http.ResponseWriter, r *http.Request, userID uuid.UUID) {
+		id, err := uuid.Parse(r.PathValue("id"))
+		if err != nil {
+			httpx.WriteError(w, r, payment.ErrRefundNotFound)
+			return
+		}
+		var in BankAccount
+		if err := httpx.DecodeJSON(r, &in); err != nil {
+			httpx.WriteError(w, r, err)
+			return
+		}
+		if err := s.payments.SetRefundBankAccount(r.Context(), userID, id, in); err != nil {
+			httpx.WriteError(w, r, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	mux.Handle("GET /v1/customer/refund-account", customer(func(w http.ResponseWriter, r *http.Request, userID uuid.UUID) {
+		acc, err := s.payments.RefundAccount(r.Context(), userID)
+		writeView(w, r, http.StatusOK, acc, err)
+	}))
+
+	mux.Handle("PUT /v1/customer/refund-account", customer(func(w http.ResponseWriter, r *http.Request, userID uuid.UUID) {
+		var in BankAccount
+		if err := httpx.DecodeJSON(r, &in); err != nil {
+			httpx.WriteError(w, r, err)
+			return
+		}
+		acc, err := s.payments.SaveRefundAccount(r.Context(), userID, in)
+		writeView(w, r, http.StatusOK, acc, err)
+	}))
+}
+
+// refundList is the JSON of GET /v1/refunds (newest first).
+type refundList struct {
+	Items []payment.Refund `json:"items"`
 }

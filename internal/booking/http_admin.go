@@ -49,4 +49,26 @@ func (s *Service) AdminRoutes(mux httpx.Router, iss *auth.Issuer) {
 		v, err := s.AdminGet(r.Context(), id)
 		writeView(w, r, http.StatusOK, v, err)
 	}))
+
+	mux.Handle("POST /v1/admin/bookings/{id}/cancel", admin(func(w http.ResponseWriter, r *http.Request) {
+		id, ok := pathID(w, r)
+		if !ok {
+			return
+		}
+		var in struct {
+			Mode   string `json:"mode"`
+			Reason string `json:"reason"`
+		}
+		if err := httpx.DecodeJSON(r, &in); err != nil {
+			httpx.WriteError(w, r, err)
+			return
+		}
+		p, _ := auth.PrincipalFrom(r.Context())
+		if _, err := s.CancelByAdmin(r.Context(), p.UserID, id, in.Mode, in.Reason); err != nil {
+			httpx.WriteError(w, r, err)
+			return
+		}
+		v, err := s.AdminGet(r.Context(), id)
+		writeView(w, r, http.StatusOK, v, err)
+	}))
 }

@@ -90,3 +90,40 @@ SELECT received_at FROM payment_events WHERE dedupe_key = @dedupe_key;
 
 -- name: CheckoutHasBookingRefund :one
 SELECT EXISTS (SELECT 1 FROM refunds WHERE checkout_id = @checkout_id AND booking_id IS NOT NULL);
+
+-- The payment whose money confirmed the checkout: the paid one, else (an
+-- overpayment left it needs_review) the latest that received money.
+-- name: GetCapturedPayment :one
+SELECT * FROM payments
+WHERE checkout_id = @checkout_id AND provider_reference IS NOT NULL
+  AND status IN ('paid', 'needs_review')
+ORDER BY (status = 'paid') DESC, paid_at DESC, id DESC
+LIMIT 1;
+
+-- name: UpsertRefundAccount :one
+INSERT INTO customer_refund_accounts (user_id, bank_bin, account_number, account_holder, created_at, updated_at)
+VALUES (@user_id, @bank_bin, @account_number, @account_holder, @now, @now)
+ON CONFLICT (user_id) DO UPDATE
+SET bank_bin = EXCLUDED.bank_bin, account_number = EXCLUDED.account_number,
+    account_holder = EXCLUDED.account_holder, updated_at = EXCLUDED.updated_at
+RETURNING *;
+
+-- A refund of the customer (through its checkout), locked.
+-- name: LockCustomerRefund :one
+SELECT r.* FROM refunds r
+JOIN checkouts c ON c.id = r.checkout_id
+WHERE r.id = @id AND c.customer_id = @customer_id
+FOR UPDATE OF r;
+
+-- name: SetRefundBankInfo :exec
+UPDATE refunds
+SET status = 'pending', bank_bin = @bank_bin, account_number = @account_number,
+    account_holder = @account_holder, updated_at = @now
+WHERE id = @id;
+
+-- name: ListCustomerRefunds :many
+SELECT r.* FROM refunds r
+JOIN checkouts c ON c.id = r.checkout_id
+WHERE c.customer_id = @customer_id
+ORDER BY r.id DESC
+LIMIT @lim;

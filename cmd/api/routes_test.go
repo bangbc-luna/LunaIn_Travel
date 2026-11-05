@@ -192,6 +192,7 @@ var adminRoutes = []route{
 	{"POST /v1/admin/listings/{id}/unhide", "/v1/admin/listings/" + uuid.Nil.String() + "/unhide"},
 	{"GET /v1/admin/bookings", "/v1/admin/bookings"},
 	{"GET /v1/admin/bookings/{id}", "/v1/admin/bookings/" + uuid.Nil.String()},
+	{"POST /v1/admin/bookings/{id}/cancel", "/v1/admin/bookings/" + uuid.Nil.String() + "/cancel"},
 }
 
 // partnerRoutes lists every /v1/partner/* route, like adminRoutes.
@@ -322,11 +323,22 @@ var customerBookingRoutes = []route{
 	{"GET /v1/bookings", "/v1/bookings"},
 	{"GET /v1/bookings/{id}", "/v1/bookings/" + uuid.Nil.String()},
 	{"POST /v1/bookings/{id}/pay", "/v1/bookings/" + uuid.Nil.String() + "/pay"},
+	{"POST /v1/bookings/{id}/cancel", "/v1/bookings/" + uuid.Nil.String() + "/cancel"},
+	{"POST /v1/bookings/{id}/reschedule", "/v1/bookings/" + uuid.Nil.String() + "/reschedule"},
+	{"GET /v1/refunds", "/v1/refunds"},
+	{"PUT /v1/refunds/{id}/bank-account", "/v1/refunds/" + uuid.Nil.String() + "/bank-account"},
+	{"GET /v1/customer/refund-account", "/v1/customer/refund-account"},
+	{"PUT /v1/customer/refund-account", "/v1/customer/refund-account"},
 }
 
 func TestCustomerBookingRoutesRequireCustomer(t *testing.T) {
 	app := newTestApp(t)
-	require.Equal(t, declaredPatterns(customerBookingRoutes), recordedUnder(app.patterns, "/v1/bookings"))
+	var recorded []string
+	for _, prefix := range []string{"/v1/bookings", "/v1/refunds", "/v1/customer/refund-account"} {
+		recorded = append(recorded, recordedUnder(app.patterns, prefix)...)
+	}
+	sort.Strings(recorded)
+	require.Equal(t, declaredPatterns(customerBookingRoutes), recorded)
 	adminID := app.superAdmin(t)
 	adminTok := app.tokenFor(t, adminID, auth.RoleSuperAdmin)
 	member := app.tokenFor(t, app.partnerMember(t, adminID), auth.RolePartner)

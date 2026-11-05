@@ -53,6 +53,38 @@ func (q *Queries) FinishPaymentEvent(ctx context.Context, arg FinishPaymentEvent
 	return err
 }
 
+const getCapturedPayment = `-- name: GetCapturedPayment :one
+SELECT id, checkout_id, provider, provider_order_code, amount, status, checkout_url, qr_code, expires_at, paid_at, provider_reference, raw, created_at, updated_at FROM payments
+WHERE checkout_id = $1 AND provider_reference IS NOT NULL
+  AND status IN ('paid', 'needs_review')
+ORDER BY (status = 'paid') DESC, paid_at DESC, id DESC
+LIMIT 1
+`
+
+// The payment whose money confirmed the checkout: the paid one, else (an
+// overpayment left it needs_review) the latest that received money.
+func (q *Queries) GetCapturedPayment(ctx context.Context, checkoutID uuid.UUID) (Payment, error) {
+	row := q.db.QueryRow(ctx, getCapturedPayment, checkoutID)
+	var i Payment
+	err := row.Scan(
+		&i.ID,
+		&i.CheckoutID,
+		&i.Provider,
+		&i.ProviderOrderCode,
+		&i.Amount,
+		&i.Status,
+		&i.CheckoutUrl,
+		&i.QrCode,
+		&i.ExpiresAt,
+		&i.PaidAt,
+		&i.ProviderReference,
+		&i.Raw,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getPayment = `-- name: GetPayment :one
 SELECT id, checkout_id, provider, provider_order_code, amount, status, checkout_url, qr_code, expires_at, paid_at, provider_reference, raw, created_at, updated_at FROM payments WHERE id = $1
 `
@@ -335,6 +367,57 @@ func (q *Queries) InsertRefund(ctx context.Context, arg InsertRefundParams) (Ref
 	return i, err
 }
 
+const listCustomerRefunds = `-- name: ListCustomerRefunds :many
+SELECT r.id, r.payment_id, r.checkout_id, r.booking_id, r.provider_reference, r.amount, r.reason, r.status, r.bank_bin, r.account_number, r.account_holder, r.transfer_reference, r.proof_file_id, r.completed_by, r.completed_at, r.created_at, r.updated_at FROM refunds r
+JOIN checkouts c ON c.id = r.checkout_id
+WHERE c.customer_id = $1
+ORDER BY r.id DESC
+LIMIT $2
+`
+
+type ListCustomerRefundsParams struct {
+	CustomerID uuid.UUID
+	Lim        int32
+}
+
+func (q *Queries) ListCustomerRefunds(ctx context.Context, arg ListCustomerRefundsParams) ([]Refund, error) {
+	rows, err := q.db.Query(ctx, listCustomerRefunds, arg.CustomerID, arg.Lim)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Refund
+	for rows.Next() {
+		var i Refund
+		if err := rows.Scan(
+			&i.ID,
+			&i.PaymentID,
+			&i.CheckoutID,
+			&i.BookingID,
+			&i.ProviderReference,
+			&i.Amount,
+			&i.Reason,
+			&i.Status,
+			&i.BankBin,
+			&i.AccountNumber,
+			&i.AccountHolder,
+			&i.TransferReference,
+			&i.ProofFileID,
+			&i.CompletedBy,
+			&i.CompletedAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const lockCheckoutBookingRows = `-- name: LockCheckoutBookingRows :many
 SELECT id FROM bookings WHERE checkout_id = $1 ORDER BY id FOR UPDATE
 `
@@ -410,6 +493,44 @@ func (q *Queries) LockCheckoutRow(ctx context.Context, id uuid.UUID) (uuid.UUID,
 	var id_2 uuid.UUID
 	err := row.Scan(&id_2)
 	return id_2, err
+}
+
+const lockCustomerRefund = `-- name: LockCustomerRefund :one
+SELECT r.id, r.payment_id, r.checkout_id, r.booking_id, r.provider_reference, r.amount, r.reason, r.status, r.bank_bin, r.account_number, r.account_holder, r.transfer_reference, r.proof_file_id, r.completed_by, r.completed_at, r.created_at, r.updated_at FROM refunds r
+JOIN checkouts c ON c.id = r.checkout_id
+WHERE r.id = $1 AND c.customer_id = $2
+FOR UPDATE OF r
+`
+
+type LockCustomerRefundParams struct {
+	ID         uuid.UUID
+	CustomerID uuid.UUID
+}
+
+// A refund of the customer (through its checkout), locked.
+func (q *Queries) LockCustomerRefund(ctx context.Context, arg LockCustomerRefundParams) (Refund, error) {
+	row := q.db.QueryRow(ctx, lockCustomerRefund, arg.ID, arg.CustomerID)
+	var i Refund
+	err := row.Scan(
+		&i.ID,
+		&i.PaymentID,
+		&i.CheckoutID,
+		&i.BookingID,
+		&i.ProviderReference,
+		&i.Amount,
+		&i.Reason,
+		&i.Status,
+		&i.BankBin,
+		&i.AccountNumber,
+		&i.AccountHolder,
+		&i.TransferReference,
+		&i.ProofFileID,
+		&i.CompletedBy,
+		&i.CompletedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }
 
 const lockPayment = `-- name: LockPayment :one
@@ -524,4 +645,67 @@ type SetPaymentStatusParams struct {
 func (q *Queries) SetPaymentStatus(ctx context.Context, arg SetPaymentStatusParams) error {
 	_, err := q.db.Exec(ctx, setPaymentStatus, arg.Status, arg.Now, arg.ID)
 	return err
+}
+
+const setRefundBankInfo = `-- name: SetRefundBankInfo :exec
+UPDATE refunds
+SET status = 'pending', bank_bin = $1, account_number = $2,
+    account_holder = $3, updated_at = $4
+WHERE id = $5
+`
+
+type SetRefundBankInfoParams struct {
+	BankBin       *string
+	AccountNumber *string
+	AccountHolder *string
+	Now           time.Time
+	ID            uuid.UUID
+}
+
+func (q *Queries) SetRefundBankInfo(ctx context.Context, arg SetRefundBankInfoParams) error {
+	_, err := q.db.Exec(ctx, setRefundBankInfo,
+		arg.BankBin,
+		arg.AccountNumber,
+		arg.AccountHolder,
+		arg.Now,
+		arg.ID,
+	)
+	return err
+}
+
+const upsertRefundAccount = `-- name: UpsertRefundAccount :one
+INSERT INTO customer_refund_accounts (user_id, bank_bin, account_number, account_holder, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $5)
+ON CONFLICT (user_id) DO UPDATE
+SET bank_bin = EXCLUDED.bank_bin, account_number = EXCLUDED.account_number,
+    account_holder = EXCLUDED.account_holder, updated_at = EXCLUDED.updated_at
+RETURNING user_id, bank_bin, account_number, account_holder, created_at, updated_at
+`
+
+type UpsertRefundAccountParams struct {
+	UserID        uuid.UUID
+	BankBin       string
+	AccountNumber string
+	AccountHolder string
+	Now           time.Time
+}
+
+func (q *Queries) UpsertRefundAccount(ctx context.Context, arg UpsertRefundAccountParams) (CustomerRefundAccount, error) {
+	row := q.db.QueryRow(ctx, upsertRefundAccount,
+		arg.UserID,
+		arg.BankBin,
+		arg.AccountNumber,
+		arg.AccountHolder,
+		arg.Now,
+	)
+	var i CustomerRefundAccount
+	err := row.Scan(
+		&i.UserID,
+		&i.BankBin,
+		&i.AccountNumber,
+		&i.AccountHolder,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }
