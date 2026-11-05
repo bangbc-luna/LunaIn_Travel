@@ -203,6 +203,26 @@ func (q *Queries) InsertSettlement(ctx context.Context, arg InsertSettlementPara
 	return err
 }
 
+const keyShareBookingOfPartner = `-- name: KeyShareBookingOfPartner :one
+SELECT id FROM bookings WHERE id = $1 AND partner_id = $2 FOR KEY SHARE
+`
+
+type KeyShareBookingOfPartnerParams struct {
+	BookingID uuid.UUID
+	PartnerID uuid.UUID
+}
+
+// FK guard for an adjustment tied to a booking: takes, in the global lock
+// order (bookings before partner_balances, DB §1.1), the FOR KEY SHARE lock
+// the ledger_entries FK checks would otherwise take after partner_balances.
+// Reads the booking module's table on purpose (like the payments FK guard).
+func (q *Queries) KeyShareBookingOfPartner(ctx context.Context, arg KeyShareBookingOfPartnerParams) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, keyShareBookingOfPartner, arg.BookingID, arg.PartnerID)
+	var id uuid.UUID
+	err := row.Scan(&id)
+	return id, err
+}
+
 const lastAvailableAfter = `-- name: LastAvailableAfter :one
 SELECT available_after FROM ledger_entries
 WHERE partner_id = $1
@@ -484,6 +504,42 @@ type MarkSettlementReleasedParams struct {
 func (q *Queries) MarkSettlementReleased(ctx context.Context, arg MarkSettlementReleasedParams) error {
 	_, err := q.db.Exec(ctx, markSettlementReleased, arg.Now, arg.BookingID)
 	return err
+}
+
+const orphanPendingEntries = `-- name: OrphanPendingEntries :many
+SELECT e.booking_id::uuid AS booking_id, e.partner_id, SUM(e.amount)::bigint AS pending
+FROM ledger_entries e
+WHERE e.bucket = 'pending' AND e.booking_id IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM booking_settlements s WHERE s.booking_id = e.booking_id)
+GROUP BY e.booking_id, e.partner_id
+ORDER BY e.partner_id, e.booking_id
+`
+
+type OrphanPendingEntriesRow struct {
+	BookingID uuid.UUID
+	PartnerID uuid.UUID
+	Pending   int64
+}
+
+// Pending entries of bookings that have no settlement row at all (VerifyAll).
+func (q *Queries) OrphanPendingEntries(ctx context.Context) ([]OrphanPendingEntriesRow, error) {
+	rows, err := q.db.Query(ctx, orphanPendingEntries)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []OrphanPendingEntriesRow
+	for rows.Next() {
+		var i OrphanPendingEntriesRow
+		if err := rows.Scan(&i.BookingID, &i.PartnerID, &i.Pending); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const setSettlementReleaseDue = `-- name: SetSettlementReleaseDue :exec

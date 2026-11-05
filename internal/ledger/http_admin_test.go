@@ -132,6 +132,7 @@ func TestHTTP_AdminAdjustment_BadBody422(t *testing.T) {
 		{`{"amount":1000}`, "invalid_adjustment_reason"},
 		{`{"amount":1000,"reason":"   "}`, "invalid_adjustment_reason"},
 		{`{"amount":1000,"reason":"` + strings.Repeat("a", 501) + `"}`, "invalid_adjustment_reason"},
+		{`{"amount":1000,"reason":"Phí\u0000"}`, "invalid_adjustment_reason"},
 		{`{"amount":1000,"reason":"x","booking_id":"` + other.BookingID.String() + `"}`, "booking_not_of_partner"},
 		{`{"amount":1000,"reason":"x","booking_id":"` + uuid.NewString() + `"}`, "booking_not_of_partner"},
 	} {

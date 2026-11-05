@@ -136,3 +136,19 @@ LEFT JOIN (
 WHERE (s.released_at IS NULL AND s.net_pending <> COALESCE(e.pending, 0))
    OR (s.released_at IS NOT NULL AND COALESCE(e.pending, 0) <> 0)
 ORDER BY s.partner_id, s.booking_id;
+
+-- Pending entries of bookings that have no settlement row at all (VerifyAll).
+-- name: OrphanPendingEntries :many
+SELECT e.booking_id::uuid AS booking_id, e.partner_id, SUM(e.amount)::bigint AS pending
+FROM ledger_entries e
+WHERE e.bucket = 'pending' AND e.booking_id IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM booking_settlements s WHERE s.booking_id = e.booking_id)
+GROUP BY e.booking_id, e.partner_id
+ORDER BY e.partner_id, e.booking_id;
+
+-- FK guard for an adjustment tied to a booking: takes, in the global lock
+-- order (bookings before partner_balances, DB §1.1), the FOR KEY SHARE lock
+-- the ledger_entries FK checks would otherwise take after partner_balances.
+-- Reads the booking module's table on purpose (like the payments FK guard).
+-- name: KeyShareBookingOfPartner :one
+SELECT id FROM bookings WHERE id = @booking_id AND partner_id = @partner_id FOR KEY SHARE;

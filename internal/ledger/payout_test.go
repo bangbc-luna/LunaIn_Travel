@@ -4,9 +4,11 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bangbc-luna/lunain-travel/internal/ledger"
@@ -150,6 +152,26 @@ func TestPayoutHold_Twice(t *testing.T) {
 	require.Len(t, f.entries(t, f.partner), 4)
 }
 
+// A payout of another partner cannot be held or reversed against this
+// partner: composite FK (payout_id, partner_id) -> payouts (id, partner_id).
+func TestPayout_OtherPartnersPayoutRejected(t *testing.T) {
+	f := newFixture(t)
+	f.withAvailable900k(t)
+	owner2, p2 := f.newPartner(t, "beta")
+	theirs := f.newPayout(t, p2, owner2, 100_000)
+
+	_, err := f.hold(f.partner, theirs, 100_000)
+	var pgErr *pgconn.PgError
+	require.ErrorAs(t, err, &pgErr)
+	require.Equal(t, "23503", pgErr.Code)
+	require.Equal(t, "ledger_entries_payout_fk", pgErr.ConstraintName)
+	_, err = f.reverse(f.partner, theirs, 100_000)
+	require.ErrorAs(t, err, &pgErr)
+	require.Equal(t, "23503", pgErr.Code)
+	require.Equal(t, "ledger_entries_payout_fk", pgErr.ConstraintName)
+	f.requireBalance(t, f.partner, 0, 900_000)
+}
+
 func TestPayoutReversal_RestoresAvailable(t *testing.T) {
 	f := newFixture(t)
 	f.withAvailable900k(t)
@@ -240,6 +262,13 @@ func TestAdjustment_ZeroOrNoReason(t *testing.T) {
 	a.Reason = strings.Repeat("ạ", 501)
 	_, err = f.adjust(a)
 	require.ErrorIs(t, err, ledger.ErrInvalidReason)
+	// Postgres text cannot hold NUL; invalid UTF-8 is rejected too.
+	a.Reason = "Phí\x00"
+	_, err = f.adjust(a)
+	require.ErrorIs(t, err, ledger.ErrInvalidReason)
+	a.Reason = "Ph\xff"
+	_, err = f.adjust(a)
+	require.ErrorIs(t, err, ledger.ErrInvalidReason)
 	f.requireBalance(t, f.partner, 0, 0)
 
 	// Bounds are inclusive: 500 runes and ±1.000.000.000.000.
@@ -251,4 +280,54 @@ func TestAdjustment_ZeroOrNoReason(t *testing.T) {
 	_, err = f.adjust(a)
 	require.NoError(t, err)
 	f.requireBalance(t, f.partner, 0, 0)
+}
+
+// I-1: an adjustment tied to a booking locks the booking (FOR KEY SHARE)
+// before partner_balances, so it queues behind a booking flow that holds the
+// booking FOR UPDATE and then posts, instead of deadlocking with it.
+func TestAdjustment_WithBookingFollowsLockOrder(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	b := f.newBooking(t, 1_000_000, 100_000)
+	f.confirm(t, b)
+
+	// Tx A: a cancel holds the booking FOR UPDATE.
+	txA, err := f.pool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = txA.Rollback(ctx) }()
+	_, err = txA.Exec(ctx, `SELECT 1 FROM bookings WHERE id = $1 FOR UPDATE`, b.BookingID)
+	require.NoError(t, err)
+
+	// Tx B: the admin adjustment on the same booking, concurrently.
+	done := make(chan error, 1)
+	go func() {
+		_, err := f.adjust(ledger.Adjustment{PartnerID: f.partner, BookingID: &b.BookingID, Amount: -10_000,
+			Reason: "Phí", CreatedBy: f.owner})
+		done <- err
+	}()
+
+	// Wait until B is blocked on a lock.
+	require.Eventually(t, func() bool {
+		var n int
+		err := f.pool.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity
+			WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&n)
+		return err == nil && n > 0
+	}, 5*time.Second, 10*time.Millisecond)
+
+	// A now reaches partner_balances (refund) and commits.
+	require.NoError(t, f.svc.PostRefund(ctx, txA, b.BookingID, b.PartnerID, 500_000))
+	require.NoError(t, txA.Commit(ctx))
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("adjustment did not finish")
+	}
+	f.requireBalance(t, f.partner, 400_000, -10_000)
+	got := f.entries(t, f.partner)
+	require.Len(t, got, 3)
+	// A posted first: B waited on the booking, not on partner_balances.
+	require.Equal(t, "refund_debit", got[1].Kind)
+	require.Equal(t, "adjustment", got[2].Kind)
 }

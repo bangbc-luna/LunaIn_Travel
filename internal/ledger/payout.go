@@ -33,6 +33,8 @@ const (
 //
 // The caller MUST hold the payouts row (locked before partner_balances, DB
 // §1.1). A second hold of the same payout is ErrAlreadyPosted (tx aborted).
+// A payout of another partner violates ledger_entries_payout_fk (23503, tx
+// aborted).
 func (s *Service) PostPayoutHold(ctx context.Context, tx pgx.Tx, partnerID, payoutID uuid.UUID, amount int64) (Posted, error) {
 	if amount <= 0 {
 		return Posted{}, fmt.Errorf("%w: payout hold %d", ErrInvalidAmount, amount)
@@ -83,21 +85,43 @@ type Adjustment struct {
 
 // PostAdjustment records a: adjustment Amount in available with the trimmed
 // reason and its author. Invalid input is ErrInvalidAmount / ErrInvalidReason
-// (nothing written). A booking that is unknown or another partner's is
-// ErrBookingNotOfPartner (tx aborted).
+// (nothing written, tx usable).
+//
+// Lock order (DB §1.1): with a BookingID, the booking row is locked FOR KEY
+// SHARE first (it must exist and belong to PartnerID, else
+// ErrBookingNotOfPartner with nothing written), then partner_balances. Without
+// this the ledger_entries FK check would take that booking lock after
+// partner_balances and deadlock with a booking flow that holds the booking FOR
+// UPDATE and waits for partner_balances. The caller must not hold
+// partner_balances already. A FK violation at insert (23503) still maps to
+// ErrBookingNotOfPartner as a backstop (tx aborted).
 func (s *Service) PostAdjustment(ctx context.Context, tx pgx.Tx, a Adjustment) (Posted, error) {
 	if a.Amount == 0 || a.Amount > MaxAdjustment || a.Amount < -MaxAdjustment {
 		return Posted{}, fmt.Errorf("%w: adjustment %d", ErrInvalidAmount, a.Amount)
 	}
 	reason := strings.TrimSpace(a.Reason)
-	if n := utf8.RuneCountInString(reason); n == 0 || n > MaxAdjustmentReason || !utf8.ValidString(reason) {
+	if n := utf8.RuneCountInString(reason); n == 0 || n > MaxAdjustmentReason ||
+		!utf8.ValidString(reason) || strings.ContainsRune(reason, 0) {
+		// Postgres text cannot store NUL.
 		return Posted{}, ErrInvalidReason
 	}
 	if a.CreatedBy == uuid.Nil {
 		return Posted{}, errors.New("ledger: adjustment without author")
 	}
+	q := store.New(tx)
+	if a.BookingID != nil {
+		_, err := q.KeyShareBookingOfPartner(ctx, store.KeyShareBookingOfPartnerParams{
+			BookingID: *a.BookingID, PartnerID: a.PartnerID,
+		})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Posted{}, fmt.Errorf("%w: booking %s", ErrBookingNotOfPartner, *a.BookingID)
+		}
+		if err != nil {
+			return Posted{}, fmt.Errorf("lock adjustment booking: %w", err)
+		}
+	}
 	createdBy := a.CreatedBy
-	return s.postOne(ctx, store.New(tx), a.PartnerID, s.clock.Now(), entry{
+	return s.postOne(ctx, q, a.PartnerID, s.clock.Now(), entry{
 		kind: kindAdjustment, bucket: bucketAvailable, amount: a.Amount,
 		bookingID: a.BookingID, createdBy: &createdBy, reason: &reason,
 	})

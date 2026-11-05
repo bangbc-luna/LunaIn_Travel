@@ -148,6 +148,8 @@ func (s *Service) adminLedger(ctx context.Context, partners *partner.Service, pa
 }
 
 // adminAdjust posts a Super Admin adjustment and its audit row in one tx.
+// Locks follow DB §1.1: partners (read, unlocked) → bookings (FOR KEY SHARE,
+// inside PostAdjustment when booking_id is set) → partner_balances.
 func (s *Service) adminAdjust(ctx context.Context, partners *partner.Service, actor uuid.UUID, a Adjustment) (adjustmentResult, error) {
 	var res adjustmentResult
 	err := db.InTx(ctx, s.pool, func(tx pgx.Tx) error {

@@ -63,6 +63,23 @@ func TestVerifyAll_DetectsSettlementDrift(t *testing.T) {
 	require.NotEmpty(t, drifts[0].Problem)
 }
 
+// Pending entries of a booking without any settlement row are drift too.
+func TestVerifyAll_DetectsPendingWithoutSettlement(t *testing.T) {
+	f := newFixture(t)
+	b := f.newBooking(t, 1_000_000, 100_000) // never confirmed: no settlement
+	f.mustExec(t, `INSERT INTO ledger_entries (id, partner_id, seq, available_after, booking_id, kind, bucket, amount)
+		VALUES ($1, $2, 1, 0, $3, 'booking_earning', 'pending', 900000)`, newID(t), f.partner, b.BookingID)
+	f.mustExec(t, `INSERT INTO partner_balances (partner_id, pending, last_seq) VALUES ($1, 900000, 1)`, f.partner)
+	require.NoError(t, f.svc.Verify(context.Background(), f.partner)) // the cache agrees
+
+	drifts, err := f.svc.VerifyAll(context.Background())
+	require.NoError(t, err)
+	require.Len(t, drifts, 1)
+	require.Equal(t, f.partner, drifts[0].PartnerID)
+	require.NotNil(t, drifts[0].BookingID)
+	require.Equal(t, b.BookingID, *drifts[0].BookingID)
+}
+
 // A released settlement must have no money left in pending (spec §9).
 func TestVerifyAll_DetectsPendingLeftAfterRelease(t *testing.T) {
 	f := newFixture(t)

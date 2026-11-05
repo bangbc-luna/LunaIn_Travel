@@ -24,7 +24,8 @@ type Drift struct {
 //  2. every open booking settlement's net_pending equals the sum of the
 //     booking's pending entries;
 //  3. every released settlement has its pending entries summing to 0
-//     (spec §9).
+//     (spec §9);
+//  4. no pending entry belongs to a booking without a settlement row.
 //
 // Mismatches are returned as Drifts; err is only for a failed query.
 func (s *Service) VerifyAll(ctx context.Context) ([]Drift, error) {
@@ -65,6 +66,16 @@ func (s *Service) VerifyAll(ctx context.Context) ([]Drift, error) {
 		}
 		bookingID := st.BookingID
 		drifts = append(drifts, Drift{PartnerID: st.PartnerID, BookingID: &bookingID, Problem: problem})
+	}
+
+	orphans, err := q.OrphanPendingEntries(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("orphan pending entries: %w", err)
+	}
+	for _, o := range orphans {
+		bookingID := o.BookingID
+		drifts = append(drifts, Drift{PartnerID: o.PartnerID, BookingID: &bookingID,
+			Problem: fmt.Sprintf("ledger: booking %s has %d in pending entries but no settlement", o.BookingID, o.Pending)})
 	}
 	return drifts, nil
 }

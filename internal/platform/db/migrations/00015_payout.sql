@@ -32,6 +32,8 @@ CREATE TABLE payouts (
     reject_reason      text NULL,
     created_at         timestamptz NOT NULL DEFAULT now(),
     updated_at         timestamptz NOT NULL DEFAULT now(),
+    -- Target of the composite ledger_entries FK (payout_id, partner_id).
+    CONSTRAINT payouts_id_partner_key UNIQUE (id, partner_id),
     CONSTRAINT payouts_statement_set_check CHECK (
         (statement_seq_to IS NULL) = (statement_seq_from IS NULL)
         AND (opening_available IS NULL) = (statement_seq_from IS NULL)
@@ -51,7 +53,8 @@ CREATE INDEX payouts_status_idx ON payouts (status, id DESC);
 CREATE INDEX payouts_partner_idx ON payouts (partner_id, id DESC);
 
 ALTER TABLE ledger_entries
-    ADD CONSTRAINT ledger_entries_payout_fk FOREIGN KEY (payout_id) REFERENCES payouts (id),
+    -- The payout must belong to the entry's partner (like bookings, DB §1.2).
+    ADD CONSTRAINT ledger_entries_payout_fk FOREIGN KEY (payout_id, partner_id) REFERENCES payouts (id, partner_id),
     ADD CONSTRAINT ledger_entries_payout_hold_check
         CHECK (kind <> 'payout_hold' OR (bucket = 'available' AND amount < 0)),
     ADD CONSTRAINT ledger_entries_payout_reversal_check
