@@ -354,3 +354,35 @@ func TestRideLatePaid_OneLegReleasedRoomLeftReconfirmsBoth(t *testing.T) {
 	e.requireSeatsConsistent(t)
 	e.requireRideBalance(t, 846_000, 0)
 }
+
+// Review I1: the seats freed by releasing another customer's overdue hold in
+// the webhook's tx count for our expired legs.
+func TestRideLatePaid_SeatsFreedByOverdueReleaseReconfirms(t *testing.T) {
+	e := newRideEnv(t)
+	v, out, ret, oc := e.roundTrip(t)
+	e.expireRide(t) // testNow+21'
+	other := e.customer(t, "khach2@gmail.com")
+	old := e.createRide(t, other, "all", rideInput(e.A1.ID, nil, 10))
+	_, _, _, oldOC := e.checkoutPayment(t, old.ID)
+	require.Equal(t, 10, e.seatsReserved(t, e.A1.ID))
+
+	e.Clock.T = testNow.Add(42 * time.Minute) // customer 2 past release, job not run
+	e.pay(t, oc, rideTotal)
+	require.Equal(t, "confirmed", e.bookingStatus(t, out))
+	require.Equal(t, "confirmed", e.bookingStatus(t, ret))
+	require.Equal(t, "expired", e.bookingStatus(t, old.Bookings[0].ID))
+	require.Equal(t, "closed", e.status(t, "checkouts", old.ID))
+	require.Equal(t, payment.StateCancelled, e.fakeState(t, oldOC))
+	require.Equal(t, 2, e.seatsReserved(t, e.A1.ID))
+	require.Equal(t, 2, e.seatsReserved(t, e.B1.ID))
+	require.Equal(t, "paid", e.status(t, "checkouts", v.ID))
+	require.Empty(t, e.refunds(t))
+	require.Equal(t, 1, e.count(t, `SELECT count(*) FROM ledger_entries
+		WHERE kind = 'booking_earning' AND booking_id = $1 AND amount = 450000`, out))
+	require.Equal(t, 1, e.count(t, `SELECT count(*) FROM ledger_entries
+		WHERE kind = 'booking_earning' AND booking_id = $1 AND amount = 396000`, ret))
+	require.Equal(t, 2, e.count(t, `SELECT count(*) FROM ledger_entries`))
+	e.requireSeatsConsistent(t)
+	e.requireRideBalance(t, 846_000, 0)
+	require.Equal(t, "reconfirmed", e.eventResult(t, oc))
+}

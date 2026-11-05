@@ -118,6 +118,16 @@ func (s *Service) HandlePaid(ctx context.Context, tx pgx.Tx, ev payment.PaidEven
 	// A ride checkout: its trips are locked before the checkout (DB §1.1).
 	var cancelCodes []int64
 	if tripIDs := rideTripIDs(rows); len(tripIDs) > 0 {
+		if _, err := s.listings.LockTrips(ctx, tx, tripIDs); err != nil {
+			return payment.PaidOutcome{}, err
+		}
+		var err error
+		if cancelCodes, err = s.releaseOverdueOnTrips(ctx, tx, tripIDs, ev.CheckoutID, now); err != nil {
+			return payment.PaidOutcome{}, err
+		}
+		// The release lowered seats_reserved: re-read the trips (already
+		// locked by this tx, so this takes no new lock) for the free-seat
+		// check of rideChecks.
 		locked, err := s.listings.LockTrips(ctx, tx, tripIDs)
 		if err != nil {
 			return payment.PaidOutcome{}, err
@@ -125,9 +135,6 @@ func (s *Service) HandlePaid(ctx context.Context, tx pgx.Tx, ev payment.PaidEven
 		trips := make(map[uuid.UUID]listing.Trip, len(locked))
 		for _, t := range locked {
 			trips[t.ID] = t
-		}
-		if cancelCodes, err = s.releaseOverdueOnTrips(ctx, tx, tripIDs, ev.CheckoutID, now); err != nil {
-			return payment.PaidOutcome{}, err
 		}
 		// Re-read under the trip locks: every status change of a ride
 		// booking holds its trip lock.
