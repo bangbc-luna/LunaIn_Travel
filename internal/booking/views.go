@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -58,11 +59,26 @@ type PaymentView struct {
 	ExpiresAt   time.Time `json:"expires_at"`
 }
 
+// RideView is the trip of a scheduled ride booking. DepartureAt and ArriveAt
+// are its service_start_at and service_end_at; PairedBookingID is the other
+// leg of a round trip (same checkout), nil for a one-way booking.
+type RideView struct {
+	TripID          uuid.UUID  `json:"trip_id"`
+	Direction       string     `json:"direction"`
+	Seats           int        `json:"seats"`
+	OriginName      string     `json:"origin_name"`
+	DestName        string     `json:"dest_name"`
+	DepartureAt     time.Time  `json:"departure_at"`
+	ArriveAt        time.Time  `json:"arrive_at"`
+	PairedBookingID *uuid.UUID `json:"paired_booking_id"`
+}
+
 // BookingView is one booking as its customer, its partner or the admin sees
-// it. QRToken is only ever set for the owning customer of a confirmed or
-// completed booking (omitted otherwise); Payment only for the owning
-// customer while pending_payment;
+// it. QRToken is only ever set for the owning customer of a confirmed,
+// checked_in or completed booking (omitted otherwise); Payment only for the
+// owning customer while pending_payment;
 // CommissionRateBps/CommissionAmount only for the partner and the admin.
+// Ride is set for a scheduled ride booking only.
 type BookingView struct {
 	ID                 uuid.UUID                  `json:"id"`
 	Code               string                     `json:"code"`
@@ -71,6 +87,7 @@ type BookingView struct {
 	Listing            ListingRef                 `json:"listing"`
 	VisitDate          string                     `json:"visit_date"`
 	TimeSlot           SlotView                   `json:"time_slot"`
+	Ride               *RideView                  `json:"ride,omitempty"`
 	ServiceStartAt     time.Time                  `json:"service_start_at"`
 	ServiceEndAt       time.Time                  `json:"service_end_at"`
 	Items              []ItemView                 `json:"items"`
@@ -122,9 +139,11 @@ type BookingSummary struct {
 	CreatedAt      time.Time  `json:"created_at"`
 }
 
-// ListFilter pages a booking list (newest first). Status is optional.
+// ListFilter pages a booking list (newest first). Status and TripID (the
+// bookings of one ride trip) are optional.
 type ListFilter struct {
 	Status *string
+	TripID *uuid.UUID
 	Limit  int
 	Cursor *uuid.UUID
 }
@@ -179,6 +198,24 @@ func (s *Service) load(ctx context.Context, row store.GetBookingDetailRow, aud a
 		v.VisitDate = d.VisitDate
 		v.TimeSlot = SlotView{ID: d.TimeSlotID, StartTime: d.SlotStart, EndTime: d.SlotEnd}
 	}
+	if b.ServiceType == serviceTypeRide {
+		d, err := q.GetRideDetails(ctx, b.ID)
+		if err != nil {
+			return v, fmt.Errorf("get ride details: %w", err)
+		}
+		v.Ride = &RideView{
+			TripID: d.TripID, Direction: d.Direction, Seats: int(d.Seats),
+			OriginName: d.OriginName, DestName: d.DestName,
+			DepartureAt: b.ServiceStartAt, ArriveAt: b.ServiceEndAt,
+		}
+		paired, err := q.ListPairedRideBookings(ctx, store.ListPairedRideBookingsParams{CheckoutID: b.CheckoutID, BookingID: b.ID})
+		if err != nil {
+			return v, fmt.Errorf("list paired ride bookings: %w", err)
+		}
+		if len(paired) > 0 {
+			v.Ride.PairedBookingID = &paired[0]
+		}
+	}
 	items, err := q.ListBookingItems(ctx, b.ID)
 	if err != nil {
 		return v, fmt.Errorf("list booking items: %w", err)
@@ -202,7 +239,7 @@ func (s *Service) load(ctx context.Context, row store.GetBookingDetailRow, aud a
 	}
 	switch aud {
 	case forCustomer:
-		if b.Status == StatusConfirmed || b.Status == StatusCompleted {
+		if b.Status == StatusConfirmed || b.Status == StatusCheckedIn || b.Status == StatusCompleted {
 			tok := b.QrToken
 			v.QRToken = &tok
 		}
@@ -299,7 +336,7 @@ func (s *Service) list(ctx context.Context, p store.ListBookingsParams, f ListFi
 	if f.Status != nil && !validStatus(*f.Status) {
 		return nil, nil, httpx.ErrInvalidRequest
 	}
-	p.Status, p.Cursor, p.Lim = f.Status, f.Cursor, int32(limit+1)
+	p.Status, p.TripID, p.Cursor, p.Lim = f.Status, f.TripID, f.Cursor, int32(limit+1)
 	rows, err := store.New(s.pool).ListBookings(ctx, p)
 	if err != nil {
 		return nil, nil, fmt.Errorf("list bookings: %w", err)
@@ -335,4 +372,46 @@ func (s *Service) ListForPartner(ctx context.Context, partnerID uuid.UUID, f Lis
 // AdminList pages all bookings.
 func (s *Service) AdminList(ctx context.Context, f AdminFilter) ([]BookingSummary, *uuid.UUID, error) {
 	return s.list(ctx, store.ListBookingsParams{PartnerID: f.PartnerID, CustomerID: f.CustomerID, Code: f.Code}, f.ListFilter)
+}
+
+// GetMyCheckout returns the customer's checkout with its bookings, outbound
+// before return (insertion order). Another customer's checkout is
+// ErrBookingNotFound.
+func (s *Service) GetMyCheckout(ctx context.Context, customerID, checkoutID uuid.UUID) (CheckoutView, error) {
+	q := store.New(s.pool)
+	co, err := q.GetCheckout(ctx, checkoutID)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && co.CustomerID != customerID) {
+		return CheckoutView{}, ErrBookingNotFound
+	}
+	if err != nil {
+		return CheckoutView{}, fmt.Errorf("get checkout: %w", err)
+	}
+	rows, err := q.ListCheckoutBookings(ctx, checkoutID)
+	if err != nil {
+		return CheckoutView{}, fmt.Errorf("list checkout bookings: %w", err)
+	}
+	out := CheckoutView{ID: co.ID, Code: co.Code, Status: co.Status, TotalAmount: co.TotalAmount, Bookings: make([]BookingView, 0, len(rows))}
+	for _, r := range rows {
+		row, err := s.detail(ctx, r.Booking.ID)
+		if err != nil {
+			return CheckoutView{}, err
+		}
+		v, err := s.load(ctx, row, forCustomer)
+		if err != nil {
+			return CheckoutView{}, err
+		}
+		out.Bookings = append(out.Bookings, v)
+	}
+	// Outbound first, whatever the id order.
+	slices.SortStableFunc(out.Bookings, func(a, b BookingView) int {
+		return legRank(a) - legRank(b)
+	})
+	return out, nil
+}
+
+func legRank(v BookingView) int {
+	if v.Ride != nil && v.Ride.Direction == directionReturn {
+		return 1
+	}
+	return 0
 }

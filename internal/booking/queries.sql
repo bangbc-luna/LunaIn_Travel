@@ -88,6 +88,8 @@ WHERE (sqlc.narg(customer_id)::uuid IS NULL OR b.customer_id = sqlc.narg(custome
   AND (sqlc.narg(partner_id)::uuid IS NULL OR b.partner_id = sqlc.narg(partner_id))
   AND (sqlc.narg(status)::text IS NULL OR b.status = sqlc.narg(status))
   AND (sqlc.narg(code)::text IS NULL OR b.code = sqlc.narg(code))
+  AND (sqlc.narg(trip_id)::uuid IS NULL OR EXISTS (
+        SELECT 1 FROM booking_ride_details d WHERE d.booking_id = b.id AND d.trip_id = sqlc.narg(trip_id)))
   AND (sqlc.narg(cursor)::uuid IS NULL OR b.id < sqlc.narg(cursor))
 ORDER BY b.id DESC
 LIMIT @lim;
@@ -222,3 +224,37 @@ WHERE d.time_slot_id = @time_slot_id AND d.visit_date >= (@from_date::text)::dat
 
 -- name: GetRideDetails :one
 SELECT * FROM booking_ride_details WHERE booking_id = @booking_id;
+
+-- name: InsertRideDetail :exec
+INSERT INTO booking_ride_details (booking_id, listing_id, trip_id, seats, direction, origin_name, dest_name, created_at, updated_at)
+VALUES (@booking_id, @listing_id, @trip_id, @seats::int, @direction, @origin_name, @dest_name, @now, @now);
+
+-- Pending ride bookings on these trips whose hold passed release, except
+-- those of one checkout (booking_ride_details_trip_idx). The caller holds the
+-- trip locks.
+-- name: ListOverdueRideHolds :many
+SELECT b.id, b.checkout_id FROM bookings b
+JOIN booking_ride_details d ON d.booking_id = b.id
+WHERE d.trip_id = ANY(@trip_ids::uuid[])
+  AND b.status = 'pending_payment' AND b.hold_release_at <= @now::timestamptz
+  AND b.checkout_id <> @except_checkout
+ORDER BY b.id;
+
+-- Bookings locked in id order (DB §1.1).
+-- name: LockBookingsByIDs :many
+SELECT * FROM bookings WHERE id = ANY(@ids::uuid[]) ORDER BY id FOR UPDATE;
+
+-- Trips of a checkout's ride bookings, unlocked (a booking's trip never
+-- changes), so the caller can lock them before the checkout.
+-- name: ListCheckoutRideTrips :many
+SELECT DISTINCT d.trip_id FROM booking_ride_details d
+JOIN bookings b ON b.id = d.booking_id
+WHERE b.checkout_id = @checkout_id
+ORDER BY d.trip_id;
+
+-- The other ride booking of a round trip (same checkout).
+-- name: ListPairedRideBookings :many
+SELECT b.id FROM bookings b
+JOIN booking_ride_details d ON d.booking_id = b.id
+WHERE b.checkout_id = @checkout_id AND b.id <> @booking_id
+ORDER BY b.id;

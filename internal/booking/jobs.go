@@ -153,7 +153,8 @@ func PeriodicJobs() []*river.PeriodicJob {
 // (hold_release_at <= now) and returns how many it expired.
 //
 // Candidates are read unlocked, then each checkout is handled in its own tx
-// with the webhook's lock order (checkout -> bookings -> payments) so that a
+// with the webhook's lock order (ride trips -> checkout -> bookings ->
+// payments; an expired ride booking returns its seats) so that a
 // concurrent HandlePaid serializes with it; the state is re-checked under the
 // locks: every still-pending booking past release becomes expired (history,
 // actor system). When no booking of the checkout remains pending or went past
@@ -213,6 +214,11 @@ func (s *Service) cancelLink(ctx context.Context, orderCode int64) {
 // bookings expired and the order codes of the payments expired.
 func (s *Service) expireCheckout(ctx context.Context, tx pgx.Tx, checkoutID uuid.UUID, now time.Time) (int, []int64, error) {
 	q := store.New(tx)
+	// The ride trips first (DB §1.1): an expired ride booking returns its
+	// seats in this tx.
+	if err := s.lockCheckoutTrips(ctx, tx, checkoutID); err != nil {
+		return 0, nil, err
+	}
 	co, err := q.LockCheckout(ctx, checkoutID)
 	if err != nil {
 		return 0, nil, fmt.Errorf("lock checkout: %w", err)
@@ -230,6 +236,9 @@ func (s *Service) expireCheckout(ctx context.Context, tx pgx.Tx, checkoutID uuid
 				return 0, nil, fmt.Errorf("expire booking: %w", err)
 			}
 			if err := insertHistory(ctx, q, b, StatusExpired, actorSystem, nil, &reason, now); err != nil {
+				return 0, nil, err
+			}
+			if err := s.releaseRideSeats(ctx, tx, b); err != nil {
 				return 0, nil, err
 			}
 			bookings[i].Status = StatusExpired

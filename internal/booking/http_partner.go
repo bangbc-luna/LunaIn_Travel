@@ -31,6 +31,15 @@ func (s *Service) PartnerRoutes(mux httpx.Router, iss *auth.Issuer, requireMembe
 			httpx.WriteError(w, r, err)
 			return
 		}
+		// ?trip_id: the passengers of one ride trip.
+		if v := r.URL.Query().Get("trip_id"); v != "" {
+			id, err := uuid.Parse(v)
+			if err != nil {
+				httpx.WriteError(w, r, httpx.ErrInvalidRequest)
+				return
+			}
+			f.TripID = &id
+		}
 		items, next, err := s.ListForPartner(r.Context(), partnerID, f)
 		writeList(w, r, items, next, err)
 	}))
