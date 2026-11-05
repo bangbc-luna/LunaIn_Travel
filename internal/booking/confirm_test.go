@@ -90,7 +90,9 @@ func (e *env) requireBalance(t *testing.T, pending, available int64) {
 
 func (e *env) emails(t *testing.T) int {
 	t.Helper()
-	return e.count(t, `SELECT count(*) FROM river_job WHERE kind = 'send_email'`)
+	// Mismatch alerts to super admins (M-3) are counted by adminAlerts.
+	return e.count(t, `SELECT count(*) FROM river_job WHERE kind = 'send_email'
+		AND args->>'to' NOT IN (SELECT email FROM users WHERE role = 'super_admin')`)
 }
 
 type refundRow struct {

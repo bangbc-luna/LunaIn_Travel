@@ -205,6 +205,13 @@ var adminRoutes = []route{
 	{"POST /v1/admin/payouts/{id}/approve", "/v1/admin/payouts/" + uuid.Nil.String() + "/approve"},
 	{"POST /v1/admin/payouts/{id}/mark-paid", "/v1/admin/payouts/" + uuid.Nil.String() + "/mark-paid"},
 	{"POST /v1/admin/payouts/{id}/reject", "/v1/admin/payouts/" + uuid.Nil.String() + "/reject"},
+	{"GET /v1/admin/refunds", "/v1/admin/refunds"},
+	{"GET /v1/admin/refunds/{id}", "/v1/admin/refunds/" + uuid.Nil.String()},
+	{"POST /v1/admin/refunds/{id}/complete", "/v1/admin/refunds/" + uuid.Nil.String() + "/complete"},
+	{"GET /v1/admin/payments", "/v1/admin/payments"},
+	{"GET /v1/admin/payments/{id}", "/v1/admin/payments/" + uuid.Nil.String()},
+	{"POST /v1/admin/payments/{id}/seen", "/v1/admin/payments/" + uuid.Nil.String() + "/seen"},
+	{"POST /v1/admin/payments/{id}/resolve", "/v1/admin/payments/" + uuid.Nil.String() + "/resolve"},
 }
 
 // partnerRoutes lists every /v1/partner/* route, like adminRoutes.

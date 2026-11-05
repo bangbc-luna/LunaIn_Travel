@@ -213,6 +213,7 @@ func serve(log *slog.Logger) error {
 
 	settingsSvc := settings.NewService(pool, clock.Real{})
 	paymentSvc := payment.NewService(pool, clock.Real{}, paymentProvider(cfg), log)
+	paymentSvc.SetOps(payment.OpsDeps{Jobs: jobClient, Users: idSvc, Files: fileSvc})
 	ledgerSvc := ledger.NewService(pool, clock.Real{})
 	bookingSvc := booking.NewService(booking.Deps{
 		Pool: pool, Clock: clock.Real{}, Listings: listingSvc, Catalog: catSvc, Settings: settingsSvc,

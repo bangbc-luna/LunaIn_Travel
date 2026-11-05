@@ -13,7 +13,9 @@ import (
 )
 
 const cancelPayment = `-- name: CancelPayment :exec
-UPDATE payments SET status = 'cancelled', updated_at = $1 WHERE id = $2
+UPDATE payments SET status = 'cancelled', review_seen_at = NULL, review_seen_by = NULL, review_resolved_at = NULL, review_resolved_by = NULL,
+    review_note = NULL, updated_at = $1
+WHERE id = $2
 `
 
 type CancelPaymentParams struct {
@@ -21,6 +23,9 @@ type CancelPaymentParams struct {
 	ID  uuid.UUID
 }
 
+// Every query writing payments.status clears the review columns (Ruling 1):
+// payments_review_status_check allows them only on needs_review, and a new
+// needs_review (new money) reopens the review from scratch.
 func (q *Queries) CancelPayment(ctx context.Context, arg CancelPaymentParams) error {
 	_, err := q.db.Exec(ctx, cancelPayment, arg.Now, arg.ID)
 	return err
@@ -37,6 +42,55 @@ func (q *Queries) CheckoutHasBookingRefund(ctx context.Context, checkoutID uuid.
 	return exists, err
 }
 
+const completeRefund = `-- name: CompleteRefund :one
+UPDATE refunds
+SET status = 'completed', transfer_reference = $1::text, proof_file_id = $2,
+    completed_by = $3::uuid, completed_at = $4::timestamptz, updated_at = $4
+WHERE id = $5
+RETURNING id, payment_id, checkout_id, booking_id, provider_reference, amount, reason, status, bank_bin, account_number, account_holder, transfer_reference, proof_file_id, completed_by, completed_at, created_at, updated_at, bank_info_reminder_count, bank_info_reminded_at
+`
+
+type CompleteRefundParams struct {
+	TransferReference string
+	ProofFileID       *uuid.UUID
+	Actor             uuid.UUID
+	Now               time.Time
+	ID                uuid.UUID
+}
+
+func (q *Queries) CompleteRefund(ctx context.Context, arg CompleteRefundParams) (Refund, error) {
+	row := q.db.QueryRow(ctx, completeRefund,
+		arg.TransferReference,
+		arg.ProofFileID,
+		arg.Actor,
+		arg.Now,
+		arg.ID,
+	)
+	var i Refund
+	err := row.Scan(
+		&i.ID,
+		&i.PaymentID,
+		&i.CheckoutID,
+		&i.BookingID,
+		&i.ProviderReference,
+		&i.Amount,
+		&i.Reason,
+		&i.Status,
+		&i.BankBin,
+		&i.AccountNumber,
+		&i.AccountHolder,
+		&i.TransferReference,
+		&i.ProofFileID,
+		&i.CompletedBy,
+		&i.CompletedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.BankInfoReminderCount,
+		&i.BankInfoRemindedAt,
+	)
+	return i, err
+}
+
 const finishPaymentEvent = `-- name: FinishPaymentEvent :exec
 UPDATE payment_events SET processed_at = $1::timestamptz, result = $2::text, updated_at = $1
 WHERE dedupe_key = $3
@@ -51,6 +105,17 @@ type FinishPaymentEventParams struct {
 func (q *Queries) FinishPaymentEvent(ctx context.Context, arg FinishPaymentEventParams) error {
 	_, err := q.db.Exec(ctx, finishPaymentEvent, arg.Now, arg.Result, arg.DedupeKey)
 	return err
+}
+
+const getCheckoutCustomer = `-- name: GetCheckoutCustomer :one
+SELECT customer_id FROM checkouts WHERE id = $1
+`
+
+func (q *Queries) GetCheckoutCustomer(ctx context.Context, id uuid.UUID) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, getCheckoutCustomer, id)
+	var customer_id uuid.UUID
+	err := row.Scan(&customer_id)
+	return customer_id, err
 }
 
 const getPayment = `-- name: GetPayment :one
@@ -193,6 +258,37 @@ func (q *Queries) GetPendingPaymentByCheckout(ctx context.Context, checkoutID uu
 		&i.ReviewResolvedAt,
 		&i.ReviewResolvedBy,
 		&i.ReviewNote,
+	)
+	return i, err
+}
+
+const getRefund = `-- name: GetRefund :one
+SELECT id, payment_id, checkout_id, booking_id, provider_reference, amount, reason, status, bank_bin, account_number, account_holder, transfer_reference, proof_file_id, completed_by, completed_at, created_at, updated_at, bank_info_reminder_count, bank_info_reminded_at FROM refunds WHERE id = $1
+`
+
+func (q *Queries) GetRefund(ctx context.Context, id uuid.UUID) (Refund, error) {
+	row := q.db.QueryRow(ctx, getRefund, id)
+	var i Refund
+	err := row.Scan(
+		&i.ID,
+		&i.PaymentID,
+		&i.CheckoutID,
+		&i.BookingID,
+		&i.ProviderReference,
+		&i.Amount,
+		&i.Reason,
+		&i.Status,
+		&i.BankBin,
+		&i.AccountNumber,
+		&i.AccountHolder,
+		&i.TransferReference,
+		&i.ProofFileID,
+		&i.CompletedBy,
+		&i.CompletedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.BankInfoReminderCount,
+		&i.BankInfoRemindedAt,
 	)
 	return i, err
 }
@@ -362,6 +458,139 @@ func (q *Queries) InsertRefund(ctx context.Context, arg InsertRefundParams) (Ref
 	return i, err
 }
 
+const listAdminPayments = `-- name: ListAdminPayments :many
+SELECT id, checkout_id, provider, provider_order_code, amount, status, checkout_url, qr_code, expires_at, paid_at, provider_reference, raw, created_at, updated_at, review_seen_at, review_seen_by, review_resolved_at, review_resolved_by, review_note FROM payments
+WHERE ($1::text IS NULL OR status = $1)
+  AND (NOT $2::bool OR (status = 'needs_review' AND review_resolved_at IS NULL))
+  AND ($3::uuid IS NULL OR checkout_id = $3)
+  AND ($4::uuid IS NULL OR id < $4)
+ORDER BY id DESC
+LIMIT $5
+`
+
+type ListAdminPaymentsParams struct {
+	Status     *string
+	OpenReview bool
+	CheckoutID *uuid.UUID
+	Cursor     *uuid.UUID
+	Lim        int32
+}
+
+// Newest first. open_review: needs_review and not resolved yet.
+func (q *Queries) ListAdminPayments(ctx context.Context, arg ListAdminPaymentsParams) ([]Payment, error) {
+	rows, err := q.db.Query(ctx, listAdminPayments,
+		arg.Status,
+		arg.OpenReview,
+		arg.CheckoutID,
+		arg.Cursor,
+		arg.Lim,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Payment
+	for rows.Next() {
+		var i Payment
+		if err := rows.Scan(
+			&i.ID,
+			&i.CheckoutID,
+			&i.Provider,
+			&i.ProviderOrderCode,
+			&i.Amount,
+			&i.Status,
+			&i.CheckoutUrl,
+			&i.QrCode,
+			&i.ExpiresAt,
+			&i.PaidAt,
+			&i.ProviderReference,
+			&i.Raw,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.ReviewSeenAt,
+			&i.ReviewSeenBy,
+			&i.ReviewResolvedAt,
+			&i.ReviewResolvedBy,
+			&i.ReviewNote,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAdminRefunds = `-- name: ListAdminRefunds :many
+SELECT id, payment_id, checkout_id, booking_id, provider_reference, amount, reason, status, bank_bin, account_number, account_holder, transfer_reference, proof_file_id, completed_by, completed_at, created_at, updated_at, bank_info_reminder_count, bank_info_reminded_at FROM refunds
+WHERE ($1::text IS NULL OR status = $1)
+  AND ($2::text IS NULL OR reason = $2)
+  AND ($3::uuid IS NULL OR booking_id = $3)
+  AND ($4::uuid IS NULL OR payment_id = $4)
+  AND ($5::uuid IS NULL OR id < $5)
+ORDER BY id DESC
+LIMIT $6
+`
+
+type ListAdminRefundsParams struct {
+	Status    *string
+	Reason    *string
+	BookingID *uuid.UUID
+	PaymentID *uuid.UUID
+	Cursor    *uuid.UUID
+	Lim       int32
+}
+
+// Newest first; every filter optional; cursor = last id of the previous page.
+func (q *Queries) ListAdminRefunds(ctx context.Context, arg ListAdminRefundsParams) ([]Refund, error) {
+	rows, err := q.db.Query(ctx, listAdminRefunds,
+		arg.Status,
+		arg.Reason,
+		arg.BookingID,
+		arg.PaymentID,
+		arg.Cursor,
+		arg.Lim,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Refund
+	for rows.Next() {
+		var i Refund
+		if err := rows.Scan(
+			&i.ID,
+			&i.PaymentID,
+			&i.CheckoutID,
+			&i.BookingID,
+			&i.ProviderReference,
+			&i.Amount,
+			&i.Reason,
+			&i.Status,
+			&i.BankBin,
+			&i.AccountNumber,
+			&i.AccountHolder,
+			&i.TransferReference,
+			&i.ProofFileID,
+			&i.CompletedBy,
+			&i.CompletedAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.BankInfoReminderCount,
+			&i.BankInfoRemindedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listCustomerRefunds = `-- name: ListCustomerRefunds :many
 SELECT r.id, r.payment_id, r.checkout_id, r.booking_id, r.provider_reference, r.amount, r.reason, r.status, r.bank_bin, r.account_number, r.account_holder, r.transfer_reference, r.proof_file_id, r.completed_by, r.completed_at, r.created_at, r.updated_at, r.bank_info_reminder_count, r.bank_info_reminded_at FROM refunds r
 JOIN checkouts c ON c.id = r.checkout_id
@@ -408,6 +637,126 @@ func (q *Queries) ListCustomerRefunds(ctx context.Context, arg ListCustomerRefun
 			return nil, err
 		}
 		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPaymentEvents = `-- name: ListPaymentEvents :many
+SELECT dedupe_key, result, amount, received_at FROM payment_events
+WHERE payment_id = $1
+ORDER BY received_at, id
+`
+
+type ListPaymentEventsRow struct {
+	DedupeKey  string
+	Result     *string
+	Amount     *int64
+	ReceivedAt time.Time
+}
+
+func (q *Queries) ListPaymentEvents(ctx context.Context, paymentID *uuid.UUID) ([]ListPaymentEventsRow, error) {
+	rows, err := q.db.Query(ctx, listPaymentEvents, paymentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListPaymentEventsRow
+	for rows.Next() {
+		var i ListPaymentEventsRow
+		if err := rows.Scan(
+			&i.DedupeKey,
+			&i.Result,
+			&i.Amount,
+			&i.ReceivedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPaymentRefunds = `-- name: ListPaymentRefunds :many
+SELECT id, payment_id, checkout_id, booking_id, provider_reference, amount, reason, status, bank_bin, account_number, account_holder, transfer_reference, proof_file_id, completed_by, completed_at, created_at, updated_at, bank_info_reminder_count, bank_info_reminded_at FROM refunds WHERE payment_id = $1 ORDER BY id
+`
+
+func (q *Queries) ListPaymentRefunds(ctx context.Context, paymentID uuid.UUID) ([]Refund, error) {
+	rows, err := q.db.Query(ctx, listPaymentRefunds, paymentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Refund
+	for rows.Next() {
+		var i Refund
+		if err := rows.Scan(
+			&i.ID,
+			&i.PaymentID,
+			&i.CheckoutID,
+			&i.BookingID,
+			&i.ProviderReference,
+			&i.Amount,
+			&i.Reason,
+			&i.Status,
+			&i.BankBin,
+			&i.AccountNumber,
+			&i.AccountHolder,
+			&i.TransferReference,
+			&i.ProofFileID,
+			&i.CompletedBy,
+			&i.CompletedAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.BankInfoReminderCount,
+			&i.BankInfoRemindedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRefundsToRemind = `-- name: ListRefundsToRemind :many
+SELECT id FROM refunds
+WHERE status = 'awaiting_bank_info'
+  AND created_at <= $1
+  AND (bank_info_reminded_at IS NULL OR bank_info_reminded_at <= $1)
+  AND bank_info_reminder_count < $2::int
+ORDER BY created_at, id
+LIMIT $3
+`
+
+type ListRefundsToRemindParams struct {
+	Cutoff   time.Time
+	MaxCount int32
+	Lim      int32
+}
+
+// Refunds still waiting for the customer's bank account, created and last
+// reminded at or before @cutoff, reminded fewer than @max_count times.
+func (q *Queries) ListRefundsToRemind(ctx context.Context, arg ListRefundsToRemindParams) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listRefundsToRemind, arg.Cutoff, arg.MaxCount, arg.Lim)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -486,15 +835,21 @@ func (q *Queries) LockCheckoutPayments(ctx context.Context, checkoutID uuid.UUID
 }
 
 const lockCheckoutRow = `-- name: LockCheckoutRow :one
-SELECT id FROM checkouts WHERE id = $1 FOR UPDATE
+SELECT id, status, customer_id FROM checkouts WHERE id = $1 FOR UPDATE
 `
 
+type LockCheckoutRowRow struct {
+	ID         uuid.UUID
+	Status     string
+	CustomerID uuid.UUID
+}
+
 // Lock helpers for rotating a payment (checkout -> bookings -> payment).
-func (q *Queries) LockCheckoutRow(ctx context.Context, id uuid.UUID) (uuid.UUID, error) {
+func (q *Queries) LockCheckoutRow(ctx context.Context, id uuid.UUID) (LockCheckoutRowRow, error) {
 	row := q.db.QueryRow(ctx, lockCheckoutRow, id)
-	var id_2 uuid.UUID
-	err := row.Scan(&id_2)
-	return id_2, err
+	var i LockCheckoutRowRow
+	err := row.Scan(&i.ID, &i.Status, &i.CustomerID)
+	return i, err
 }
 
 const lockCustomerRefund = `-- name: LockCustomerRefund :one
@@ -574,6 +929,54 @@ func (q *Queries) LockPayment(ctx context.Context, id uuid.UUID) (Payment, error
 	return i, err
 }
 
+const lockRefund = `-- name: LockRefund :one
+SELECT id, payment_id, checkout_id, booking_id, provider_reference, amount, reason, status, bank_bin, account_number, account_holder, transfer_reference, proof_file_id, completed_by, completed_at, created_at, updated_at, bank_info_reminder_count, bank_info_reminded_at FROM refunds WHERE id = $1 FOR UPDATE
+`
+
+// Only the refund row (Super Admin actions, reminders).
+func (q *Queries) LockRefund(ctx context.Context, id uuid.UUID) (Refund, error) {
+	row := q.db.QueryRow(ctx, lockRefund, id)
+	var i Refund
+	err := row.Scan(
+		&i.ID,
+		&i.PaymentID,
+		&i.CheckoutID,
+		&i.BookingID,
+		&i.ProviderReference,
+		&i.Amount,
+		&i.Reason,
+		&i.Status,
+		&i.BankBin,
+		&i.AccountNumber,
+		&i.AccountHolder,
+		&i.TransferReference,
+		&i.ProofFileID,
+		&i.CompletedBy,
+		&i.CompletedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.BankInfoReminderCount,
+		&i.BankInfoRemindedAt,
+	)
+	return i, err
+}
+
+const markRefundReminded = `-- name: MarkRefundReminded :exec
+UPDATE refunds
+SET bank_info_reminder_count = bank_info_reminder_count + 1, bank_info_reminded_at = $1::timestamptz, updated_at = $1
+WHERE id = $2
+`
+
+type MarkRefundRemindedParams struct {
+	Now time.Time
+	ID  uuid.UUID
+}
+
+func (q *Queries) MarkRefundReminded(ctx context.Context, arg MarkRefundRemindedParams) error {
+	_, err := q.db.Exec(ctx, markRefundReminded, arg.Now, arg.ID)
+	return err
+}
+
 const paymentEventExists = `-- name: PaymentEventExists :one
 SELECT EXISTS (SELECT 1 FROM payment_events WHERE dedupe_key = $1)
 `
@@ -588,7 +991,8 @@ func (q *Queries) PaymentEventExists(ctx context.Context, dedupeKey string) (boo
 const recordPaymentReceived = `-- name: RecordPaymentReceived :exec
 UPDATE payments
 SET status = $1, paid_at = $2::timestamptz, provider_reference = $3::text,
-    raw = $4, updated_at = $5
+    raw = $4, review_seen_at = NULL, review_seen_by = NULL, review_resolved_at = NULL, review_resolved_by = NULL,
+    review_note = NULL, updated_at = $5
 WHERE id = $6
 `
 
@@ -612,6 +1016,55 @@ func (q *Queries) RecordPaymentReceived(ctx context.Context, arg RecordPaymentRe
 		arg.ID,
 	)
 	return err
+}
+
+const resolveReview = `-- name: ResolveReview :one
+UPDATE payments
+SET review_seen_at = COALESCE(review_seen_at, $1::timestamptz), review_seen_by = COALESCE(review_seen_by, $2::uuid),
+    review_resolved_at = $1::timestamptz, review_resolved_by = $2::uuid, review_note = $3,
+    updated_at = $1::timestamptz
+WHERE id = $4
+RETURNING id, checkout_id, provider, provider_order_code, amount, status, checkout_url, qr_code, expires_at, paid_at, provider_reference, raw, created_at, updated_at, review_seen_at, review_seen_by, review_resolved_at, review_resolved_by, review_note
+`
+
+type ResolveReviewParams struct {
+	Now   time.Time
+	Actor uuid.UUID
+	Note  *string
+	ID    uuid.UUID
+}
+
+// Resolving implies seeing: the seen columns are filled when still empty.
+func (q *Queries) ResolveReview(ctx context.Context, arg ResolveReviewParams) (Payment, error) {
+	row := q.db.QueryRow(ctx, resolveReview,
+		arg.Now,
+		arg.Actor,
+		arg.Note,
+		arg.ID,
+	)
+	var i Payment
+	err := row.Scan(
+		&i.ID,
+		&i.CheckoutID,
+		&i.Provider,
+		&i.ProviderOrderCode,
+		&i.Amount,
+		&i.Status,
+		&i.CheckoutUrl,
+		&i.QrCode,
+		&i.ExpiresAt,
+		&i.PaidAt,
+		&i.ProviderReference,
+		&i.Raw,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ReviewSeenAt,
+		&i.ReviewSeenBy,
+		&i.ReviewResolvedAt,
+		&i.ReviewResolvedBy,
+		&i.ReviewNote,
+	)
+	return i, err
 }
 
 const setPaymentLink = `-- name: SetPaymentLink :execrows
@@ -642,7 +1095,9 @@ func (q *Queries) SetPaymentLink(ctx context.Context, arg SetPaymentLinkParams) 
 }
 
 const setPaymentStatus = `-- name: SetPaymentStatus :exec
-UPDATE payments SET status = $1, updated_at = $2 WHERE id = $3
+UPDATE payments SET status = $1, review_seen_at = NULL, review_seen_by = NULL, review_resolved_at = NULL, review_resolved_by = NULL,
+    review_note = NULL, updated_at = $2
+WHERE id = $3
 `
 
 type SetPaymentStatusParams struct {
@@ -680,6 +1135,45 @@ func (q *Queries) SetRefundBankInfo(ctx context.Context, arg SetRefundBankInfoPa
 		arg.ID,
 	)
 	return err
+}
+
+const setReviewSeen = `-- name: SetReviewSeen :one
+UPDATE payments SET review_seen_at = $1::timestamptz, review_seen_by = $2::uuid, updated_at = $1
+WHERE id = $3
+RETURNING id, checkout_id, provider, provider_order_code, amount, status, checkout_url, qr_code, expires_at, paid_at, provider_reference, raw, created_at, updated_at, review_seen_at, review_seen_by, review_resolved_at, review_resolved_by, review_note
+`
+
+type SetReviewSeenParams struct {
+	Now   time.Time
+	Actor uuid.UUID
+	ID    uuid.UUID
+}
+
+func (q *Queries) SetReviewSeen(ctx context.Context, arg SetReviewSeenParams) (Payment, error) {
+	row := q.db.QueryRow(ctx, setReviewSeen, arg.Now, arg.Actor, arg.ID)
+	var i Payment
+	err := row.Scan(
+		&i.ID,
+		&i.CheckoutID,
+		&i.Provider,
+		&i.ProviderOrderCode,
+		&i.Amount,
+		&i.Status,
+		&i.CheckoutUrl,
+		&i.QrCode,
+		&i.ExpiresAt,
+		&i.PaidAt,
+		&i.ProviderReference,
+		&i.Raw,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ReviewSeenAt,
+		&i.ReviewSeenBy,
+		&i.ReviewResolvedAt,
+		&i.ReviewResolvedBy,
+		&i.ReviewNote,
+	)
+	return i, err
 }
 
 const upsertRefundAccount = `-- name: UpsertRefundAccount :one

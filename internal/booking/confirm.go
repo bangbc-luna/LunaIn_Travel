@@ -94,6 +94,8 @@ var _ payment.PaymentHandler = (*Service)(nil)
 // pending when the customer saved a refund account. The customer is emailed
 // (outbox) about each confirmation and refund. An event the provider's status
 // did not confirm (ev.NeedsReview) always leaves the payment needs_review.
+// An underpaid, overpaid or refunded duplicate transfer, or one with
+// ev.NeedsReview, also emails every active super admin (M-3, same tx).
 func (s *Service) HandlePaid(ctx context.Context, tx pgx.Tx, ev payment.PaidEvent) (payment.PaidOutcome, error) {
 	q := store.New(tx)
 	now := s.clock.Now()
@@ -138,13 +140,23 @@ func (s *Service) HandlePaid(ctx context.Context, tx pgx.Tx, ev payment.PaidEven
 	if err != nil {
 		return payment.PaidOutcome{}, err
 	}
-	if !canTake {
-		return c.duplicate(ctx)
+	var out payment.PaidOutcome
+	switch {
+	case !canTake:
+		out, err = c.duplicate(ctx)
+	case ev.AmountPaid < c.pay.Amount:
+		out, err = c.underpaid(ctx)
+	default:
+		out, err = c.confirm(ctx)
 	}
-	if ev.AmountPaid < c.pay.Amount {
-		return c.underpaid(ctx)
+	if err != nil {
+		return out, err
 	}
-	return c.confirm(ctx)
+	// M-3: mismatches alert the super admins, in this tx.
+	if err := c.alertMismatch(ctx); err != nil {
+		return payment.PaidOutcome{}, err
+	}
+	return out, nil
 }
 
 // lateBooking: expired, or pending_payment with the hold already past
@@ -319,7 +331,9 @@ func (c *confirmation) duplicate(ctx context.Context) (payment.PaidOutcome, erro
 			return c.out, err
 		}
 	}
-	if c.ev.NeedsReview && c.pay.ProviderReference != nil {
+	// New money on a payment already under review reopens its review (the
+	// status write clears review_*), like a status-lagging transfer does.
+	if c.pay.ProviderReference != nil && (c.ev.NeedsReview || c.pay.Status == payment.StatusNeedsReview) {
 		if err := c.s.payments.MarkNeedsReview(ctx, c.tx, c.pay.ID); err != nil {
 			return c.out, err
 		}

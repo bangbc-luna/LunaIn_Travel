@@ -121,3 +121,9 @@ WHERE user_id = @user_id;
 
 -- name: DeleteUserIdentities :exec
 DELETE FROM user_identities WHERE user_id = @user_id;
+
+-- name: ListActiveSuperAdminEmails :many
+SELECT email FROM users WHERE role = 'super_admin' AND status = 'active' ORDER BY email;
+
+-- name: GetUserEmail :one
+SELECT email FROM users WHERE id = @id;

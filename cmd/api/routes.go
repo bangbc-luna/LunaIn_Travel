@@ -65,6 +65,7 @@ func buildMux(d muxDeps) (*http.ServeMux, []string) {
 	d.Booking.AdminRoutes(rr, d.Issuer)
 	d.Payout.PartnerRoutes(rr, d.Issuer, d.Partner.RequireMember())
 	d.Payout.AdminRoutes(rr, d.Issuer)
+	d.Payment.AdminRoutes(rr, d.Issuer)
 	d.Payment.Routes(rr, payment.RouteDeps{Handler: d.Booking, ClientIP: d.ClientIP, AppEnv: d.AppEnv})
 	rr.HandleFunc("GET /healthz", healthz)
 	rr.HandleFunc("GET /readyz", readyz(d.Pool))

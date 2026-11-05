@@ -36,19 +36,25 @@ SELECT * FROM payments WHERE id = @id FOR NO KEY UPDATE;
 
 -- Lock helpers for rotating a payment (checkout -> bookings -> payment).
 -- name: LockCheckoutRow :one
-SELECT id FROM checkouts WHERE id = @id FOR UPDATE;
+SELECT id, status, customer_id FROM checkouts WHERE id = @id FOR UPDATE;
 
 -- name: LockCheckoutBookingRows :many
 SELECT id FROM bookings WHERE checkout_id = @checkout_id ORDER BY id FOR UPDATE;
 
+-- Every query writing payments.status clears the review columns (Ruling 1):
+-- payments_review_status_check allows them only on needs_review, and a new
+-- needs_review (new money) reopens the review from scratch.
 -- name: CancelPayment :exec
-UPDATE payments SET status = 'cancelled', updated_at = @now WHERE id = @id;
+UPDATE payments SET status = 'cancelled', review_seen_at = NULL, review_seen_by = NULL, review_resolved_at = NULL, review_resolved_by = NULL,
+    review_note = NULL, updated_at = @now
+WHERE id = @id;
 
 -- Money received on a payment: status paid or needs_review.
 -- name: RecordPaymentReceived :exec
 UPDATE payments
 SET status = @status, paid_at = @paid_at::timestamptz, provider_reference = @provider_reference::text,
-    raw = @raw, updated_at = @now
+    raw = @raw, review_seen_at = NULL, review_seen_by = NULL, review_resolved_at = NULL, review_resolved_by = NULL,
+    review_note = NULL, updated_at = @now
 WHERE id = @id;
 
 -- name: PaymentEventExists :one
@@ -83,7 +89,9 @@ RETURNING *;
 SELECT * FROM payments WHERE checkout_id = @checkout_id ORDER BY id FOR NO KEY UPDATE;
 
 -- name: SetPaymentStatus :exec
-UPDATE payments SET status = @status, updated_at = @now WHERE id = @id;
+UPDATE payments SET status = @status, review_seen_at = NULL, review_seen_by = NULL, review_resolved_at = NULL, review_resolved_by = NULL,
+    review_note = NULL, updated_at = @now
+WHERE id = @id;
 
 -- name: GetPaymentEventReceivedAt :one
 SELECT received_at FROM payment_events WHERE dedupe_key = @dedupe_key;
@@ -118,3 +126,79 @@ JOIN checkouts c ON c.id = r.checkout_id
 WHERE c.customer_id = @customer_id
 ORDER BY r.id DESC
 LIMIT @lim;
+
+-- name: GetRefund :one
+SELECT * FROM refunds WHERE id = @id;
+
+-- Only the refund row (Super Admin actions, reminders).
+-- name: LockRefund :one
+SELECT * FROM refunds WHERE id = @id FOR UPDATE;
+
+-- name: CompleteRefund :one
+UPDATE refunds
+SET status = 'completed', transfer_reference = @transfer_reference::text, proof_file_id = sqlc.narg(proof_file_id),
+    completed_by = @actor::uuid, completed_at = @now::timestamptz, updated_at = @now
+WHERE id = @id
+RETURNING *;
+
+-- name: GetCheckoutCustomer :one
+SELECT customer_id FROM checkouts WHERE id = @id;
+
+-- Newest first; every filter optional; cursor = last id of the previous page.
+-- name: ListAdminRefunds :many
+SELECT * FROM refunds
+WHERE (sqlc.narg(status)::text IS NULL OR status = sqlc.narg(status))
+  AND (sqlc.narg(reason)::text IS NULL OR reason = sqlc.narg(reason))
+  AND (sqlc.narg(booking_id)::uuid IS NULL OR booking_id = sqlc.narg(booking_id))
+  AND (sqlc.narg(payment_id)::uuid IS NULL OR payment_id = sqlc.narg(payment_id))
+  AND (sqlc.narg(cursor)::uuid IS NULL OR id < sqlc.narg(cursor))
+ORDER BY id DESC
+LIMIT @lim;
+
+-- Refunds still waiting for the customer's bank account, created and last
+-- reminded at or before @cutoff, reminded fewer than @max_count times.
+-- name: ListRefundsToRemind :many
+SELECT id FROM refunds
+WHERE status = 'awaiting_bank_info'
+  AND created_at <= @cutoff
+  AND (bank_info_reminded_at IS NULL OR bank_info_reminded_at <= @cutoff)
+  AND bank_info_reminder_count < @max_count::int
+ORDER BY created_at, id
+LIMIT @lim;
+
+-- name: MarkRefundReminded :exec
+UPDATE refunds
+SET bank_info_reminder_count = bank_info_reminder_count + 1, bank_info_reminded_at = @now::timestamptz, updated_at = @now
+WHERE id = @id;
+
+-- Newest first. open_review: needs_review and not resolved yet.
+-- name: ListAdminPayments :many
+SELECT * FROM payments
+WHERE (sqlc.narg(status)::text IS NULL OR status = sqlc.narg(status))
+  AND (NOT @open_review::bool OR (status = 'needs_review' AND review_resolved_at IS NULL))
+  AND (sqlc.narg(checkout_id)::uuid IS NULL OR checkout_id = sqlc.narg(checkout_id))
+  AND (sqlc.narg(cursor)::uuid IS NULL OR id < sqlc.narg(cursor))
+ORDER BY id DESC
+LIMIT @lim;
+
+-- name: ListPaymentEvents :many
+SELECT dedupe_key, result, amount, received_at FROM payment_events
+WHERE payment_id = @payment_id
+ORDER BY received_at, id;
+
+-- name: ListPaymentRefunds :many
+SELECT * FROM refunds WHERE payment_id = @payment_id ORDER BY id;
+
+-- name: SetReviewSeen :one
+UPDATE payments SET review_seen_at = @now::timestamptz, review_seen_by = @actor::uuid, updated_at = @now
+WHERE id = @id
+RETURNING *;
+
+-- Resolving implies seeing: the seen columns are filled when still empty.
+-- name: ResolveReview :one
+UPDATE payments
+SET review_seen_at = COALESCE(review_seen_at, @now::timestamptz), review_seen_by = COALESCE(review_seen_by, @actor::uuid),
+    review_resolved_at = @now::timestamptz, review_resolved_by = @actor::uuid, review_note = sqlc.narg(note),
+    updated_at = @now::timestamptz
+WHERE id = @id
+RETURNING *;

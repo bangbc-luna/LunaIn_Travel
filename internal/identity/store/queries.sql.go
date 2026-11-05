@@ -311,6 +311,17 @@ func (q *Queries) GetUserByIDForUpdate(ctx context.Context, id uuid.UUID) (User,
 	return i, err
 }
 
+const getUserEmail = `-- name: GetUserEmail :one
+SELECT email FROM users WHERE id = $1
+`
+
+func (q *Queries) GetUserEmail(ctx context.Context, id uuid.UUID) (string, error) {
+	row := q.db.QueryRow(ctx, getUserEmail, id)
+	var email string
+	err := row.Scan(&email)
+	return email, err
+}
+
 const incrementCodeAttempts = `-- name: IncrementCodeAttempts :exec
 UPDATE email_verifications SET attempts = attempts + 1, updated_at = $1 WHERE id = $2
 `
@@ -488,6 +499,30 @@ type InvalidateCodesParams struct {
 func (q *Queries) InvalidateCodes(ctx context.Context, arg InvalidateCodesParams) error {
 	_, err := q.db.Exec(ctx, invalidateCodes, arg.Now, arg.UserID, arg.Purpose)
 	return err
+}
+
+const listActiveSuperAdminEmails = `-- name: ListActiveSuperAdminEmails :many
+SELECT email FROM users WHERE role = 'super_admin' AND status = 'active' ORDER BY email
+`
+
+func (q *Queries) ListActiveSuperAdminEmails(ctx context.Context) ([]string, error) {
+	rows, err := q.db.Query(ctx, listActiveSuperAdminEmails)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var email string
+		if err := rows.Scan(&email); err != nil {
+			return nil, err
+		}
+		items = append(items, email)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const markEmailVerified = `-- name: MarkEmailVerified :exec
