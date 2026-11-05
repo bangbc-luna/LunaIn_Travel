@@ -27,6 +27,13 @@ const (
 	maxPickupPointAddress = 500
 	maxDeliveryFee        = 5_000_000
 
+	// maxRentalDays and rentalHorizonDays bound a rental period; the partner
+	// needs minPartnerResponse to answer a request after the payment window.
+	maxRentalDays      = 30
+	rentalHorizonDays  = 180
+	minPartnerResponse = time.Hour
+	rentalDayLength    = 24 * time.Hour
+
 	actionRentalStore       = "rental_store"
 	actionRentalPickupPoint = "rental_pickup_point"
 )
@@ -36,6 +43,10 @@ var (
 	ErrInvalidRental       = httpx.NewError(http.StatusUnprocessableEntity, "invalid_rental", "Thông tin cửa hàng thuê xe không hợp lệ")
 	ErrStoreRequired       = httpx.NewError(http.StatusUnprocessableEntity, "rental_store_required", "Cần khai báo thông tin cửa hàng trước")
 	ErrPickupPointNotFound = httpx.NewError(http.StatusNotFound, "not_found", "Không tìm thấy điểm nhận xe")
+
+	ErrInvalidRentalPeriod  = httpx.NewError(http.StatusUnprocessableEntity, "invalid_rental_period", "Thời gian thuê không hợp lệ: giờ nhận và giờ trả phải tròn phút, thuê từ 1 đến 30 ngày và nhận xe trong vòng 180 ngày tới")
+	ErrPickupTooSoon        = httpx.NewError(http.StatusUnprocessableEntity, "pickup_too_soon", "Giờ nhận xe quá gần, cần để đủ thời gian đối tác phản hồi và bạn thanh toán")
+	ErrOutsideHandoverHours = httpx.NewError(http.StatusUnprocessableEntity, "outside_handover_hours", "Giờ nhận hoặc giờ trả xe nằm ngoài giờ giao nhận của cửa hàng")
 )
 
 func invalidRental(msg string) error { return withMessage(ErrInvalidRental, msg) }
@@ -48,6 +59,33 @@ func asInvalidRental(err error) error {
 		return invalidRental(fe.app.Message)
 	}
 	return err
+}
+
+// RentalDays is the number of rental days of [pickup, ret): 24-hour blocks
+// rounded up, at least 1.
+func RentalDays(pickup, ret time.Time) int {
+	d := ret.Sub(pickup)
+	days := int((d + rentalDayLength - 1) / rentalDayLength)
+	return max(days, 1)
+}
+
+// CheckRentalPeriod validates a rental period at now and returns its number
+// of days. Both times must be whole minutes, ret after pickup, at most 30
+// days and the pickup at most 180 days ahead (ErrInvalidRentalPeriod). The
+// pickup must also be at least paymentHours plus one hour ahead, so the
+// partner can answer and the customer pay (ErrPickupTooSoon).
+func CheckRentalPeriod(pickup, ret, now time.Time, paymentHours int) (int, error) {
+	if !pickup.Equal(pickup.Truncate(time.Minute)) || !ret.Equal(ret.Truncate(time.Minute)) || !ret.After(pickup) {
+		return 0, ErrInvalidRentalPeriod
+	}
+	days := RentalDays(pickup, ret)
+	if days > maxRentalDays || pickup.After(now.AddDate(0, 0, rentalHorizonDays)) {
+		return 0, ErrInvalidRentalPeriod
+	}
+	if pickup.Before(now.Add(time.Duration(paymentHours)*time.Hour + minPartnerResponse)) {
+		return 0, ErrPickupTooSoon
+	}
+	return days, nil
 }
 
 // RentalStoreInput is the rental terms and the handover window of a store.

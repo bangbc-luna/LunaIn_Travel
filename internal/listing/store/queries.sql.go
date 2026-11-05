@@ -388,6 +388,9 @@ SELECT l.id, l.partner_id, l.service_type, l.title, l.slug, l.summary, l.descrip
                  WHERE tt.listing_id = l.id AND tt.active),
                 (SELECT min(rs.price_per_seat) FROM ride_schedules rs
                  WHERE rs.listing_id = l.id AND rs.active),
+                (SELECT min(m.price_per_day) FROM rental_vehicle_models m
+                 WHERE m.listing_id = l.id AND m.active AND m.quantity > 0
+                   AND EXISTS (SELECT 1 FROM rental_pickup_points pp WHERE pp.listing_id = l.id AND pp.active)),
                 0)::bigint AS price_from
 FROM visible_listings l
 WHERE l.slug = $1
@@ -1678,6 +1681,98 @@ func (q *Queries) ListRecentAuditLog(ctx context.Context, listingID uuid.UUID) (
 	return items, nil
 }
 
+const listRentalCandidates = `-- name: ListRentalCandidates :many
+SELECT m.id, m.listing_id, m.vehicle_kind, m.name, m.model_year, m.seats, m.included_items, m.tags, m.price_per_day, m.quantity, m.cover_file_id, m.active, m.created_at, m.updated_at,
+       l.slug AS listing_slug, l.title AS listing_title, l.address AS listing_address,
+       l.cover_file_id AS listing_cover_file_id,
+       s.handover_open, s.handover_close
+FROM rental_vehicle_models m
+JOIN visible_listings l ON l.id = m.listing_id
+JOIN rental_stores s ON s.listing_id = l.id
+WHERE l.service_type = 'self_drive_rental'
+  AND l.province_code = $1
+  AND m.active AND m.quantity > 0
+  AND m.seats >= $2::int
+  AND ($3::text IS NULL OR m.vehicle_kind = $3)
+  AND ($4::timestamptz AT TIME ZONE 'Asia/Ho_Chi_Minh')::time BETWEEN s.handover_open AND s.handover_close
+  AND ($5::timestamptz AT TIME ZONE 'Asia/Ho_Chi_Minh')::time BETWEEN s.handover_open AND s.handover_close
+  AND EXISTS (SELECT 1 FROM rental_pickup_points pp WHERE pp.listing_id = l.id AND pp.active)
+ORDER BY m.price_per_day, m.id
+LIMIT $6
+`
+
+type ListRentalCandidatesParams struct {
+	ProvinceCode *string
+	MinSeats     int32
+	VehicleKind  *string
+	PickupAt     time.Time
+	ReturnAt     time.Time
+	Cap          int32
+}
+
+type ListRentalCandidatesRow struct {
+	RentalVehicleModel RentalVehicleModel
+	ListingSlug        string
+	ListingTitle       string
+	ListingAddress     *string
+	ListingCoverFileID *uuid.UUID
+	HandoverOpen       pgtype.Time
+	HandoverClose      pgtype.Time
+}
+
+// Candidates of the public rental search: active in-stock models of visible
+// rental listings in the province whose store handover window (Vietnam time,
+// both ends included) covers both the pickup and the return time and that
+// have an active pickup point. request_payment_hours is read separately by
+// RequestPaymentHours (same tx) for the period check.
+func (q *Queries) ListRentalCandidates(ctx context.Context, arg ListRentalCandidatesParams) ([]ListRentalCandidatesRow, error) {
+	rows, err := q.db.Query(ctx, listRentalCandidates,
+		arg.ProvinceCode,
+		arg.MinSeats,
+		arg.VehicleKind,
+		arg.PickupAt,
+		arg.ReturnAt,
+		arg.Cap,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListRentalCandidatesRow
+	for rows.Next() {
+		var i ListRentalCandidatesRow
+		if err := rows.Scan(
+			&i.RentalVehicleModel.ID,
+			&i.RentalVehicleModel.ListingID,
+			&i.RentalVehicleModel.VehicleKind,
+			&i.RentalVehicleModel.Name,
+			&i.RentalVehicleModel.ModelYear,
+			&i.RentalVehicleModel.Seats,
+			&i.RentalVehicleModel.IncludedItems,
+			&i.RentalVehicleModel.Tags,
+			&i.RentalVehicleModel.PricePerDay,
+			&i.RentalVehicleModel.Quantity,
+			&i.RentalVehicleModel.CoverFileID,
+			&i.RentalVehicleModel.Active,
+			&i.RentalVehicleModel.CreatedAt,
+			&i.RentalVehicleModel.UpdatedAt,
+			&i.ListingSlug,
+			&i.ListingTitle,
+			&i.ListingAddress,
+			&i.ListingCoverFileID,
+			&i.HandoverOpen,
+			&i.HandoverClose,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listRentalModels = `-- name: ListRentalModels :many
 SELECT id, listing_id, vehicle_kind, name, model_year, seats, included_items, tags, price_per_day, quantity, cover_file_id, active, created_at, updated_at FROM rental_vehicle_models
 WHERE listing_id = $1 AND ($2::bool OR active)
@@ -2358,6 +2453,17 @@ func (q *Queries) ReleaseSeats(ctx context.Context, arg ReleaseSeatsParams) (int
 	return result.RowsAffected(), nil
 }
 
+const requestPaymentHours = `-- name: RequestPaymentHours :one
+SELECT request_payment_hours FROM platform_settings WHERE id = 1
+`
+
+func (q *Queries) RequestPaymentHours(ctx context.Context) (int32, error) {
+	row := q.db.QueryRow(ctx, requestPaymentHours)
+	var request_payment_hours int32
+	err := row.Scan(&request_payment_hours)
+	return request_payment_hours, err
+}
+
 const reserveSeats = `-- name: ReserveSeats :execrows
 UPDATE ride_trips SET seats_reserved = seats_reserved + $1::int, updated_at = $2
 WHERE id = $3 AND status = 'scheduled' AND departure_at > $2
@@ -2384,9 +2490,14 @@ SELECT l.id, l.partner_id, l.service_type, l.title, l.slug, l.summary, l.descrip
                  WHERE tt.listing_id = l.id AND tt.active),
                 (SELECT min(rs.price_per_seat) FROM ride_schedules rs
                  WHERE rs.listing_id = l.id AND rs.active),
+                (SELECT min(m.price_per_day) FROM rental_vehicle_models m
+                 WHERE m.listing_id = l.id AND m.active AND m.quantity > 0
+                   AND EXISTS (SELECT 1 FROM rental_pickup_points pp WHERE pp.listing_id = l.id AND pp.active)),
                 0)::bigint AS price_from
 FROM visible_listings l
-WHERE ($1::text IS NULL OR l.service_type = $1)
+WHERE (l.service_type <> 'self_drive_rental'
+       OR EXISTS (SELECT 1 FROM rental_pickup_points pp WHERE pp.listing_id = l.id AND pp.active))
+  AND ($1::text IS NULL OR l.service_type = $1)
   AND ($2::text IS NULL OR l.province_code = $2)
   AND ($3::text IS NULL
        OR public.f_unaccent(lower(l.title)) ILIKE '%' || public.f_unaccent(lower($4::text)) || '%' ESCAPE '\'
@@ -2413,7 +2524,9 @@ type SearchPublicListingsRow struct {
 
 // Public search over visible_listings (the single visibility rule, see
 // migration 00010). price_from is the cheapest active ticket type or, for a
-// ride, the cheapest active schedule, 0 when there is none (prices are > 0 by
+// ride, the cheapest active schedule, for a rental the cheapest active model in
+// stock (rentals without an active pickup point are unbookable and hidden from
+// the search), 0 when there is none (prices are > 0 by
 // CHECK; sqlc cannot type a nullable
 // aggregate, so 0 means NULL). With q: ILIKE on the escaped pattern
 // (ESCAPE '\') or trigram similarity >= 0.3, best match first; without q:

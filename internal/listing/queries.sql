@@ -231,7 +231,9 @@ LIMIT 20;
 
 -- Public search over visible_listings (the single visibility rule, see
 -- migration 00010). price_from is the cheapest active ticket type or, for a
--- ride, the cheapest active schedule, 0 when there is none (prices are > 0 by
+-- ride, the cheapest active schedule, for a rental the cheapest active model in
+-- stock (rentals without an active pickup point are unbookable and hidden from
+-- the search), 0 when there is none (prices are > 0 by
 -- CHECK; sqlc cannot type a nullable
 -- aggregate, so 0 means NULL). With q: ILIKE on the escaped pattern
 -- (ESCAPE '\') or trigram similarity >= 0.3, best match first; without q:
@@ -242,9 +244,14 @@ SELECT sqlc.embed(l),
                  WHERE tt.listing_id = l.id AND tt.active),
                 (SELECT min(rs.price_per_seat) FROM ride_schedules rs
                  WHERE rs.listing_id = l.id AND rs.active),
+                (SELECT min(m.price_per_day) FROM rental_vehicle_models m
+                 WHERE m.listing_id = l.id AND m.active AND m.quantity > 0
+                   AND EXISTS (SELECT 1 FROM rental_pickup_points pp WHERE pp.listing_id = l.id AND pp.active)),
                 0)::bigint AS price_from
 FROM visible_listings l
-WHERE (sqlc.narg(service_type)::text IS NULL OR l.service_type = sqlc.narg(service_type))
+WHERE (l.service_type <> 'self_drive_rental'
+       OR EXISTS (SELECT 1 FROM rental_pickup_points pp WHERE pp.listing_id = l.id AND pp.active))
+  AND (sqlc.narg(service_type)::text IS NULL OR l.service_type = sqlc.narg(service_type))
   AND (sqlc.narg(province_code)::text IS NULL OR l.province_code = sqlc.narg(province_code))
   AND (sqlc.narg(q)::text IS NULL
        OR public.f_unaccent(lower(l.title)) ILIKE '%' || public.f_unaccent(lower(sqlc.narg(pattern)::text)) || '%' ESCAPE '\'
@@ -260,6 +267,9 @@ SELECT sqlc.embed(l),
                  WHERE tt.listing_id = l.id AND tt.active),
                 (SELECT min(rs.price_per_seat) FROM ride_schedules rs
                  WHERE rs.listing_id = l.id AND rs.active),
+                (SELECT min(m.price_per_day) FROM rental_vehicle_models m
+                 WHERE m.listing_id = l.id AND m.active AND m.quantity > 0
+                   AND EXISTS (SELECT 1 FROM rental_pickup_points pp WHERE pp.listing_id = l.id AND pp.active)),
                 0)::bigint AS price_from
 FROM visible_listings l
 WHERE l.slug = @slug;
@@ -587,3 +597,30 @@ SELECT listing_id FROM rental_vehicle_models WHERE id = @id;
 -- Lock order (DB §1.1): id ascending.
 -- name: LockRentalModels :many
 SELECT * FROM rental_vehicle_models WHERE id = ANY(@ids::uuid[]) ORDER BY id FOR UPDATE;
+
+-- Candidates of the public rental search: active in-stock models of visible
+-- rental listings in the province whose store handover window (Vietnam time,
+-- both ends included) covers both the pickup and the return time and that
+-- have an active pickup point. request_payment_hours is read separately by
+-- RequestPaymentHours (same tx) for the period check.
+-- name: ListRentalCandidates :many
+SELECT sqlc.embed(m),
+       l.slug AS listing_slug, l.title AS listing_title, l.address AS listing_address,
+       l.cover_file_id AS listing_cover_file_id,
+       s.handover_open, s.handover_close
+FROM rental_vehicle_models m
+JOIN visible_listings l ON l.id = m.listing_id
+JOIN rental_stores s ON s.listing_id = l.id
+WHERE l.service_type = 'self_drive_rental'
+  AND l.province_code = @province_code
+  AND m.active AND m.quantity > 0
+  AND m.seats >= @min_seats::int
+  AND (sqlc.narg(vehicle_kind)::text IS NULL OR m.vehicle_kind = sqlc.narg(vehicle_kind))
+  AND (sqlc.arg(pickup_at)::timestamptz AT TIME ZONE 'Asia/Ho_Chi_Minh')::time BETWEEN s.handover_open AND s.handover_close
+  AND (sqlc.arg(return_at)::timestamptz AT TIME ZONE 'Asia/Ho_Chi_Minh')::time BETWEEN s.handover_open AND s.handover_close
+  AND EXISTS (SELECT 1 FROM rental_pickup_points pp WHERE pp.listing_id = l.id AND pp.active)
+ORDER BY m.price_per_day, m.id
+LIMIT @cap;
+
+-- name: RequestPaymentHours :one
+SELECT request_payment_hours FROM platform_settings WHERE id = 1;
