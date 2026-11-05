@@ -7,9 +7,36 @@ package store
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 )
+
+const getAttractionDetail = `-- name: GetAttractionDetail :one
+SELECT to_char(visit_date, 'YYYY-MM-DD')::text AS visit_date, time_slot_id,
+       to_char(slot_start, 'HH24:MI')::text AS slot_start, to_char(slot_end, 'HH24:MI')::text AS slot_end
+FROM booking_attraction_details
+WHERE booking_id = $1
+`
+
+type GetAttractionDetailRow struct {
+	VisitDate  string
+	TimeSlotID uuid.UUID
+	SlotStart  string
+	SlotEnd    string
+}
+
+func (q *Queries) GetAttractionDetail(ctx context.Context, bookingID uuid.UUID) (GetAttractionDetailRow, error) {
+	row := q.db.QueryRow(ctx, getAttractionDetail, bookingID)
+	var i GetAttractionDetailRow
+	err := row.Scan(
+		&i.VisitDate,
+		&i.TimeSlotID,
+		&i.SlotStart,
+		&i.SlotEnd,
+	)
+	return i, err
+}
 
 const getBooking = `-- name: GetBooking :one
 SELECT id, code, checkout_id, customer_id, partner_id, listing_id, service_type, booking_mode, status, service_start_at, service_end_at, original_service_start_at, gross_amount, commission_rate_bps, commission_amount, cancellation_policy_snapshot, contact_name, contact_phone, contact_email, customer_note, hold_expires_at, hold_release_at, response_due_at, payment_due_at, accepted_at, rejected_at, reject_reason, confirmed_at, checked_in_at, in_service_at, completed_at, no_show_at, cancelled_at, cancel_kind, cancel_reason, cancelled_by, qr_token, created_at, updated_at FROM bookings WHERE id = $1
@@ -60,4 +87,517 @@ func (q *Queries) GetBooking(ctx context.Context, id uuid.UUID) (Booking, error)
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const getBookingDetail = `-- name: GetBookingDetail :one
+SELECT b.id, b.code, b.checkout_id, b.customer_id, b.partner_id, b.listing_id, b.service_type, b.booking_mode, b.status, b.service_start_at, b.service_end_at, b.original_service_start_at, b.gross_amount, b.commission_rate_bps, b.commission_amount, b.cancellation_policy_snapshot, b.contact_name, b.contact_phone, b.contact_email, b.customer_note, b.hold_expires_at, b.hold_release_at, b.response_due_at, b.payment_due_at, b.accepted_at, b.rejected_at, b.reject_reason, b.confirmed_at, b.checked_in_at, b.in_service_at, b.completed_at, b.no_show_at, b.cancelled_at, b.cancel_kind, b.cancel_reason, b.cancelled_by, b.qr_token, b.created_at, b.updated_at, l.title AS listing_title, l.slug AS listing_slug
+FROM bookings b
+JOIN listings l ON l.id = b.listing_id
+WHERE b.id = $1
+`
+
+type GetBookingDetailRow struct {
+	Booking      Booking
+	ListingTitle string
+	ListingSlug  string
+}
+
+func (q *Queries) GetBookingDetail(ctx context.Context, id uuid.UUID) (GetBookingDetailRow, error) {
+	row := q.db.QueryRow(ctx, getBookingDetail, id)
+	var i GetBookingDetailRow
+	err := row.Scan(
+		&i.Booking.ID,
+		&i.Booking.Code,
+		&i.Booking.CheckoutID,
+		&i.Booking.CustomerID,
+		&i.Booking.PartnerID,
+		&i.Booking.ListingID,
+		&i.Booking.ServiceType,
+		&i.Booking.BookingMode,
+		&i.Booking.Status,
+		&i.Booking.ServiceStartAt,
+		&i.Booking.ServiceEndAt,
+		&i.Booking.OriginalServiceStartAt,
+		&i.Booking.GrossAmount,
+		&i.Booking.CommissionRateBps,
+		&i.Booking.CommissionAmount,
+		&i.Booking.CancellationPolicySnapshot,
+		&i.Booking.ContactName,
+		&i.Booking.ContactPhone,
+		&i.Booking.ContactEmail,
+		&i.Booking.CustomerNote,
+		&i.Booking.HoldExpiresAt,
+		&i.Booking.HoldReleaseAt,
+		&i.Booking.ResponseDueAt,
+		&i.Booking.PaymentDueAt,
+		&i.Booking.AcceptedAt,
+		&i.Booking.RejectedAt,
+		&i.Booking.RejectReason,
+		&i.Booking.ConfirmedAt,
+		&i.Booking.CheckedInAt,
+		&i.Booking.InServiceAt,
+		&i.Booking.CompletedAt,
+		&i.Booking.NoShowAt,
+		&i.Booking.CancelledAt,
+		&i.Booking.CancelKind,
+		&i.Booking.CancelReason,
+		&i.Booking.CancelledBy,
+		&i.Booking.QrToken,
+		&i.Booking.CreatedAt,
+		&i.Booking.UpdatedAt,
+		&i.ListingTitle,
+		&i.ListingSlug,
+	)
+	return i, err
+}
+
+const getIdempotencyKey = `-- name: GetIdempotencyKey :one
+SELECT user_id, key, endpoint, request_hash, response_status, response_body, created_at, updated_at FROM idempotency_keys WHERE user_id = $1 AND key = $2
+`
+
+type GetIdempotencyKeyParams struct {
+	UserID uuid.UUID
+	Key    string
+}
+
+func (q *Queries) GetIdempotencyKey(ctx context.Context, arg GetIdempotencyKeyParams) (IdempotencyKey, error) {
+	row := q.db.QueryRow(ctx, getIdempotencyKey, arg.UserID, arg.Key)
+	var i IdempotencyKey
+	err := row.Scan(
+		&i.UserID,
+		&i.Key,
+		&i.Endpoint,
+		&i.RequestHash,
+		&i.ResponseStatus,
+		&i.ResponseBody,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const insertAttractionDetail = `-- name: InsertAttractionDetail :exec
+INSERT INTO booking_attraction_details (booking_id, listing_id, visit_date, time_slot_id, slot_start, slot_end, created_at, updated_at)
+VALUES ($1, $2, ($3::text)::date, $4,
+        ($5::text)::time, ($6::text)::time, $7, $7)
+`
+
+type InsertAttractionDetailParams struct {
+	BookingID  uuid.UUID
+	ListingID  uuid.UUID
+	VisitDate  string
+	TimeSlotID uuid.UUID
+	SlotStart  string
+	SlotEnd    string
+	Now        time.Time
+}
+
+func (q *Queries) InsertAttractionDetail(ctx context.Context, arg InsertAttractionDetailParams) error {
+	_, err := q.db.Exec(ctx, insertAttractionDetail,
+		arg.BookingID,
+		arg.ListingID,
+		arg.VisitDate,
+		arg.TimeSlotID,
+		arg.SlotStart,
+		arg.SlotEnd,
+		arg.Now,
+	)
+	return err
+}
+
+const insertBookingItem = `-- name: InsertBookingItem :exec
+INSERT INTO booking_items (id, booking_id, line_kind, description, unit_price, quantity, line_total, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6::int, $7, $8, $8)
+`
+
+type InsertBookingItemParams struct {
+	ID          uuid.UUID
+	BookingID   uuid.UUID
+	LineKind    string
+	Description string
+	UnitPrice   int64
+	Quantity    int32
+	LineTotal   int64
+	Now         time.Time
+}
+
+func (q *Queries) InsertBookingItem(ctx context.Context, arg InsertBookingItemParams) error {
+	_, err := q.db.Exec(ctx, insertBookingItem,
+		arg.ID,
+		arg.BookingID,
+		arg.LineKind,
+		arg.Description,
+		arg.UnitPrice,
+		arg.Quantity,
+		arg.LineTotal,
+		arg.Now,
+	)
+	return err
+}
+
+const insertCheckout = `-- name: InsertCheckout :execrows
+INSERT INTO checkouts (id, code, customer_id, total_amount, status, created_at, updated_at)
+VALUES ($1, $2, $3, $4, 'open', $5, $5)
+ON CONFLICT (code) DO NOTHING
+`
+
+type InsertCheckoutParams struct {
+	ID          uuid.UUID
+	Code        string
+	CustomerID  uuid.UUID
+	TotalAmount int64
+	Now         time.Time
+}
+
+// A code collision inserts nothing (0 rows) without aborting the tx.
+func (q *Queries) InsertCheckout(ctx context.Context, arg InsertCheckoutParams) (int64, error) {
+	result, err := q.db.Exec(ctx, insertCheckout,
+		arg.ID,
+		arg.Code,
+		arg.CustomerID,
+		arg.TotalAmount,
+		arg.Now,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const insertPendingBooking = `-- name: InsertPendingBooking :execrows
+INSERT INTO bookings (
+    id, code, checkout_id, customer_id, partner_id, listing_id, service_type, booking_mode, status,
+    service_start_at, service_end_at, original_service_start_at,
+    gross_amount, commission_rate_bps, commission_amount, cancellation_policy_snapshot,
+    contact_name, contact_phone, contact_email, customer_note,
+    hold_expires_at, hold_release_at, qr_token, created_at, updated_at
+) VALUES (
+    $1, $2, $3, $4, $5, $6, $7, 'instant', 'pending_payment',
+    $8, $9, $8,
+    $10, $11, $12, $13,
+    $14, $15, $16, $17,
+    $18, $19, $20, $21, $21
+)
+ON CONFLICT (code) DO NOTHING
+`
+
+type InsertPendingBookingParams struct {
+	ID                         uuid.UUID
+	Code                       string
+	CheckoutID                 uuid.UUID
+	CustomerID                 uuid.UUID
+	PartnerID                  uuid.UUID
+	ListingID                  uuid.UUID
+	ServiceType                string
+	ServiceStartAt             time.Time
+	ServiceEndAt               time.Time
+	GrossAmount                int64
+	CommissionRateBps          int32
+	CommissionAmount           int64
+	CancellationPolicySnapshot []byte
+	ContactName                string
+	ContactPhone               string
+	ContactEmail               string
+	CustomerNote               *string
+	HoldExpiresAt              *time.Time
+	HoldReleaseAt              *time.Time
+	QrToken                    string
+	Now                        time.Time
+}
+
+func (q *Queries) InsertPendingBooking(ctx context.Context, arg InsertPendingBookingParams) (int64, error) {
+	result, err := q.db.Exec(ctx, insertPendingBooking,
+		arg.ID,
+		arg.Code,
+		arg.CheckoutID,
+		arg.CustomerID,
+		arg.PartnerID,
+		arg.ListingID,
+		arg.ServiceType,
+		arg.ServiceStartAt,
+		arg.ServiceEndAt,
+		arg.GrossAmount,
+		arg.CommissionRateBps,
+		arg.CommissionAmount,
+		arg.CancellationPolicySnapshot,
+		arg.ContactName,
+		arg.ContactPhone,
+		arg.ContactEmail,
+		arg.CustomerNote,
+		arg.HoldExpiresAt,
+		arg.HoldReleaseAt,
+		arg.QrToken,
+		arg.Now,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const insertStatusHistory = `-- name: InsertStatusHistory :exec
+INSERT INTO booking_status_history (id, booking_id, from_status, to_status, actor_kind, actor_user_id, reason, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
+`
+
+type InsertStatusHistoryParams struct {
+	ID          uuid.UUID
+	BookingID   uuid.UUID
+	FromStatus  *string
+	ToStatus    string
+	ActorKind   string
+	ActorUserID *uuid.UUID
+	Reason      *string
+	Now         time.Time
+}
+
+func (q *Queries) InsertStatusHistory(ctx context.Context, arg InsertStatusHistoryParams) error {
+	_, err := q.db.Exec(ctx, insertStatusHistory,
+		arg.ID,
+		arg.BookingID,
+		arg.FromStatus,
+		arg.ToStatus,
+		arg.ActorKind,
+		arg.ActorUserID,
+		arg.Reason,
+		arg.Now,
+	)
+	return err
+}
+
+const insertTicketLine = `-- name: InsertTicketLine :exec
+INSERT INTO booking_ticket_lines (booking_item_id, booking_id, listing_id, ticket_type_id, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $5)
+`
+
+type InsertTicketLineParams struct {
+	BookingItemID uuid.UUID
+	BookingID     uuid.UUID
+	ListingID     uuid.UUID
+	TicketTypeID  uuid.UUID
+	Now           time.Time
+}
+
+func (q *Queries) InsertTicketLine(ctx context.Context, arg InsertTicketLineParams) error {
+	_, err := q.db.Exec(ctx, insertTicketLine,
+		arg.BookingItemID,
+		arg.BookingID,
+		arg.ListingID,
+		arg.TicketTypeID,
+		arg.Now,
+	)
+	return err
+}
+
+const listBookingItems = `-- name: ListBookingItems :many
+SELECT i.id, i.description, i.unit_price, i.quantity::float8 AS quantity, i.line_total, t.ticket_type_id
+FROM booking_items i
+LEFT JOIN booking_ticket_lines t ON t.booking_item_id = i.id
+WHERE i.booking_id = $1
+ORDER BY i.id
+`
+
+type ListBookingItemsRow struct {
+	ID           uuid.UUID
+	Description  string
+	UnitPrice    int64
+	Quantity     float64
+	LineTotal    int64
+	TicketTypeID *uuid.UUID
+}
+
+func (q *Queries) ListBookingItems(ctx context.Context, bookingID uuid.UUID) ([]ListBookingItemsRow, error) {
+	rows, err := q.db.Query(ctx, listBookingItems, bookingID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListBookingItemsRow
+	for rows.Next() {
+		var i ListBookingItemsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Description,
+			&i.UnitPrice,
+			&i.Quantity,
+			&i.LineTotal,
+			&i.TicketTypeID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listBookings = `-- name: ListBookings :many
+SELECT b.id, b.code, b.status, b.service_type, b.listing_id, l.title AS listing_title, l.slug AS listing_slug,
+       b.service_start_at, b.service_end_at, b.gross_amount, b.hold_expires_at, b.created_at
+FROM bookings b
+JOIN listings l ON l.id = b.listing_id
+WHERE ($1::uuid IS NULL OR b.customer_id = $1)
+  AND ($2::uuid IS NULL OR b.partner_id = $2)
+  AND ($3::text IS NULL OR b.status = $3)
+  AND ($4::text IS NULL OR b.code = $4)
+  AND ($5::uuid IS NULL OR b.id < $5)
+ORDER BY b.id DESC
+LIMIT $6
+`
+
+type ListBookingsParams struct {
+	CustomerID *uuid.UUID
+	PartnerID  *uuid.UUID
+	Status     *string
+	Code       *string
+	Cursor     *uuid.UUID
+	Lim        int32
+}
+
+type ListBookingsRow struct {
+	ID             uuid.UUID
+	Code           string
+	Status         string
+	ServiceType    string
+	ListingID      uuid.UUID
+	ListingTitle   string
+	ListingSlug    string
+	ServiceStartAt time.Time
+	ServiceEndAt   time.Time
+	GrossAmount    int64
+	HoldExpiresAt  *time.Time
+	CreatedAt      time.Time
+}
+
+// Booking lists: newest first (uuid v7 ids), keyset on id.
+func (q *Queries) ListBookings(ctx context.Context, arg ListBookingsParams) ([]ListBookingsRow, error) {
+	rows, err := q.db.Query(ctx, listBookings,
+		arg.CustomerID,
+		arg.PartnerID,
+		arg.Status,
+		arg.Code,
+		arg.Cursor,
+		arg.Lim,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListBookingsRow
+	for rows.Next() {
+		var i ListBookingsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Code,
+			&i.Status,
+			&i.ServiceType,
+			&i.ListingID,
+			&i.ListingTitle,
+			&i.ListingSlug,
+			&i.ServiceStartAt,
+			&i.ServiceEndAt,
+			&i.GrossAmount,
+			&i.HoldExpiresAt,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listStatusHistory = `-- name: ListStatusHistory :many
+SELECT id, booking_id, from_status, to_status, actor_kind, actor_user_id, reason, created_at, updated_at FROM booking_status_history WHERE booking_id = $1 ORDER BY created_at, id
+`
+
+func (q *Queries) ListStatusHistory(ctx context.Context, bookingID uuid.UUID) ([]BookingStatusHistory, error) {
+	rows, err := q.db.Query(ctx, listStatusHistory, bookingID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []BookingStatusHistory
+	for rows.Next() {
+		var i BookingStatusHistory
+		if err := rows.Scan(
+			&i.ID,
+			&i.BookingID,
+			&i.FromStatus,
+			&i.ToStatus,
+			&i.ActorKind,
+			&i.ActorUserID,
+			&i.Reason,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const reserveIdempotencyKey = `-- name: ReserveIdempotencyKey :execrows
+INSERT INTO idempotency_keys (user_id, key, endpoint, request_hash, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $5)
+ON CONFLICT (user_id, key) DO NOTHING
+`
+
+type ReserveIdempotencyKeyParams struct {
+	UserID      uuid.UUID
+	Key         string
+	Endpoint    string
+	RequestHash []byte
+	Now         time.Time
+}
+
+// Idempotency-Key (spec §7). ON CONFLICT DO NOTHING waits for an in-flight
+// insert of the same key: if that tx commits, nothing is inserted (0 rows);
+// if it rolls back, this insert goes through.
+func (q *Queries) ReserveIdempotencyKey(ctx context.Context, arg ReserveIdempotencyKeyParams) (int64, error) {
+	result, err := q.db.Exec(ctx, reserveIdempotencyKey,
+		arg.UserID,
+		arg.Key,
+		arg.Endpoint,
+		arg.RequestHash,
+		arg.Now,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const storeIdempotencyResponse = `-- name: StoreIdempotencyResponse :exec
+UPDATE idempotency_keys
+SET response_status = $1, response_body = $2, updated_at = $3
+WHERE user_id = $4 AND key = $5
+`
+
+type StoreIdempotencyResponseParams struct {
+	ResponseStatus *int32
+	ResponseBody   []byte
+	Now            time.Time
+	UserID         uuid.UUID
+	Key            string
+}
+
+func (q *Queries) StoreIdempotencyResponse(ctx context.Context, arg StoreIdempotencyResponseParams) error {
+	_, err := q.db.Exec(ctx, storeIdempotencyResponse,
+		arg.ResponseStatus,
+		arg.ResponseBody,
+		arg.Now,
+		arg.UserID,
+		arg.Key,
+	)
+	return err
 }

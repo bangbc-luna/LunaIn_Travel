@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 
+	"github.com/bangbc-luna/lunain-travel/internal/booking"
 	"github.com/bangbc-luna/lunain-travel/internal/catalog"
 	"github.com/bangbc-luna/lunain-travel/internal/files"
 	"github.com/bangbc-luna/lunain-travel/internal/geo"
@@ -22,6 +23,7 @@ import (
 	"github.com/bangbc-luna/lunain-travel/internal/ledger"
 	"github.com/bangbc-luna/lunain-travel/internal/listing"
 	"github.com/bangbc-luna/lunain-travel/internal/partner"
+	"github.com/bangbc-luna/lunain-travel/internal/payment"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/auth"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/clock"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/db"
@@ -63,11 +65,16 @@ func newTestApp(t *testing.T) *testApp {
 	listingSvc := listing.NewService(listing.Deps{
 		Pool: pool, Clock: clk, Partners: partnerSvc, Catalog: catSvc, Geo: geoSvc, Files: fileSvc,
 	})
+	settingsSvc := settings.NewService(pool, clk)
+	bookingSvc := booking.NewService(booking.Deps{
+		Pool: pool, Clock: clk, Listings: listingSvc, Catalog: catSvc, Settings: settingsSvc,
+		Identity: idSvc, Payments: payment.NewService(pool, clk, payment.NewFake(), nil),
+	})
 	mux, patterns := buildMux(muxDeps{
 		Pool: pool, Issuer: issuer, ClientIP: httpx.ClientIPFunc(0),
-		Identity: idSvc, Settings: settings.NewService(pool, clk), Files: fileSvc,
+		Identity: idSvc, Settings: settingsSvc, Files: fileSvc,
 		Geo: geoSvc, Catalog: catSvc, Partner: partnerSvc, Listing: listingSvc,
-		Ledger: ledger.NewService(pool, clk),
+		Ledger: ledger.NewService(pool, clk), Booking: bookingSvc,
 	})
 	return &testApp{
 		handler: httpx.Chain(mux, httpx.RequestID, httpx.Recover), issuer: issuer,
@@ -175,6 +182,8 @@ var adminRoutes = []route{
 	{"POST /v1/admin/listings/{id}/reject", "/v1/admin/listings/" + uuid.Nil.String() + "/reject"},
 	{"POST /v1/admin/listings/{id}/hide", "/v1/admin/listings/" + uuid.Nil.String() + "/hide"},
 	{"POST /v1/admin/listings/{id}/unhide", "/v1/admin/listings/" + uuid.Nil.String() + "/unhide"},
+	{"GET /v1/admin/bookings", "/v1/admin/bookings"},
+	{"GET /v1/admin/bookings/{id}", "/v1/admin/bookings/" + uuid.Nil.String()},
 }
 
 // partnerRoutes lists every /v1/partner/* route, like adminRoutes.
@@ -202,6 +211,8 @@ var partnerRoutes = []route{
 	{"POST /v1/partner/listings/{id}/publish", "/v1/partner/listings/" + uuid.Nil.String() + "/publish"},
 	{"POST /v1/partner/listings/{id}/unpublish", "/v1/partner/listings/" + uuid.Nil.String() + "/unpublish"},
 	{"GET /v1/partner/balance", "/v1/partner/balance"},
+	{"GET /v1/partner/bookings", "/v1/partner/bookings"},
+	{"GET /v1/partner/bookings/{id}", "/v1/partner/bookings/" + uuid.Nil.String()},
 }
 
 // recordedUnder returns the recorded patterns whose path starts with prefix.
@@ -294,4 +305,30 @@ func TestPublicRoutes(t *testing.T) {
 	rec = app.do("GET", "/nope", "")
 	require.Equal(t, http.StatusNotFound, rec.Code)
 	require.Contains(t, rec.Body.String(), `"error"`)
+}
+
+// customerBookingRoutes are the customer-only booking routes.
+var customerBookingRoutes = []route{
+	{"POST /v1/bookings/attraction", "/v1/bookings/attraction"},
+	{"GET /v1/bookings", "/v1/bookings"},
+	{"GET /v1/bookings/{id}", "/v1/bookings/" + uuid.Nil.String()},
+	{"POST /v1/bookings/{id}/pay", "/v1/bookings/" + uuid.Nil.String() + "/pay"},
+}
+
+func TestCustomerBookingRoutesRequireCustomer(t *testing.T) {
+	app := newTestApp(t)
+	require.Equal(t, declaredPatterns(customerBookingRoutes), recordedUnder(app.patterns, "/v1/bookings"))
+	adminID := app.superAdmin(t)
+	adminTok := app.tokenFor(t, adminID, auth.RoleSuperAdmin)
+	member := app.tokenFor(t, app.partnerMember(t, adminID), auth.RolePartner)
+	customer := app.token(t, auth.RoleCustomer)
+	for _, r := range customerBookingRoutes {
+		t.Run(r.pattern, func(t *testing.T) {
+			m := r.method()
+			requireError(t, app.do(m, r.sample, ""), http.StatusUnauthorized, "unauthorized", "no token")
+			requireError(t, app.do(m, r.sample, member), http.StatusForbidden, "forbidden", "partner member")
+			requireError(t, app.do(m, r.sample, adminTok), http.StatusForbidden, "forbidden", "super_admin")
+			requireAuthorized(t, app.do(m, r.sample, customer), "customer")
+		})
+	}
 }

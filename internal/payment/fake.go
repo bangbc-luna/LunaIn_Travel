@@ -13,6 +13,7 @@ import (
 const FakeChecksumKey = "fake-payos-checksum-key-for-tests-and-dev"
 
 type fakeLink struct {
+	req    LinkRequest
 	amount int64
 	paid   int64
 	state  string
@@ -25,6 +26,8 @@ type Fake struct {
 
 	mu    sync.Mutex
 	links map[int64]*fakeLink
+	// createErr, when set, makes CreateLink fail (simulates PayOS down).
+	createErr error
 }
 
 var _ Provider = (*Fake)(nil)
@@ -34,17 +37,42 @@ func NewFake() *Fake {
 	return &Fake{Now: time.Now, links: map[int64]*fakeLink{}}
 }
 
+// FailCreateLink makes every following CreateLink return err; nil restores
+// normal behaviour.
+func (f *Fake) FailCreateLink(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.createErr = err
+}
+
 // CreateLink records a pending link.
 func (f *Fake) CreateLink(_ context.Context, req LinkRequest) (Link, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.links[req.OrderCode] = &fakeLink{amount: req.Amount, state: StatePending}
+	if f.createErr != nil {
+		return Link{}, f.createErr
+	}
+	if err := validateDescription(req.Description); err != nil {
+		return Link{}, err
+	}
+	f.links[req.OrderCode] = &fakeLink{req: req, amount: req.Amount, state: StatePending}
 	oc := strconv.FormatInt(req.OrderCode, 10)
 	return Link{
 		CheckoutURL:    "http://localhost/fake-pay/" + oc,
 		QRCode:         "fake-qr-" + oc,
 		ProviderLinkID: "fake-link-" + oc,
 	}, nil
+}
+
+// Request returns the LinkRequest of the link created for orderCode.
+func (f *Fake) Request(orderCode int64) (LinkRequest, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	l, ok := f.links[orderCode]
+	if !ok {
+		return LinkRequest{}, false
+	}
+	return l.req, true
 }
 
 // GetStatus returns the recorded state.

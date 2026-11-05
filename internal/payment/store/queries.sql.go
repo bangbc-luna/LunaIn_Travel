@@ -7,6 +7,7 @@ package store
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -35,4 +36,135 @@ func (q *Queries) GetPayment(ctx context.Context, id uuid.UUID) (Payment, error)
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const getPaymentWithCheckoutCode = `-- name: GetPaymentWithCheckoutCode :one
+SELECT p.id, p.checkout_id, p.provider, p.provider_order_code, p.amount, p.status, p.checkout_url, p.qr_code, p.expires_at, p.paid_at, p.provider_reference, p.raw, p.created_at, p.updated_at, c.code AS checkout_code
+FROM payments p
+JOIN checkouts c ON c.id = p.checkout_id
+WHERE p.id = $1
+`
+
+type GetPaymentWithCheckoutCodeRow struct {
+	Payment      Payment
+	CheckoutCode string
+}
+
+func (q *Queries) GetPaymentWithCheckoutCode(ctx context.Context, id uuid.UUID) (GetPaymentWithCheckoutCodeRow, error) {
+	row := q.db.QueryRow(ctx, getPaymentWithCheckoutCode, id)
+	var i GetPaymentWithCheckoutCodeRow
+	err := row.Scan(
+		&i.Payment.ID,
+		&i.Payment.CheckoutID,
+		&i.Payment.Provider,
+		&i.Payment.ProviderOrderCode,
+		&i.Payment.Amount,
+		&i.Payment.Status,
+		&i.Payment.CheckoutUrl,
+		&i.Payment.QrCode,
+		&i.Payment.ExpiresAt,
+		&i.Payment.PaidAt,
+		&i.Payment.ProviderReference,
+		&i.Payment.Raw,
+		&i.Payment.CreatedAt,
+		&i.Payment.UpdatedAt,
+		&i.CheckoutCode,
+	)
+	return i, err
+}
+
+const getPendingPaymentByCheckout = `-- name: GetPendingPaymentByCheckout :one
+SELECT id, checkout_id, provider, provider_order_code, amount, status, checkout_url, qr_code, expires_at, paid_at, provider_reference, raw, created_at, updated_at FROM payments WHERE checkout_id = $1 AND status = 'pending'
+`
+
+func (q *Queries) GetPendingPaymentByCheckout(ctx context.Context, checkoutID uuid.UUID) (Payment, error) {
+	row := q.db.QueryRow(ctx, getPendingPaymentByCheckout, checkoutID)
+	var i Payment
+	err := row.Scan(
+		&i.ID,
+		&i.CheckoutID,
+		&i.Provider,
+		&i.ProviderOrderCode,
+		&i.Amount,
+		&i.Status,
+		&i.CheckoutUrl,
+		&i.QrCode,
+		&i.ExpiresAt,
+		&i.PaidAt,
+		&i.ProviderReference,
+		&i.Raw,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const insertPendingPayment = `-- name: InsertPendingPayment :one
+INSERT INTO payments (id, checkout_id, amount, status, expires_at, created_at, updated_at)
+VALUES ($1, $2, $3, 'pending', $4, $5, $5)
+RETURNING id, checkout_id, provider, provider_order_code, amount, status, checkout_url, qr_code, expires_at, paid_at, provider_reference, raw, created_at, updated_at
+`
+
+type InsertPendingPaymentParams struct {
+	ID         uuid.UUID
+	CheckoutID uuid.UUID
+	Amount     int64
+	ExpiresAt  time.Time
+	Now        time.Time
+}
+
+// provider_order_code comes from payment_order_code_seq (column default).
+func (q *Queries) InsertPendingPayment(ctx context.Context, arg InsertPendingPaymentParams) (Payment, error) {
+	row := q.db.QueryRow(ctx, insertPendingPayment,
+		arg.ID,
+		arg.CheckoutID,
+		arg.Amount,
+		arg.ExpiresAt,
+		arg.Now,
+	)
+	var i Payment
+	err := row.Scan(
+		&i.ID,
+		&i.CheckoutID,
+		&i.Provider,
+		&i.ProviderOrderCode,
+		&i.Amount,
+		&i.Status,
+		&i.CheckoutUrl,
+		&i.QrCode,
+		&i.ExpiresAt,
+		&i.PaidAt,
+		&i.ProviderReference,
+		&i.Raw,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const setPaymentLink = `-- name: SetPaymentLink :execrows
+UPDATE payments
+SET checkout_url = $1, qr_code = $2, updated_at = $3
+WHERE id = $4 AND status = 'pending' AND checkout_url IS NULL
+`
+
+type SetPaymentLinkParams struct {
+	CheckoutUrl *string
+	QrCode      *string
+	Now         time.Time
+	ID          uuid.UUID
+}
+
+// Stores the link only while the payment is still pending and has none.
+func (q *Queries) SetPaymentLink(ctx context.Context, arg SetPaymentLinkParams) (int64, error) {
+	result, err := q.db.Exec(ctx, setPaymentLink,
+		arg.CheckoutUrl,
+		arg.QrCode,
+		arg.Now,
+		arg.ID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }

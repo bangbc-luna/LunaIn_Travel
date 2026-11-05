@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/bangbc-luna/lunain-travel/internal/booking"
 	"github.com/bangbc-luna/lunain-travel/internal/catalog"
 	"github.com/bangbc-luna/lunain-travel/internal/files"
 	"github.com/bangbc-luna/lunain-travel/internal/geo"
@@ -33,6 +34,7 @@ type muxDeps struct {
 	Partner  *partner.Service
 	Listing  *listing.Service
 	Ledger   *ledger.Service
+	Booking  *booking.Service
 }
 
 // buildMux registers every HTTP route and returns the mux plus every pattern
@@ -51,6 +53,9 @@ func buildMux(d muxDeps) (*http.ServeMux, []string) {
 	d.Listing.AdminRoutes(rr, d.Issuer)
 	d.Listing.PublicRoutes(rr)
 	d.Ledger.PartnerRoutes(rr, d.Issuer, d.Partner.RequireMember())
+	d.Booking.CustomerRoutes(rr, d.Issuer)
+	d.Booking.PartnerRoutes(rr, d.Issuer, d.Partner.RequireMember())
+	d.Booking.AdminRoutes(rr, d.Issuer)
 	rr.HandleFunc("GET /healthz", healthz)
 	rr.HandleFunc("GET /readyz", readyz(d.Pool))
 	rr.HandleFunc("/", httpx.NotFound)

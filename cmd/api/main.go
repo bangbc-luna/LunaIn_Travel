@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/riverqueue/river"
 
+	"github.com/bangbc-luna/lunain-travel/internal/booking"
 	"github.com/bangbc-luna/lunain-travel/internal/catalog"
 	"github.com/bangbc-luna/lunain-travel/internal/files"
 	"github.com/bangbc-luna/lunain-travel/internal/geo"
@@ -23,6 +24,7 @@ import (
 	"github.com/bangbc-luna/lunain-travel/internal/ledger"
 	"github.com/bangbc-luna/lunain-travel/internal/listing"
 	"github.com/bangbc-luna/lunain-travel/internal/partner"
+	"github.com/bangbc-luna/lunain-travel/internal/payment"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/auth"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/clock"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/config"
@@ -113,6 +115,18 @@ func (rejectingGoogle) Verify(context.Context, string) (identity.GoogleIdentity,
 	return identity.GoogleIdentity{}, identity.ErrGoogleTokenInvalid
 }
 
+// paymentProvider is the in-memory fake when PAYMENT_PROVIDER=fake (never in
+// prod: config.Load refuses it), otherwise the PayOS REST client.
+func paymentProvider(cfg config.Config) payment.Provider {
+	if cfg.PaymentProvider == "fake" {
+		return payment.NewFake()
+	}
+	return payment.NewPayOS(payment.PayOSConfig{
+		ClientID: cfg.PayOSClientID, APIKey: cfg.PayOSAPIKey, ChecksumKey: cfg.PayOSChecksumKey,
+		BaseURL: cfg.PayOSBaseURL, ReturnURL: cfg.PayOSReturnURL, CancelURL: cfg.PayOSCancelURL,
+	}, nil)
+}
+
 func serve(log *slog.Logger) error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -199,11 +213,18 @@ func serve(log *slog.Logger) error {
 		Pool: pool, Clock: clock.Real{}, Partners: partnerSvc, Catalog: catSvc, Geo: geoSvc, Files: fileSvc,
 	})
 
+	settingsSvc := settings.NewService(pool, clock.Real{})
+	paymentSvc := payment.NewService(pool, clock.Real{}, paymentProvider(cfg), log)
+	bookingSvc := booking.NewService(booking.Deps{
+		Pool: pool, Clock: clock.Real{}, Listings: listingSvc, Catalog: catSvc, Settings: settingsSvc,
+		Identity: idSvc, Payments: paymentSvc, Log: log,
+	})
+
 	mux, _ := buildMux(muxDeps{
 		Pool: pool, Issuer: issuer, ClientIP: httpx.ClientIPFunc(cfg.TrustedProxyHops),
-		Identity: idSvc, Settings: settings.NewService(pool, clock.Real{}), Files: fileSvc,
+		Identity: idSvc, Settings: settingsSvc, Files: fileSvc,
 		Geo: geoSvc, Catalog: catSvc, Partner: partnerSvc, Listing: listingSvc,
-		Ledger: ledger.NewService(pool, clock.Real{}),
+		Ledger: ledger.NewService(pool, clock.Real{}), Booking: bookingSvc,
 	})
 
 	srv := &http.Server{
