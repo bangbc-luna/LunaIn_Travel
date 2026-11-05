@@ -12,6 +12,53 @@ import (
 	"github.com/google/uuid"
 )
 
+const approvePayout = `-- name: ApprovePayout :one
+UPDATE payouts
+SET status = 'approved', approved_by = $1::uuid, approved_at = $2::timestamptz, updated_at = $2
+WHERE id = $3 AND status = 'requested'
+RETURNING id, partner_id, amount, status, bank_bin, bank_name, account_number, account_holder, bank_account_id, statement_seq_from, statement_seq_to, opening_available, closing_available, requested_by, requested_at, approved_by, approved_at, paid_by, paid_at, transfer_reference, proof_file_id, rejected_by, rejected_at, reject_reason, created_at, updated_at
+`
+
+type ApprovePayoutParams struct {
+	Actor uuid.UUID
+	Now   time.Time
+	ID    uuid.UUID
+}
+
+func (q *Queries) ApprovePayout(ctx context.Context, arg ApprovePayoutParams) (Payout, error) {
+	row := q.db.QueryRow(ctx, approvePayout, arg.Actor, arg.Now, arg.ID)
+	var i Payout
+	err := row.Scan(
+		&i.ID,
+		&i.PartnerID,
+		&i.Amount,
+		&i.Status,
+		&i.BankBin,
+		&i.BankName,
+		&i.AccountNumber,
+		&i.AccountHolder,
+		&i.BankAccountID,
+		&i.StatementSeqFrom,
+		&i.StatementSeqTo,
+		&i.OpeningAvailable,
+		&i.ClosingAvailable,
+		&i.RequestedBy,
+		&i.RequestedAt,
+		&i.ApprovedBy,
+		&i.ApprovedAt,
+		&i.PaidBy,
+		&i.PaidAt,
+		&i.TransferReference,
+		&i.ProofFileID,
+		&i.RejectedBy,
+		&i.RejectedAt,
+		&i.RejectReason,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getPartnerPayout = `-- name: GetPartnerPayout :one
 SELECT id, partner_id, amount, status, bank_bin, bank_name, account_number, account_holder, bank_account_id, statement_seq_from, statement_seq_to, opening_available, closing_available, requested_by, requested_at, approved_by, approved_at, paid_by, paid_at, transfer_reference, proof_file_id, rejected_by, rejected_at, reject_reason, created_at, updated_at FROM payouts WHERE id = $1 AND partner_id = $2
 `
@@ -153,6 +200,74 @@ func (q *Queries) LastStatementSeqTo(ctx context.Context, arg LastStatementSeqTo
 	return column_1, err
 }
 
+const listAdminPayouts = `-- name: ListAdminPayouts :many
+SELECT id, partner_id, amount, status, bank_bin, bank_name, account_number, account_holder, bank_account_id, statement_seq_from, statement_seq_to, opening_available, closing_available, requested_by, requested_at, approved_by, approved_at, paid_by, paid_at, transfer_reference, proof_file_id, rejected_by, rejected_at, reject_reason, created_at, updated_at FROM payouts
+WHERE ($1::text IS NULL OR status = $1)
+  AND ($2::uuid IS NULL OR partner_id = $2)
+  AND ($3::uuid IS NULL OR id < $3)
+ORDER BY id DESC
+LIMIT $4
+`
+
+type ListAdminPayoutsParams struct {
+	Status    *string
+	PartnerID *uuid.UUID
+	Cursor    *uuid.UUID
+	Lim       int32
+}
+
+func (q *Queries) ListAdminPayouts(ctx context.Context, arg ListAdminPayoutsParams) ([]Payout, error) {
+	rows, err := q.db.Query(ctx, listAdminPayouts,
+		arg.Status,
+		arg.PartnerID,
+		arg.Cursor,
+		arg.Lim,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Payout
+	for rows.Next() {
+		var i Payout
+		if err := rows.Scan(
+			&i.ID,
+			&i.PartnerID,
+			&i.Amount,
+			&i.Status,
+			&i.BankBin,
+			&i.BankName,
+			&i.AccountNumber,
+			&i.AccountHolder,
+			&i.BankAccountID,
+			&i.StatementSeqFrom,
+			&i.StatementSeqTo,
+			&i.OpeningAvailable,
+			&i.ClosingAvailable,
+			&i.RequestedBy,
+			&i.RequestedAt,
+			&i.ApprovedBy,
+			&i.ApprovedAt,
+			&i.PaidBy,
+			&i.PaidAt,
+			&i.TransferReference,
+			&i.ProofFileID,
+			&i.RejectedBy,
+			&i.RejectedAt,
+			&i.RejectReason,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listPartnerPayouts = `-- name: ListPartnerPayouts :many
 SELECT id, partner_id, amount, status, bank_bin, bank_name, account_number, account_holder, bank_account_id, statement_seq_from, statement_seq_to, opening_available, closing_available, requested_by, requested_at, approved_by, approved_at, paid_by, paid_at, transfer_reference, proof_file_id, rejected_by, rejected_at, reject_reason, created_at, updated_at FROM payouts
 WHERE partner_id = $1
@@ -221,6 +336,102 @@ func (q *Queries) ListPartnerPayouts(ctx context.Context, arg ListPartnerPayouts
 	return items, nil
 }
 
+const lockPayout = `-- name: LockPayout :one
+SELECT id, partner_id, amount, status, bank_bin, bank_name, account_number, account_holder, bank_account_id, statement_seq_from, statement_seq_to, opening_available, closing_available, requested_by, requested_at, approved_by, approved_at, paid_by, paid_at, transfer_reference, proof_file_id, rejected_by, rejected_at, reject_reason, created_at, updated_at FROM payouts WHERE id = $1 FOR UPDATE
+`
+
+// Admin transitions hold this lock first (DB §1.1: payouts before
+// partner_balances).
+func (q *Queries) LockPayout(ctx context.Context, id uuid.UUID) (Payout, error) {
+	row := q.db.QueryRow(ctx, lockPayout, id)
+	var i Payout
+	err := row.Scan(
+		&i.ID,
+		&i.PartnerID,
+		&i.Amount,
+		&i.Status,
+		&i.BankBin,
+		&i.BankName,
+		&i.AccountNumber,
+		&i.AccountHolder,
+		&i.BankAccountID,
+		&i.StatementSeqFrom,
+		&i.StatementSeqTo,
+		&i.OpeningAvailable,
+		&i.ClosingAvailable,
+		&i.RequestedBy,
+		&i.RequestedAt,
+		&i.ApprovedBy,
+		&i.ApprovedAt,
+		&i.PaidBy,
+		&i.PaidAt,
+		&i.TransferReference,
+		&i.ProofFileID,
+		&i.RejectedBy,
+		&i.RejectedAt,
+		&i.RejectReason,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const markPayoutPaid = `-- name: MarkPayoutPaid :one
+UPDATE payouts
+SET status = 'paid', paid_by = $1::uuid, paid_at = $2::timestamptz, transfer_reference = $3::text,
+    proof_file_id = $4::uuid, updated_at = $2
+WHERE id = $5 AND status = 'approved'
+RETURNING id, partner_id, amount, status, bank_bin, bank_name, account_number, account_holder, bank_account_id, statement_seq_from, statement_seq_to, opening_available, closing_available, requested_by, requested_at, approved_by, approved_at, paid_by, paid_at, transfer_reference, proof_file_id, rejected_by, rejected_at, reject_reason, created_at, updated_at
+`
+
+type MarkPayoutPaidParams struct {
+	Actor             uuid.UUID
+	Now               time.Time
+	TransferReference string
+	ProofFileID       uuid.UUID
+	ID                uuid.UUID
+}
+
+func (q *Queries) MarkPayoutPaid(ctx context.Context, arg MarkPayoutPaidParams) (Payout, error) {
+	row := q.db.QueryRow(ctx, markPayoutPaid,
+		arg.Actor,
+		arg.Now,
+		arg.TransferReference,
+		arg.ProofFileID,
+		arg.ID,
+	)
+	var i Payout
+	err := row.Scan(
+		&i.ID,
+		&i.PartnerID,
+		&i.Amount,
+		&i.Status,
+		&i.BankBin,
+		&i.BankName,
+		&i.AccountNumber,
+		&i.AccountHolder,
+		&i.BankAccountID,
+		&i.StatementSeqFrom,
+		&i.StatementSeqTo,
+		&i.OpeningAvailable,
+		&i.ClosingAvailable,
+		&i.RequestedBy,
+		&i.RequestedAt,
+		&i.ApprovedBy,
+		&i.ApprovedAt,
+		&i.PaidBy,
+		&i.PaidAt,
+		&i.TransferReference,
+		&i.ProofFileID,
+		&i.RejectedBy,
+		&i.RejectedAt,
+		&i.RejectReason,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const openPayoutID = `-- name: OpenPayoutID :one
 SELECT id FROM payouts WHERE partner_id = $1 AND status IN ('requested','approved')
 `
@@ -230,6 +441,59 @@ func (q *Queries) OpenPayoutID(ctx context.Context, partnerID uuid.UUID) (uuid.U
 	var id uuid.UUID
 	err := row.Scan(&id)
 	return id, err
+}
+
+const rejectPayout = `-- name: RejectPayout :one
+UPDATE payouts
+SET status = 'rejected', rejected_by = $1::uuid, rejected_at = $2::timestamptz, reject_reason = $3::text, updated_at = $2
+WHERE id = $4 AND status IN ('requested','approved')
+RETURNING id, partner_id, amount, status, bank_bin, bank_name, account_number, account_holder, bank_account_id, statement_seq_from, statement_seq_to, opening_available, closing_available, requested_by, requested_at, approved_by, approved_at, paid_by, paid_at, transfer_reference, proof_file_id, rejected_by, rejected_at, reject_reason, created_at, updated_at
+`
+
+type RejectPayoutParams struct {
+	Actor  uuid.UUID
+	Now    time.Time
+	Reason string
+	ID     uuid.UUID
+}
+
+func (q *Queries) RejectPayout(ctx context.Context, arg RejectPayoutParams) (Payout, error) {
+	row := q.db.QueryRow(ctx, rejectPayout,
+		arg.Actor,
+		arg.Now,
+		arg.Reason,
+		arg.ID,
+	)
+	var i Payout
+	err := row.Scan(
+		&i.ID,
+		&i.PartnerID,
+		&i.Amount,
+		&i.Status,
+		&i.BankBin,
+		&i.BankName,
+		&i.AccountNumber,
+		&i.AccountHolder,
+		&i.BankAccountID,
+		&i.StatementSeqFrom,
+		&i.StatementSeqTo,
+		&i.OpeningAvailable,
+		&i.ClosingAvailable,
+		&i.RequestedBy,
+		&i.RequestedAt,
+		&i.ApprovedBy,
+		&i.ApprovedAt,
+		&i.PaidBy,
+		&i.PaidAt,
+		&i.TransferReference,
+		&i.ProofFileID,
+		&i.RejectedBy,
+		&i.RejectedAt,
+		&i.RejectReason,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }
 
 const setPayoutStatement = `-- name: SetPayoutStatement :exec

@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/riverqueue/river"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bangbc-luna/lunain-travel/internal/catalog"
@@ -28,6 +29,8 @@ import (
 	"github.com/bangbc-luna/lunain-travel/internal/platform/clock"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/db"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/httpx"
+	"github.com/bangbc-luna/lunain-travel/internal/platform/jobs"
+	"github.com/bangbc-luna/lunain-travel/internal/platform/mailer"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/storage"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/testutil"
 	"github.com/bangbc-luna/lunain-travel/internal/settings"
@@ -45,6 +48,8 @@ type env struct {
 	ledger   *ledger.Service
 	partners *partner.Service
 	settings *settings.Service
+	files    *files.Service
+	identity *identity.Service
 	admin    uuid.UUID
 	customer uuid.UUID
 }
@@ -72,11 +77,17 @@ func newEnv(t *testing.T) *env {
 	})
 	led := ledger.NewService(pool, clk)
 	set := settings.NewService(pool, clk)
+	// Never started: emails stay queued in river_job, where tests count them.
+	workers := river.NewWorkers()
+	river.AddWorker(workers, &mailer.SendEmailWorker{Mailer: &mailer.Recorder{}})
+	jobClient, err := jobs.NewClient(pool, workers, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
 	e := &env{
 		pool: pool, clock: clk, issuer: issuer, ledger: led, partners: partners, settings: set,
+		files: fileSvc, identity: idSvc,
 		svc: NewService(Deps{
 			Pool: pool, Clock: clk, Ledger: led, Partners: partners, Settings: set, Files: fileSvc,
-			Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+			Jobs: jobClient, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		}),
 	}
 	ctx := context.Background()
@@ -155,6 +166,13 @@ func randToken(t *testing.T) string {
 // helpers) and posts its earning: net goes to pending.
 func (e *env) confirmBooking(t *testing.T, p testPartner, net int64) ledger.BookingMoney {
 	t.Helper()
+	return e.confirmBookingWithCommission(t, p, net, 0)
+}
+
+// confirmBookingWithCommission is confirmBooking of a booking of gross with
+// the platform commission taken: net gross − commission goes to pending.
+func (e *env) confirmBookingWithCommission(t *testing.T, p testPartner, gross, commission int64) ledger.BookingMoney {
+	t.Helper()
 	id := uuid.Must(uuid.NewV7())
 	e.mustExec(t, `INSERT INTO bookings (
 		id, code, checkout_id, customer_id, partner_id, listing_id, service_type, booking_mode, status,
@@ -164,10 +182,12 @@ func (e *env) confirmBooking(t *testing.T, p testPartner, net int64) ledger.Book
 	) VALUES (
 		$1, $2, $3, $4, $5, $6, 'attraction_ticket', 'instant', 'confirmed',
 		'2026-12-01 02:00:00Z', '2026-12-01 16:59:59Z', '2026-12-01 02:00:00Z',
-		$7, 0, 0, '[]',
+		$7, 0, $9, '[]',
 		'Nguyễn Văn A', '0900000000', 'khach@customer.test', now(), $8
-	)`, id, randCode(t, "LT"), p.checkout, e.customer, p.ID, p.listing, net, randToken(t))
-	b := ledger.BookingMoney{BookingID: id, PartnerID: p.ID, ServiceType: "attraction_ticket", Gross: net}
+	)`, id, randCode(t, "LT"), p.checkout, e.customer, p.ID, p.listing, gross, randToken(t), commission)
+	b := ledger.BookingMoney{
+		BookingID: id, PartnerID: p.ID, ServiceType: "attraction_ticket", Gross: gross, Commission: commission,
+	}
 	e.inTx(t, func(ctx context.Context, tx pgx.Tx) error { return e.ledger.PostBookingConfirmed(ctx, tx, b) })
 	return b
 }
@@ -263,11 +283,20 @@ func (e *env) token(t *testing.T, userID uuid.UUID) string {
 	return s
 }
 
-// server serves the partner payout routes the way cmd/api wires them.
+func (e *env) adminToken(t *testing.T, userID uuid.UUID) string {
+	t.Helper()
+	s, _, err := e.issuer.Issue(auth.Principal{UserID: userID, Role: auth.RoleSuperAdmin})
+	require.NoError(t, err)
+	return s
+}
+
+// server serves the partner and admin payout routes the way cmd/api wires
+// them.
 func (e *env) server(t *testing.T) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
 	e.svc.PartnerRoutes(mux, e.issuer, e.partners.RequireMember())
+	e.svc.AdminRoutes(mux, e.issuer)
 	mux.HandleFunc("/", httpx.NotFound)
 	srv := httptest.NewServer(httpx.Chain(mux, httpx.RequestID, httpx.Recover))
 	t.Cleanup(srv.Close)

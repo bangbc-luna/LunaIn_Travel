@@ -37,3 +37,35 @@ WHERE partner_id = @partner_id
   AND (sqlc.narg(cursor)::uuid IS NULL OR id < sqlc.narg(cursor))
 ORDER BY id DESC
 LIMIT @lim;
+
+-- name: ListAdminPayouts :many
+SELECT * FROM payouts
+WHERE (sqlc.narg(status)::text IS NULL OR status = sqlc.narg(status))
+  AND (sqlc.narg(partner_id)::uuid IS NULL OR partner_id = sqlc.narg(partner_id))
+  AND (sqlc.narg(cursor)::uuid IS NULL OR id < sqlc.narg(cursor))
+ORDER BY id DESC
+LIMIT @lim;
+
+-- Admin transitions hold this lock first (DB §1.1: payouts before
+-- partner_balances).
+-- name: LockPayout :one
+SELECT * FROM payouts WHERE id = @id FOR UPDATE;
+
+-- name: ApprovePayout :one
+UPDATE payouts
+SET status = 'approved', approved_by = @actor::uuid, approved_at = @now::timestamptz, updated_at = @now
+WHERE id = @id AND status = 'requested'
+RETURNING *;
+
+-- name: MarkPayoutPaid :one
+UPDATE payouts
+SET status = 'paid', paid_by = @actor::uuid, paid_at = @now::timestamptz, transfer_reference = @transfer_reference::text,
+    proof_file_id = @proof_file_id::uuid, updated_at = @now
+WHERE id = @id AND status = 'approved'
+RETURNING *;
+
+-- name: RejectPayout :one
+UPDATE payouts
+SET status = 'rejected', rejected_by = @actor::uuid, rejected_at = @now::timestamptz, reject_reason = @reason::text, updated_at = @now
+WHERE id = @id AND status IN ('requested','approved')
+RETURNING *;
