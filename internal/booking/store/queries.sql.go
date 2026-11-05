@@ -696,7 +696,9 @@ func (q *Queries) ListBookings(ctx context.Context, arg ListBookingsParams) ([]L
 const listCheckoutBookings = `-- name: ListCheckoutBookings :many
 SELECT b.id, b.code, b.checkout_id, b.customer_id, b.partner_id, b.listing_id, b.service_type, b.booking_mode, b.status, b.service_start_at, b.service_end_at, b.original_service_start_at, b.gross_amount, b.commission_rate_bps, b.commission_amount, b.cancellation_policy_snapshot, b.contact_name, b.contact_phone, b.contact_email, b.customer_note, b.hold_expires_at, b.hold_release_at, b.response_due_at, b.payment_due_at, b.accepted_at, b.rejected_at, b.reject_reason, b.confirmed_at, b.checked_in_at, b.in_service_at, b.completed_at, b.no_show_at, b.cancelled_at, b.cancel_kind, b.cancel_reason, b.cancelled_by, b.qr_token, b.created_at, b.updated_at,
        COALESCE(to_char(d.visit_date, 'YYYY-MM-DD'), '')::text AS visit_date,
-       d.time_slot_id
+       d.time_slot_id,
+       COALESCE(to_char(d.slot_start, 'HH24:MI'), '')::text AS slot_start,
+       COALESCE(to_char(d.slot_end, 'HH24:MI'), '')::text AS slot_end
 FROM bookings b
 LEFT JOIN booking_attraction_details d ON d.booking_id = b.id
 WHERE b.checkout_id = $1
@@ -707,6 +709,8 @@ type ListCheckoutBookingsRow struct {
 	Booking    Booking
 	VisitDate  string
 	TimeSlotID *uuid.UUID
+	SlotStart  string
+	SlotEnd    string
 }
 
 // Unlocked read of a checkout's bookings with what re-confirmation needs.
@@ -761,6 +765,8 @@ func (q *Queries) ListCheckoutBookings(ctx context.Context, checkoutID uuid.UUID
 			&i.Booking.UpdatedAt,
 			&i.VisitDate,
 			&i.TimeSlotID,
+			&i.SlotStart,
+			&i.SlotEnd,
 		); err != nil {
 			return nil, err
 		}

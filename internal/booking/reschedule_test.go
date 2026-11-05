@@ -116,7 +116,7 @@ func TestReschedule_KeepsOriginalStartForPolicy(t *testing.T) {
 	require.NoError(t, err)
 	newStart := time.Date(2026, 11, 20, 8, 0, 0, 0, clock.VN)
 	require.True(t, out.ServiceStartAt.Equal(newStart), out.ServiceStartAt)
-	require.True(t, out.ServiceEndAt.Equal(time.Date(2026, 11, 20, 17, 0, 0, 0, clock.VN)), out.ServiceEndAt)
+	require.True(t, out.ServiceEndAt.Equal(time.Date(2026, 11, 21, 0, 0, 0, 0, clock.VN)), out.ServiceEndAt)
 
 	var orig, start time.Time
 	require.NoError(t, e.Pool.QueryRow(context.Background(),

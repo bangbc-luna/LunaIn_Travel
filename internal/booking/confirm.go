@@ -216,16 +216,9 @@ func (s *Service) slotStillOffered(ctx context.Context, tx pgx.Tx, r store.ListC
 		return false, nil
 	}
 	// The slot's times may have changed after the hold expired (the booking
-	// guard no longer counted it): re-confirm only the times that were sold.
-	start, err := slots[i].StartAt(day)
-	if err != nil {
-		return false, err
-	}
-	end, err := slots[i].EndAt(day)
-	if err != nil {
-		return false, err
-	}
-	return start.Equal(b.ServiceStartAt) && end.Equal(b.ServiceEndAt), nil
+	// guard no longer counted it): re-confirm only the hours that were sold
+	// (the booking_attraction_details snapshot).
+	return slots[i].StartTime == r.SlotStart && slots[i].EndTime == r.SlotEnd, nil
 }
 
 // confirmation is one HandlePaid call after the locks were taken.

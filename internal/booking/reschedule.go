@@ -129,10 +129,7 @@ func (s *Service) Reschedule(ctx context.Context, customerID, bookingID uuid.UUI
 		if err != nil {
 			return err
 		}
-		endAt, err := slot.EndAt(day)
-		if err != nil {
-			return err
-		}
+		endAt := attractionServiceEnd(day)
 		if !startAt.After(now) {
 			return ErrSlotStarted
 		}

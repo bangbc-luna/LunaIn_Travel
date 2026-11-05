@@ -386,6 +386,15 @@ func startOfDayVN(t time.Time) time.Time {
 	return time.Date(y, m, d, 0, 0, 0, 0, clock.VN)
 }
 
+// attractionServiceEnd is the service_end_at of an attraction ticket for
+// visitDate: 00:00 (Vietnam) of the next day, end-exclusive. A ticket is
+// usable the whole visit day, not only within its slot (spec §6.4: no-show
+// only once the visit date has passed); the slot's hours are kept in
+// booking_attraction_details.
+func attractionServiceEnd(visitDate time.Time) time.Time {
+	return startOfDayVN(visitDate).AddDate(0, 0, 1)
+}
+
 // createAttractionTx does the in-tx part of CreateAttraction after the
 // idempotency key was reserved; it returns the booking and the payment id.
 func (s *Service) createAttractionTx(ctx context.Context, tx pgx.Tx, customerID uuid.UUID, req attractionRequest, now time.Time) (createdRef, uuid.UUID, error) {
@@ -419,10 +428,7 @@ func (s *Service) createAttractionTx(ctx context.Context, tx pgx.Tx, customerID 
 	if err != nil {
 		return createdRef{}, uuid.Nil, err
 	}
-	endAt, err := slot.EndAt(req.visitDate)
-	if err != nil {
-		return createdRef{}, uuid.Nil, err
-	}
+	endAt := attractionServiceEnd(req.visitDate)
 	if !startAt.After(now) {
 		return createdRef{}, uuid.Nil, ErrSlotStarted
 	}

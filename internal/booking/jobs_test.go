@@ -17,8 +17,8 @@ import (
 	"github.com/bangbc-luna/lunain-travel/internal/platform/db"
 )
 
-// serviceEnd is when the fixture booking's 08:00-17:00 slot ends.
-var serviceEnd = time.Date(2026, 11, 7, 17, 0, 0, 0, clock.VN)
+// serviceEnd is the fixture booking's service_end_at: 00:00 (VN) after the visit date.
+var serviceEnd = time.Date(2026, 11, 8, 0, 0, 0, 0, clock.VN)
 
 func (e *env) expireHolds(t *testing.T) int {
 	t.Helper()

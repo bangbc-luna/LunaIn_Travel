@@ -290,7 +290,7 @@ Trước khi giữ ghế, transaction đã khóa chuyến **[Builder]**. Ngay l�
 
 | Loại | `service_start_at` | `service_end_at` | Chuyển trạng thái cuối |
 |---|---|---|---|
-| Attraction | ngày tham quan + giờ bắt đầu khung | ngày tham quan + giờ kết thúc khung (giờ VN) | check-in → `completed` ngay. Qua `service_end_at` mà chưa check-in → `no_show` |
+| Attraction | ngày tham quan + giờ bắt đầu khung | 00:00 ngày hôm sau ngày tham quan theo giờ VN (mốc mở, vé dùng được cả ngày tham quan). Giờ của khung nằm ở `booking_attraction_details.slot_start/slot_end` | check-in → `completed` ngay. Qua `service_end_at` mà chưa check-in → `no_show` |
 | Scheduled Ride | `departure_at` | `departure_at` + `duration_minutes` | qua `departure_at` + `ride_no_show_after_minutes` mà chưa check-in → `no_show`. Đã check-in → job chuyển `completed` khi qua `service_end_at` |
 | Private Charter | `pickup_at` | `return_at` nếu đi khứ hồi, nếu không thì `pickup_at` + thời gian chạy ước tính từ API bản đồ | đối tác bấm hoàn thành, hoặc job tự hoàn thành sau `service_end_at` + `charter_auto_complete_hours` |
 | Self-Drive Rental | `pickup_at` | `return_at` | đối tác bấm "đã nhận lại xe" → `completed` |

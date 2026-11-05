@@ -72,7 +72,7 @@ func TestCreate_PendingWithMoneySnapshot(t *testing.T) {
 	wantStart := time.Date(2026, 11, 7, 8, 0, 0, 0, clock.VN)
 	require.True(t, wantStart.Equal(start), start)
 	require.True(t, wantStart.Equal(orig), orig)
-	require.True(t, time.Date(2026, 11, 7, 17, 0, 0, 0, clock.VN).Equal(end), end)
+	require.True(t, time.Date(2026, 11, 8, 0, 0, 0, 0, clock.VN).Equal(end), end)
 	require.JSONEq(t, `[{"hours_before":48,"refund_bps":10000},{"hours_before":24,"refund_bps":5000}]`, snapshot)
 	require.Equal(t, "Nguyễn Văn An", name)
 	require.Equal(t, "0912345678", phone)
