@@ -473,7 +473,9 @@ type RefreshToken struct {
 type Refund struct {
 	ID                uuid.UUID
 	PaymentID         uuid.UUID
+	CheckoutID        uuid.UUID
 	BookingID         pgtype.UUID
+	ProviderReference *string
 	Amount            int64
 	Reason            string
 	Status            string

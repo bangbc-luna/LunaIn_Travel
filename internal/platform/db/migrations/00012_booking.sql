@@ -4,12 +4,16 @@
 -- One customer payment covering one or more bookings.
 CREATE TABLE checkouts (
     id           uuid PRIMARY KEY,
-    code         text NOT NULL UNIQUE CHECK (btrim(code) <> ''),
+    -- "CO" + 8 Crockford base32 characters.
+    code         text NOT NULL UNIQUE CHECK (code ~ '^CO[0-9A-HJKMNP-TV-Z]{8}$'),
     customer_id  uuid NOT NULL REFERENCES users (id),
     total_amount bigint NOT NULL CHECK (total_amount >= 0),
     status       text NOT NULL DEFAULT 'open' CHECK (status IN ('open','paid','closed')),
     created_at   timestamptz NOT NULL DEFAULT now(),
-    updated_at   timestamptz NOT NULL DEFAULT now()
+    updated_at   timestamptz NOT NULL DEFAULT now(),
+    -- Target of bookings (checkout_id, customer_id): a booking's checkout
+    -- belongs to the same customer.
+    UNIQUE (id, customer_id)
 );
 
 CREATE INDEX checkouts_customer_idx ON checkouts (customer_id, created_at DESC);
@@ -18,7 +22,7 @@ CREATE TABLE bookings (
     id                           uuid PRIMARY KEY,
     -- "LT" + 8 Crockford base32 characters.
     code                         text NOT NULL UNIQUE CHECK (code ~ '^LT[0-9A-HJKMNP-TV-Z]{8}$'),
-    checkout_id                  uuid NOT NULL REFERENCES checkouts (id),
+    checkout_id                  uuid NOT NULL,
     customer_id                  uuid NOT NULL REFERENCES users (id),
     partner_id                   uuid NOT NULL REFERENCES partners (id),
     listing_id                   uuid NOT NULL,
@@ -68,15 +72,27 @@ CREATE TABLE bookings (
     updated_at                   timestamptz NOT NULL DEFAULT now(),
     -- The partner must own the listing (DB §1.2).
     FOREIGN KEY (listing_id, partner_id) REFERENCES listings (id, partner_id),
-    -- Targets of composite FKs from booking children and ledger tables.
+    -- The checkout belongs to the same customer.
+    FOREIGN KEY (checkout_id, customer_id) REFERENCES checkouts (id, customer_id),
+    -- Targets of composite FKs from booking children, refunds and ledger tables.
     UNIQUE (id, partner_id),
     UNIQUE (id, listing_id),
+    UNIQUE (id, checkout_id),
     CHECK (commission_amount BETWEEN 0 AND gross_amount),
     CHECK (service_end_at >= service_start_at),
     -- requested / awaiting_payment / rejected exist only for Request Booking;
     -- pending_payment / checked_in only for Instant Booking.
-    CHECK (booking_mode = 'request' OR status NOT IN ('requested','awaiting_payment','rejected')),
-    CHECK (booking_mode = 'instant' OR status NOT IN ('pending_payment','checked_in')),
+    CONSTRAINT bookings_request_only_status_check
+        CHECK (booking_mode = 'request' OR status NOT IN ('requested','awaiting_payment','rejected')),
+    CONSTRAINT bookings_instant_only_status_check
+        CHECK (booking_mode = 'instant' OR status NOT IN ('pending_payment','checked_in')),
+    CHECK (jsonb_typeof(cancellation_policy_snapshot) = 'array'),
+    -- Timestamps every status reached implies.
+    CHECK (status NOT IN ('confirmed','checked_in','in_service','completed','no_show') OR confirmed_at IS NOT NULL),
+    CHECK (status <> 'completed' OR completed_at IS NOT NULL),
+    CHECK (status <> 'no_show' OR no_show_at IS NOT NULL),
+    CHECK (status NOT IN ('pending_payment','awaiting_payment') OR hold_release_at IS NOT NULL),
+    CHECK (status <> 'requested' OR response_due_at IS NOT NULL),
     CHECK ((hold_expires_at IS NULL) = (hold_release_at IS NULL)),
     CHECK (hold_release_at IS NULL OR hold_release_at >= hold_expires_at),
     -- Cancellation fields are set together, exactly when cancelled.

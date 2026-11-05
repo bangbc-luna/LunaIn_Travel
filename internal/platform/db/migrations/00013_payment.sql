@@ -23,7 +23,9 @@ CREATE TABLE payments (
     raw                 jsonb NULL,
     created_at          timestamptz NOT NULL DEFAULT now(),
     updated_at          timestamptz NOT NULL DEFAULT now(),
-    CHECK (status <> 'paid' OR paid_at IS NOT NULL)
+    CHECK (status <> 'paid' OR paid_at IS NOT NULL),
+    -- Target of refunds (payment_id, checkout_id).
+    UNIQUE (id, checkout_id)
 );
 
 ALTER SEQUENCE payment_order_code_seq OWNED BY payments.provider_order_code;
@@ -50,11 +52,16 @@ CREATE TABLE payment_events (
 CREATE INDEX payment_events_payment_idx ON payment_events (payment_id) WHERE payment_id IS NOT NULL;
 
 -- A refund belongs to a payment; booking_id is NULL for payment-level refunds
--- (over-, under- or duplicate payment).
+-- (over-, under- or duplicate payment), which are keyed by the incoming
+-- transfer's provider_reference. checkout_id ties the payment and the booking
+-- to the same checkout.
 CREATE TABLE refunds (
     id                 uuid PRIMARY KEY,
-    payment_id         uuid NOT NULL REFERENCES payments (id),
-    booking_id         uuid NULL REFERENCES bookings (id),
+    payment_id         uuid NOT NULL,
+    checkout_id        uuid NOT NULL,
+    booking_id         uuid NULL,
+    -- Reference of the incoming transfer this refund returns.
+    provider_reference text NULL,
     amount             bigint NOT NULL CHECK (amount > 0),
     reason             text NOT NULL CHECK (reason IN
                            ('customer_cancel','admin_cancel','late_payment','payment_mismatch','duplicate_payment')),
@@ -68,6 +75,9 @@ CREATE TABLE refunds (
     completed_at       timestamptz NULL,
     created_at         timestamptz NOT NULL DEFAULT now(),
     updated_at         timestamptz NOT NULL DEFAULT now(),
+    FOREIGN KEY (payment_id, checkout_id) REFERENCES payments (id, checkout_id),
+    FOREIGN KEY (booking_id, checkout_id) REFERENCES bookings (id, checkout_id),
+    CHECK (booking_id IS NOT NULL OR provider_reference IS NOT NULL),
     CHECK (status <> 'completed' OR transfer_reference IS NOT NULL),
     CHECK (status = 'awaiting_bank_info'
            OR (bank_bin IS NOT NULL AND account_number IS NOT NULL AND account_holder IS NOT NULL)),
@@ -76,9 +86,11 @@ CREATE TABLE refunds (
 );
 
 -- At most one refund per booking, so the webhook and the reconcile job can
--- never both create one; at most one payment-level refund per payment.
+-- never both create one; at most one payment-level refund per incoming
+-- transfer (a duplicate payment is a second transfer on the same payment).
 CREATE UNIQUE INDEX refunds_booking_idx ON refunds (booking_id) WHERE booking_id IS NOT NULL;
-CREATE UNIQUE INDEX refunds_payment_no_booking_idx ON refunds (payment_id) WHERE booking_id IS NULL;
+CREATE UNIQUE INDEX refunds_payment_transfer_idx ON refunds (payment_id, provider_reference)
+    WHERE booking_id IS NULL;
 CREATE INDEX refunds_status_idx ON refunds (status);
 CREATE INDEX refunds_payment_idx ON refunds (payment_id);
 

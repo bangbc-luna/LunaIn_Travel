@@ -42,7 +42,14 @@ CREATE TABLE ledger_entries (
            OR (booking_id IS NOT NULL AND payout_id IS NULL)),
     CHECK (kind NOT IN ('payout_hold','payout_reversal')
            OR (payout_id IS NOT NULL AND booking_id IS NULL)),
-    CHECK (kind <> 'adjustment' OR (reason IS NOT NULL AND created_by IS NOT NULL))
+    CHECK (kind <> 'adjustment' OR (reason IS NOT NULL AND created_by IS NOT NULL)),
+    -- Earning, refund debit and commission waiver only move pending money.
+    CONSTRAINT ledger_entries_pending_bucket_check
+        CHECK (kind NOT IN ('booking_earning','refund_debit','commission_waiver') OR bucket = 'pending'),
+    -- Signs; release, adjustment and payout kinds may go either way.
+    CONSTRAINT ledger_entries_earning_sign_check CHECK (kind <> 'booking_earning' OR amount > 0),
+    CONSTRAINT ledger_entries_refund_sign_check CHECK (kind <> 'refund_debit' OR amount < 0),
+    CONSTRAINT ledger_entries_waiver_sign_check CHECK (kind <> 'commission_waiver' OR amount > 0)
 );
 
 -- Each booking kind is written at most once per bucket (release touches both
@@ -82,13 +89,16 @@ CREATE TABLE booking_settlements (
     released_at    timestamptz NULL,
     created_at     timestamptz NOT NULL DEFAULT now(),
     updated_at     timestamptz NOT NULL DEFAULT now(),
-    FOREIGN KEY (booking_id, partner_id) REFERENCES bookings (id, partner_id)
+    FOREIGN KEY (booking_id, partner_id) REFERENCES bookings (id, partner_id),
+    -- Released money has left pending.
+    CHECK (released_at IS NULL OR net_pending = 0)
 );
 
 CREATE INDEX booking_settlements_release_due_idx ON booking_settlements (release_due_at)
     WHERE released_at IS NULL;
 
--- Platform revenue: commission (positive) and its waiver (negative).
+-- Platform revenue: commission (positive) and its waiver (negative). A zero
+-- amount (0% rate) is never written: the ledger service skips it.
 CREATE TABLE platform_commission_entries (
     id           uuid PRIMARY KEY,
     booking_id   uuid NOT NULL REFERENCES bookings (id),
