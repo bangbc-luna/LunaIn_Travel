@@ -105,6 +105,20 @@ func (s *Service) AdminRoutes(mux httpx.Router, iss *auth.Issuer) {
 		httpx.WriteJSON(w, http.StatusOK, d)
 	}))
 
+	mux.Handle("GET /v1/admin/listings/{id}/ride-trips", withID(func(w http.ResponseWriter, r *http.Request, _, id uuid.UUID) {
+		from, to, err := tripRange(r, s.clock.Now())
+		if err != nil {
+			httpx.WriteError(w, r, err)
+			return
+		}
+		trips, err := s.AdminListTrips(r.Context(), id, from, to)
+		if err != nil {
+			httpx.WriteError(w, r, err)
+			return
+		}
+		httpx.WriteJSON(w, http.StatusOK, trips)
+	}))
+
 	mux.Handle("POST /v1/admin/listings/{id}/approve", withID(func(w http.ResponseWriter, r *http.Request, actor, id uuid.UUID) {
 		l, err := s.Approve(r.Context(), actor, id)
 		reply(w, r, l, err)

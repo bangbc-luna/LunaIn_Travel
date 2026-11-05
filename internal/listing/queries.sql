@@ -433,3 +433,48 @@ SET status = 'cancelled', cancelled_reason = @reason::text, cancelled_at = @now:
     cancelled_by = sqlc.narg(actor)::uuid, cancel_source = 'schedule', updated_at = @now::timestamptz
 WHERE schedule_id = @schedule_id::uuid AND departure_at > @now::timestamptz AND departure_at >= @from_at::timestamptz
   AND status = 'scheduled' AND seats_reserved = 0;
+
+-- Scheduled ride: single trips and seat reservation.
+
+-- name: ListListingTrips :many
+SELECT * FROM ride_trips
+WHERE listing_id = @listing_id AND departure_at >= @from_at AND departure_at < @to_at
+ORDER BY departure_at;
+
+-- name: InsertOneOffTrip :one
+INSERT INTO ride_trips (id, listing_id, schedule_id, departure_at, seat_capacity, price_per_seat, created_at, updated_at)
+VALUES (@id, @listing_id, NULL, @departure_at, @seat_capacity, @price_per_seat, @now, @now)
+ON CONFLICT (listing_id, departure_at) DO NOTHING
+RETURNING *;
+
+-- name: LockListingTrip :one
+SELECT * FROM ride_trips WHERE id = @id AND listing_id = @listing_id FOR UPDATE;
+
+-- name: UpdateTripFields :one
+UPDATE ride_trips
+SET departure_at = @departure_at, seat_capacity = @seat_capacity, price_per_seat = @price_per_seat,
+    schedule_id = sqlc.narg(schedule_id), updated_at = @now
+WHERE id = @id
+RETURNING *;
+
+-- name: CancelTrip :one
+UPDATE ride_trips
+SET status = 'cancelled', cancelled_reason = @reason::text, cancelled_at = @now::timestamptz,
+    cancelled_by = @actor::uuid, cancel_source = @source::text, updated_at = @now::timestamptz
+WHERE id = @id AND status = 'scheduled'
+RETURNING *;
+
+-- name: TripListingIDs :many
+SELECT id, listing_id FROM ride_trips WHERE id = ANY(@ids::uuid[]);
+
+-- name: LockTrips :many
+SELECT * FROM ride_trips WHERE id = ANY(@ids::uuid[]) ORDER BY id FOR UPDATE;
+
+-- name: ReserveSeats :execrows
+UPDATE ride_trips SET seats_reserved = seats_reserved + @n::int, updated_at = @now
+WHERE id = @id AND status = 'scheduled' AND departure_at > @now
+  AND seats_reserved + @n::int <= seat_capacity;
+
+-- name: ReleaseSeats :execrows
+UPDATE ride_trips SET seats_reserved = seats_reserved - @n::int, updated_at = now()
+WHERE id = @id;
