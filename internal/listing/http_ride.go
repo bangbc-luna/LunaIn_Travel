@@ -10,6 +10,12 @@ import (
 	"github.com/bangbc-luna/lunain-travel/internal/platform/httpx"
 )
 
+// tripList is the body of the partner and admin trip lists, shaped like every
+// other list endpoint.
+type tripList struct {
+	Items []Trip `json:"items"`
+}
+
 // rideRoutes registers the scheduled ride routes: route, schedules and trips. Each
 // one answers ErrNotRideListing for a listing of another service type.
 func (s *Service) rideRoutes(mux httpx.Router, withID func(h func(w http.ResponseWriter, r *http.Request, partnerID, userID, id uuid.UUID)) http.Handler) {
@@ -77,7 +83,7 @@ func (s *Service) rideRoutes(mux httpx.Router, withID func(h func(w http.Respons
 			return
 		}
 		trips, err := s.ListTrips(r.Context(), partnerID, id, from, to)
-		reply(w, r, http.StatusOK, trips, err)
+		reply(w, r, http.StatusOK, tripList{trips}, err)
 	}))
 
 	mux.Handle("POST /v1/partner/listings/{id}/ride-trips", withID(func(w http.ResponseWriter, r *http.Request, partnerID, userID, id uuid.UUID) {

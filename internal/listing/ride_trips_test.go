@@ -310,12 +310,15 @@ func TestTrips_HTTP(t *testing.T) {
 	// List: 2026-11-06 (date form, whole VN day) has the 07:00 and 13:00 trips.
 	rec = e.do(t, http.MethodGet, base+"?from=2026-11-06&to=2026-11-06", tok, nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	var trips []struct {
-		ID           uuid.UUID `json:"id"`
-		DepartureAt  time.Time `json:"departure_at"`
-		PricePerSeat int64     `json:"price_per_seat"`
+	var list struct {
+		Items []struct {
+			ID           uuid.UUID `json:"id"`
+			DepartureAt  time.Time `json:"departure_at"`
+			PricePerSeat int64     `json:"price_per_seat"`
+		} `json:"items"`
 	}
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &trips))
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &list))
+	trips := list.Items
 	require.Len(t, trips, 2)
 	require.True(t, trips[0].DepartureAt.Equal(vnAt(2026, 11, 6, 7, 0)))
 	require.Equal(t, created.ID, trips[1].ID)
@@ -323,8 +326,9 @@ func TestTrips_HTTP(t *testing.T) {
 
 	rec = e.do(t, http.MethodGet, base+"?from=2026-11-06T00:00:00%2B07:00&to=2026-11-08T00:00:00%2B07:00", tok, nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &trips))
-	require.Len(t, trips, 3)
+	list.Items = nil
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &list))
+	require.Len(t, list.Items, 3)
 
 	requireCode(t, e.do(t, http.MethodGet, base+"?from=2026-11-06&to=2027-02-01", tok, nil), http.StatusUnprocessableEntity, "invalid_ride")
 	requireCode(t, e.do(t, http.MethodGet, base+"?from=nope&to=2026-11-08", tok, nil), http.StatusUnprocessableEntity, "invalid_ride")
@@ -353,9 +357,11 @@ func TestAdminListTrips(t *testing.T) {
 	path := "/v1/admin/listings/" + l.ID.String() + "/ride-trips?from=2026-11-06&to=2026-11-07"
 	rec := e.do(t, http.MethodGet, path, adminTok, nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	var out []map[string]any
+	var out struct {
+		Items []map[string]any `json:"items"`
+	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
-	require.Len(t, out, 2)
+	require.Len(t, out.Items, 2)
 	requireCode(t, e.do(t, http.MethodGet, path, e.token(t, p.OwnerUserID), nil), http.StatusForbidden, "forbidden")
 	requireCode(t, e.do(t, http.MethodGet, "/v1/admin/listings/nope/ride-trips", adminTok, nil), http.StatusNotFound, "not_found")
 

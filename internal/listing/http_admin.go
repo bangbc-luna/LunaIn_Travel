@@ -116,7 +116,7 @@ func (s *Service) AdminRoutes(mux httpx.Router, iss *auth.Issuer) {
 			httpx.WriteError(w, r, err)
 			return
 		}
-		httpx.WriteJSON(w, http.StatusOK, trips)
+		httpx.WriteJSON(w, http.StatusOK, tripList{trips})
 	}))
 
 	mux.Handle("POST /v1/admin/listings/{id}/approve", withID(func(w http.ResponseWriter, r *http.Request, actor, id uuid.UUID) {
