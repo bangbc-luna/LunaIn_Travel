@@ -249,7 +249,10 @@ func TestWebhook_ProviderSaysNotPaid(t *testing.T) {
 	requireCode(t, e.webhook(t, body), http.StatusServiceUnavailable, "payment_not_confirmed")
 	require.Equal(t, "pending_payment", e.bookingStatus(t, v.ID))
 	require.Equal(t, "pending", e.paymentStatus(t, oc))
-	require.Equal(t, 0, e.count(t, `SELECT count(*) FROM payment_events`), "no dedupe row may block the retry")
+	require.Equal(t, 1, e.count(t, `SELECT count(*) FROM payment_events`))
+	require.Equal(t, 1, e.count(t, `SELECT count(*) FROM payment_events
+		WHERE dedupe_key = $1 AND result = 'awaiting_status'`, "payos:"+strconv.FormatInt(oc, 10)+":"+ref(oc)+":awaiting"),
+		"only the tracking row: no dedupe row may block the retry")
 	require.Equal(t, 0, e.count(t, `SELECT count(*) FROM ledger_entries`))
 
 	rec := e.webhook(t, body)

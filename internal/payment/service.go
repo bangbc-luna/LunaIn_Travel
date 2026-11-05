@@ -361,3 +361,14 @@ func (s *Service) CancelLinkBestEffort(ctx context.Context, orderCode int64) {
 		s.log.Warn("payment: cancel link failed", "order_code", orderCode, "err", err)
 	}
 }
+
+// MarkNeedsReview flags a locked payment for a human look (e.g. money the
+// provider's status did not confirm).
+func (s *Service) MarkNeedsReview(ctx context.Context, tx pgx.Tx, id uuid.UUID) error {
+	if err := store.New(tx).SetPaymentStatus(ctx, store.SetPaymentStatusParams{
+		Status: StatusNeedsReview, Now: s.clock.Now(), ID: id,
+	}); err != nil {
+		return fmt.Errorf("set payment needs_review: %w", err)
+	}
+	return nil
+}

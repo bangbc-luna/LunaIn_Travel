@@ -19,9 +19,22 @@ import (
 	"github.com/bangbc-luna/lunain-travel/internal/platform/httpx"
 )
 
-// ResultUnknownOrder is stored in payment_events.result for an order code
-// we do not know; the PaymentHandler returns the other results.
-const ResultUnknownOrder = "unknown_order"
+// Results stored in payment_events.result by the webhook itself; the
+// PaymentHandler returns the others.
+const (
+	// ResultUnknownOrder: an order code we do not know.
+	ResultUnknownOrder = "unknown_order"
+	// ResultAwaitingStatus: the tracking row (dedupe key + ":awaiting") of a
+	// transfer the provider's status did not show yet.
+	ResultAwaitingStatus = "awaiting_status"
+	// ResultNoAmount: a signed webhook without a positive amount.
+	ResultNoAmount = "no_amount"
+)
+
+// StatusLagLimit is how long a transfer whose signed webhook the provider's
+// status does not reflect (PENDING/PROCESSING, nothing paid) is retried
+// before it is processed anyway, flagged needs_review.
+const StatusLagLimit = 30 * time.Minute
 
 const (
 	// WebhookPath is where PayOS posts payment webhooks.
@@ -46,10 +59,13 @@ var (
 type PaidEvent struct {
 	PaymentID, CheckoutID uuid.UUID
 	OrderCode             int64
-	// AmountPaid is the money this transfer brings: the signed webhook
-	// amount, capped by the provider's amountPaid (which is cumulative over
-	// transfers and is the authority on an underpayment).
+	// AmountPaid is the money this transfer brings: always the signed
+	// per-transfer webhook amount (Ruling 13), never the provider's
+	// cumulative amountPaid.
 	AmountPaid int64
+	// NeedsReview: the provider's status did not confirm the money; the
+	// payment must end up needs_review whatever else happens.
+	NeedsReview bool
 	// Reference identifies the transfer: the bank reference, or a fallback
 	// when the provider sent none (see TransferReference).
 	Reference string
@@ -94,31 +110,28 @@ func TransferReference(wd WebhookData) string {
 	}
 }
 
-// moneyReceived reports how much of this transfer the provider confirms:
-// state PAID or UNDERPAID, or any amountPaid, counts as money (Ruling 9).
-// The webhook amount is capped by amountPaid when the provider reports one.
-func moneyReceived(st Status, webhookAmount int64) (int64, bool) {
-	if st.State != StatePaid && st.State != StateUnderpaid && st.AmountPaid <= 0 {
-		return 0, false
-	}
-	amount := webhookAmount
-	if st.AmountPaid > 0 && (amount <= 0 || st.AmountPaid < amount) {
-		amount = st.AmountPaid
-	}
-	return amount, amount > 0
+// statusShowsMoney: state PAID or UNDERPAID, or any amount paid.
+func statusShowsMoney(st Status) bool {
+	return st.State == StatePaid || st.State == StateUnderpaid || st.AmountPaid > 0
 }
 
 // ProcessWebhook handles a PayOS payment webhook body:
 //
 //  1. VerifyWebhook: a bad signature is ErrInvalidWebhook, nothing is stored.
+//     A valid signature with code "00" and amount > 0 is proof of a transfer
+//     of exactly data.amount (Ruling 13).
 //  2. A dedupe_key already in payment_events: done (a repeated delivery).
 //  3. An order code we do not know (PayOS tests the URL with one): the event
 //     is stored as unknown_order and that is all.
-//  4. Provider.GetStatus re-checks the order OUTSIDE any tx. Money-first
-//     (Ruling 9): PAID, UNDERPAID or amountPaid > 0 is money; otherwise
-//     (PENDING, PROCESSING, unknown with nothing paid) nothing is stored and
-//     the answer is ErrPaymentNotConfirmed (503), so the provider retries
-//     and a later delivery is processed normally.
+//  4. Provider.GetStatus, OUTSIDE any tx, only detects a lagging status:
+//     - it shows money (PAID, UNDERPAID or amountPaid > 0): processed;
+//     - PENDING or PROCESSING with nothing paid: the first sighting stores a
+//     tracking row (dedupe key + ":awaiting") and answers
+//     ErrPaymentNotConfirmed (503) so the provider retries; once that row
+//     is StatusLagLimit old, a delivery is processed, flagged needs_review;
+//     - any other state with nothing paid (CANCELLED, EXPIRED, FAILED,
+//     unknown): processed at once, flagged needs_review. Money is never
+//     dropped.
 //  5. In one tx: insert the payment_events row (a concurrent delivery of the
 //     same transfer inserts nothing and stops there), h.HandlePaid, store
 //     its result. After commit, links the handler replaced are cancelled at
@@ -152,16 +165,32 @@ func (s *Service) ProcessWebhook(ctx context.Context, body []byte, h PaymentHand
 	if err != nil {
 		return err
 	}
+	if wd.Amount <= 0 {
+		s.log.Warn("payment: signed webhook without amount", "order_code", wd.OrderCode, "reference", reference)
+		return s.storeEvent(ctx, q, key, &p.ID, body, ResultNoAmount, now)
+	}
 
 	st, err := s.provider.GetStatus(ctx, wd.OrderCode)
 	if err != nil {
 		return fmt.Errorf("payment: confirm order %d with the provider: %w", wd.OrderCode, err)
 	}
-	amount, ok := moneyReceived(st, wd.Amount)
-	if !ok {
-		s.log.Warn("payment: webhook says paid, provider reports no money yet; asking for a retry",
-			"order_code", wd.OrderCode, "state", st.State, "reference", reference)
-		return ErrPaymentNotConfirmed
+	needsReview := false
+	if !statusShowsMoney(st) || st.AmountPaid < wd.Amount {
+		s.log.Warn("payment: provider status disagrees with the signed webhook",
+			"order_code", wd.OrderCode, "reference", reference, "webhook_amount", wd.Amount,
+			"status_state", st.State, "status_amount_paid", st.AmountPaid)
+	}
+	if !statusShowsMoney(st) {
+		if st.State == StatePending || st.State == StateProcessing {
+			waited, err := s.awaitStatus(ctx, q, key, p.ID, body, now)
+			if err != nil {
+				return err
+			}
+			if !waited {
+				return ErrPaymentNotConfirmed
+			}
+		}
+		needsReview = true
 	}
 
 	paidAt := wd.TransactionAt
@@ -169,8 +198,8 @@ func (s *Service) ProcessWebhook(ctx context.Context, body []byte, h PaymentHand
 		paidAt = now
 	}
 	ev := PaidEvent{
-		PaymentID: p.ID, CheckoutID: p.CheckoutID, OrderCode: wd.OrderCode, AmountPaid: amount,
-		Reference: reference, PaidAt: paidAt, Raw: wd.Raw,
+		PaymentID: p.ID, CheckoutID: p.CheckoutID, OrderCode: wd.OrderCode, AmountPaid: wd.Amount,
+		NeedsReview: needsReview, Reference: reference, PaidAt: paidAt, Raw: wd.Raw,
 	}
 	var out PaidOutcome
 	err = db.InTx(ctx, s.pool, func(tx pgx.Tx) error {
@@ -204,6 +233,21 @@ func (s *Service) ProcessWebhook(ctx context.Context, body []byte, h PaymentHand
 		s.CancelLinkBestEffort(context.WithoutCancel(ctx), oc)
 	}
 	return nil
+}
+
+// awaitStatus tracks a transfer the provider's status does not show yet. The
+// first sighting stores the tracking row (its own short statement) and
+// reports false; a later one reports true once the row is StatusLagLimit old.
+func (s *Service) awaitStatus(ctx context.Context, q *store.Queries, key string, paymentID uuid.UUID, body []byte, now time.Time) (bool, error) {
+	trackKey := key + ":awaiting"
+	since, err := q.GetPaymentEventReceivedAt(ctx, trackKey)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, s.storeEvent(ctx, q, trackKey, &paymentID, body, ResultAwaitingStatus, now)
+	}
+	if err != nil {
+		return false, fmt.Errorf("get awaiting event: %w", err)
+	}
+	return now.Sub(since) >= StatusLagLimit, nil
 }
 
 // storeEvent records an event that needs no further processing.

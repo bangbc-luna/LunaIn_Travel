@@ -73,6 +73,9 @@ func TestPaid_OnReplacedLinkNotBookableRefunded(t *testing.T) {
 	require.Equal(t, []refundRow{{Amount: gross, Reason: "duplicate_payment", Status: "awaiting_bank_info", Reference: &r}},
 		e.refunds(t))
 	require.Equal(t, 0, e.count(t, `SELECT count(*) FROM ledger_entries`))
+	// Ruling 12: the order was never paid: neutral email.
+	require.Equal(t, 1, e.count(t, `SELECT count(*) FROM river_job WHERE args::text LIKE '%liên hệ hỗ trợ để hoàn tất đơn%'`))
+	require.Equal(t, 0, e.count(t, `SELECT count(*) FROM river_job WHERE args::text LIKE '%đã được thanh toán trước đó%'`))
 }
 
 // Ruling 11: pending_payment whose hold passed release (expiry job lagging)
@@ -109,8 +112,9 @@ func TestLatePending_StillBookableConfirms(t *testing.T) {
 	e.requireBalance(t, 342_000, 0)
 }
 
-// Ruling 12: a corrective transfer after an underpayment is refunded with a
-// neutral email (the order was never paid).
+// Rulings 12/14: a second, still too small transfer after an underpayment
+// is another mismatch (the needs_review payment does not block it); its
+// email never claims the order was paid before.
 func TestUnderpaidThenCorrectiveTransfer(t *testing.T) {
 	e := newEnv(t)
 	v := e.create(t, "k")
@@ -123,8 +127,7 @@ func TestUnderpaidThenCorrectiveTransfer(t *testing.T) {
 	rows := e.refunds(t)
 	require.Len(t, rows, 2)
 	require.Equal(t, int64(80_000), rows[1].Amount)
-	require.Equal(t, "duplicate_payment", rows[1].Reason)
-	require.Equal(t, 1, e.count(t, `SELECT count(*) FROM river_job WHERE args::text LIKE '%liên hệ hỗ trợ để hoàn tất đơn%'`))
+	require.Equal(t, "payment_mismatch", rows[1].Reason)
 	require.Equal(t, 0, e.count(t, `SELECT count(*) FROM river_job WHERE args::text LIKE '%đã được thanh toán trước đó%'`))
 }
 

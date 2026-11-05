@@ -75,3 +75,9 @@ RETURNING *;
 -- All payments of a checkout, locked in id order (after its bookings).
 -- name: LockCheckoutPayments :many
 SELECT * FROM payments WHERE checkout_id = @checkout_id ORDER BY id FOR UPDATE;
+
+-- name: SetPaymentStatus :exec
+UPDATE payments SET status = @status, updated_at = @now WHERE id = @id;
+
+-- name: GetPaymentEventReceivedAt :one
+SELECT received_at FROM payment_events WHERE dedupe_key = @dedupe_key;

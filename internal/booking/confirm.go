@@ -71,11 +71,12 @@ var _ payment.PaymentHandler = (*Service)(nil)
 // FOR UPDATE and the state is decided from the locked rows:
 //
 //   - The payment already received a transfer with this reference: nothing.
-//   - The checkout cannot take this money — the payment already has another
-//     transfer, another payment of the checkout received money, the checkout
-//     is paid, a booking is past payment, or the payment was replaced
-//     (cancelled) and some booking is no longer bookable: duplicate payment,
-//     refunded in full (duplicate_payment, payment-level).
+//   - The checkout cannot take this money — it is paid (or one of its
+//     payments is paid), a booking is past payment, or the payment was
+//     replaced (cancelled, or another payment is now the pending one) and
+//     some booking is no longer bookable: duplicate payment, refunded in full
+//     (duplicate_payment, payment-level). Refunded strays and underpayments
+//     (needs_review payments) do NOT block a later full payment (Ruling 14).
 //   - Less than the payment amount: needs_review, refunded in full
 //     (payment_mismatch, payment-level); nothing is confirmed.
 //   - Otherwise, if the payment had been replaced (Ruling 10), it is accepted
@@ -90,7 +91,8 @@ var _ payment.PaymentHandler = (*Service)(nil)
 // (then booking id) so that a future multi-partner checkout always locks
 // partner_balances in ascending order. Refunds start awaiting_bank_info, or
 // pending when the customer saved a refund account. The customer is emailed
-// (outbox) about each confirmation and refund.
+// (outbox) about each confirmation and refund. An event the provider's status
+// did not confirm (ev.NeedsReview) always leaves the payment needs_review.
 func (s *Service) HandlePaid(ctx context.Context, tx pgx.Tx, ev payment.PaidEvent) (payment.PaidOutcome, error) {
 	q := store.New(tx)
 	now := s.clock.Now()
@@ -224,6 +226,9 @@ type confirmation struct {
 	rebookable map[uuid.UUID]bool
 	now        time.Time
 	out        payment.PaidOutcome
+	// replaced: this payment is no longer the checkout's current one
+	// (cancelled, or another payment is pending).
+	replaced bool
 }
 
 // eligible reports whether a locked booking can be (re-)confirmed now. A
@@ -240,22 +245,27 @@ func (c *confirmation) eligible(b store.Booking) (bool, error) {
 	}
 }
 
-// canTakeMoney: this payment may be the first money of the checkout. A
-// replaced (cancelled) payment additionally needs every booking still
-// bookable (Ruling 10); otherwise late bookings are refunded one by one.
+// canTakeMoney: the checkout can still be paid by this transfer (Ruling 14:
+// only a paid checkout or a paid payment makes it a duplicate). A replaced
+// payment additionally needs every booking still bookable (Ruling 10);
+// otherwise late bookings are refunded one by one.
 func (c *confirmation) canTakeMoney() (bool, error) {
-	if c.pay.ProviderReference != nil || c.co.Status == checkoutPaid {
+	if c.co.Status == checkoutPaid {
 		return false, nil
+	}
+	c.replaced = c.pay.Status == payment.StatusCancelled
+	for _, p := range c.pays {
+		if p.Status == payment.StatusPaid {
+			return false, nil
+		}
+		if p.ID != c.pay.ID && p.Status == payment.StatusPending {
+			c.replaced = true
+		}
 	}
 	switch c.pay.Status {
-	case payment.StatusPending, payment.StatusExpired, payment.StatusCancelled:
+	case payment.StatusPending, payment.StatusExpired, payment.StatusCancelled, payment.StatusNeedsReview:
 	default:
 		return false, nil
-	}
-	for _, p := range c.pays {
-		if p.ProviderReference != nil {
-			return false, nil // another payment of the checkout received money
-		}
 	}
 	for _, b := range c.bookings {
 		if b.Status != StatusPendingPayment && b.Status != StatusExpired {
@@ -265,7 +275,7 @@ func (c *confirmation) canTakeMoney() (bool, error) {
 		if err != nil {
 			return false, err
 		}
-		if !ok && c.pay.Status == payment.StatusCancelled {
+		if !ok && c.replaced {
 			return false, nil
 		}
 	}
@@ -279,6 +289,11 @@ func (c *confirmation) duplicate(ctx context.Context) (payment.PaidOutcome, erro
 		// A payment that cannot take its first money (e.g. a replaced one).
 		if err := c.s.payments.RecordReceived(ctx, c.tx, c.pay.ID, payment.StatusNeedsReview,
 			c.ev.Reference, c.ev.PaidAt, c.ev.Raw); err != nil {
+			return c.out, err
+		}
+	}
+	if c.ev.NeedsReview && c.pay.ProviderReference != nil {
+		if err := c.s.payments.MarkNeedsReview(ctx, c.tx, c.pay.ID); err != nil {
 			return c.out, err
 		}
 	}
@@ -306,10 +321,10 @@ func (c *confirmation) underpaid(ctx context.Context) (payment.PaidOutcome, erro
 // confirm handles a payment of at least the amount due.
 func (c *confirmation) confirm(ctx context.Context) (payment.PaidOutcome, error) {
 	var results []string
-	if c.pay.Status == payment.StatusCancelled {
+	if c.replaced {
 		// Ruling 10: the replaced payment is accepted, its replacement goes.
 		for _, p := range c.pays {
-			if p.Status != payment.StatusPending {
+			if p.ID == c.pay.ID || p.Status != payment.StatusPending {
 				continue
 			}
 			if err := c.s.payments.CancelPending(ctx, c.tx, p.ID); err != nil {
@@ -366,7 +381,7 @@ func (c *confirmation) confirm(ctx context.Context) (payment.PaidOutcome, error)
 	}
 	status := payment.StatusPaid
 	excess := c.ev.AmountPaid - c.pay.Amount
-	if excess > 0 {
+	if excess > 0 || c.ev.NeedsReview {
 		status = payment.StatusNeedsReview
 	}
 	if err := c.s.payments.RecordReceived(ctx, c.tx, c.pay.ID, status, c.ev.Reference, c.ev.PaidAt, c.ev.Raw); err != nil {

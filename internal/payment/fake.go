@@ -83,6 +83,15 @@ func (f *Fake) FailNextStatus(err error) {
 	f.statusErrs = append(f.statusErrs, err)
 }
 
+// SetAmountPaid overrides the amount paid the provider reports for an order.
+func (f *Fake) SetAmountPaid(orderCode, amount int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if l, ok := f.links[orderCode]; ok {
+		l.paid = amount
+	}
+}
+
 // SetState overrides the provider-side state of a known order.
 func (f *Fake) SetState(orderCode int64, state string) {
 	f.mu.Lock()

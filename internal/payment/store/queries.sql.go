@@ -94,6 +94,17 @@ func (q *Queries) GetPaymentByOrderCode(ctx context.Context, orderCode int64) (P
 	return i, err
 }
 
+const getPaymentEventReceivedAt = `-- name: GetPaymentEventReceivedAt :one
+SELECT received_at FROM payment_events WHERE dedupe_key = $1
+`
+
+func (q *Queries) GetPaymentEventReceivedAt(ctx context.Context, dedupeKey string) (time.Time, error) {
+	row := q.db.QueryRow(ctx, getPaymentEventReceivedAt, dedupeKey)
+	var received_at time.Time
+	err := row.Scan(&received_at)
+	return received_at, err
+}
+
 const getPaymentWithCheckoutCode = `-- name: GetPaymentWithCheckoutCode :one
 SELECT p.id, p.checkout_id, p.provider, p.provider_order_code, p.amount, p.status, p.checkout_url, p.qr_code, p.expires_at, p.paid_at, p.provider_reference, p.raw, p.created_at, p.updated_at, c.code AS checkout_code
 FROM payments p
@@ -481,4 +492,19 @@ func (q *Queries) SetPaymentLink(ctx context.Context, arg SetPaymentLinkParams) 
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const setPaymentStatus = `-- name: SetPaymentStatus :exec
+UPDATE payments SET status = $1, updated_at = $2 WHERE id = $3
+`
+
+type SetPaymentStatusParams struct {
+	Status string
+	Now    time.Time
+	ID     uuid.UUID
+}
+
+func (q *Queries) SetPaymentStatus(ctx context.Context, arg SetPaymentStatusParams) error {
+	_, err := q.db.Exec(ctx, setPaymentStatus, arg.Status, arg.Now, arg.ID)
+	return err
 }
