@@ -571,3 +571,46 @@ func TestCancelTripByAdmin(t *testing.T) {
 	})
 	requireApp(t, err, http.StatusNotFound, "not_found")
 }
+
+// A seat count outside 1..MaxSeatsPerOperation never reaches the database:
+// int32(4294967295) would be -1 and free a seat instead of taking one.
+func TestSeats_OutOfRangeN(t *testing.T) {
+	e, p := rideEnv(t)
+	ctx := context.Background()
+	l := e.routed(t, p)
+	full := e.oneOff(t, p, l, vnAt(2026, 11, 8, 8, 0), 10)
+	e.reserve(t, full.ID, 10)
+	half := e.oneOff(t, p, l, vnAt(2026, 11, 9, 8, 0), 10)
+	e.reserve(t, half.ID, 5)
+	require.Equal(t, 1000, listing.MaxSeatsPerOperation)
+
+	for _, n := range []int{0, -1, 1001, 4294967295} {
+		for _, tr := range []listing.Trip{full, half} {
+			var ok bool
+			require.NoError(t, e.inTx(t, func(tx pgx.Tx) error {
+				var err error
+				ok, err = e.Svc.ReserveSeats(ctx, tx, tr.ID, n, rideNow)
+				return err
+			}), "reserve n=%d", n)
+			require.False(t, ok, "reserve n=%d", n)
+			require.Error(t, e.inTx(t, func(tx pgx.Tx) error { return e.Svc.ReleaseSeats(ctx, tx, tr.ID, n) }), "release n=%d", n)
+		}
+		require.Equal(t, 10, e.tripAt(t, l.ID, full.DepartureAt).SeatsReserved, "n=%d", n)
+		require.Equal(t, 5, e.tripAt(t, l.ID, half.DepartureAt).SeatsReserved, "n=%d", n)
+	}
+
+	// The bound itself is accepted.
+	big := e.oneOff(t, p, l, vnAt(2026, 11, 10, 8, 0), 10)
+	_, err := e.Pool.Exec(ctx, `UPDATE ride_trips SET seat_capacity = 1000 WHERE id = $1`, big.ID)
+	require.NoError(t, err)
+	var ok bool
+	require.NoError(t, e.inTx(t, func(tx pgx.Tx) error {
+		var err error
+		ok, err = e.Svc.ReserveSeats(ctx, tx, big.ID, 1000, rideNow)
+		return err
+	}))
+	require.True(t, ok)
+	require.Equal(t, 1000, e.tripAt(t, l.ID, big.DepartureAt).SeatsReserved)
+	require.NoError(t, e.inTx(t, func(tx pgx.Tx) error { return e.Svc.ReleaseSeats(ctx, tx, big.ID, 1000) }))
+	require.Equal(t, 0, e.tripAt(t, l.ID, big.DepartureAt).SeatsReserved)
+}

@@ -433,12 +433,21 @@ func (s *Service) LockTrips(ctx context.Context, tx pgx.Tx, ids []uuid.UUID) ([]
 	return out, nil
 }
 
+// MaxSeatsPerOperation bounds n in ReserveSeats and ReleaseSeats (1..1000).
+// It is an overflow guard, not a business cap: n is passed to the database
+// as int32, so an unchecked huge n would wrap negative. Booking validates the
+// requested seats against the same bound.
+const MaxSeatsPerOperation = 1000
+
+func validSeatCount(n int) bool { return n >= 1 && n <= MaxSeatsPerOperation }
+
 // ReserveSeats adds n reserved seats to a trip that is scheduled, departs
 // after now and still has n free seats, in one conditional UPDATE (spec §7).
-// It reports false, changing nothing, when any condition fails.
+// It reports false, changing nothing, when any condition fails or n is
+// outside 1..MaxSeatsPerOperation.
 func (s *Service) ReserveSeats(ctx context.Context, tx pgx.Tx, tripID uuid.UUID, n int, now time.Time) (bool, error) {
-	if n < 1 {
-		return false, fmt.Errorf("reserve seats: n must be positive, got %d", n)
+	if !validSeatCount(n) {
+		return false, nil
 	}
 	rows, err := store.New(tx).ReserveSeats(ctx, store.ReserveSeatsParams{ID: tripID, N: int32(n), Now: now})
 	if err != nil {
@@ -449,10 +458,11 @@ func (s *Service) ReserveSeats(ctx context.Context, tx pgx.Tx, tripID uuid.UUID,
 
 // ReleaseSeats returns n reserved seats of a trip, whatever its status. The
 // CHECK on seats_reserved fails the statement if it would go below zero. A
-// missing trip is ErrTripNotFound.
+// missing trip is ErrTripNotFound; n outside 1..MaxSeatsPerOperation is an
+// error and changes nothing.
 func (s *Service) ReleaseSeats(ctx context.Context, tx pgx.Tx, tripID uuid.UUID, n int) error {
-	if n < 1 {
-		return fmt.Errorf("release seats: n must be positive, got %d", n)
+	if !validSeatCount(n) {
+		return fmt.Errorf("release seats: n must be 1..%d, got %d", MaxSeatsPerOperation, n)
 	}
 	rows, err := store.New(tx).ReleaseSeats(ctx, store.ReleaseSeatsParams{ID: tripID, N: int32(n)})
 	if err != nil {
