@@ -107,15 +107,15 @@ func TestHTTP_AdminPayout_MalformedID404(t *testing.T) {
 		for _, c := range []struct{ method, suffix, body string }{
 			{"GET", "", ""},
 			{"POST", "/approve", ""},
+			// An unknown proof file, a missing proof and an empty reference:
+			// the payout is looked up first, so all of them are 404.
 			{"POST", "/mark-paid", `{"transfer_reference":"FT1","proof_file_id":"` + uuid.Must(uuid.NewV7()).String() + `"}`},
+			{"POST", "/mark-paid", `{"transfer_reference":"FT1"}`},
+			{"POST", "/mark-paid", `{"transfer_reference":"","proof_file_id":"` + uuid.Nil.String() + `"}`},
 			{"POST", "/reject", `{"reason":"x"}`},
+			{"POST", "/reject", `{"reason":""}`},
 		} {
 			status, body := do(t, srv, c.method, "/v1/admin/payouts/"+id+c.suffix, tok, c.body)
-			if c.suffix == "/mark-paid" && id != "not-a-uuid" {
-				// The proof is checked before the payout is looked up.
-				require.Equal(t, http.StatusUnprocessableEntity, status, string(body))
-				continue
-			}
 			require.Equal(t, http.StatusNotFound, status, "%s %s: %s", c.method, c.suffix, body)
 			require.Equal(t, "payout_not_found", errCode(t, body))
 		}

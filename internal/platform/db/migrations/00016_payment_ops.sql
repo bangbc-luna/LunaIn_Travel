@@ -18,11 +18,17 @@ CREATE TABLE payment_reconciliations (
 -- Amount of the transfer HandlePaid processed for this event.
 ALTER TABLE payment_events ADD COLUMN amount bigint NULL CHECK (amount > 0);
 
+-- Only a positive integer of at most 18 digits is cast (the CASE guards the
+-- cast itself: WHERE conditions have no evaluation order); anything else
+-- (fraction, zero, negative, huge) stays NULL instead of aborting.
 UPDATE payment_events
-SET amount = (payload->'data'->>'amount')::bigint
+SET amount = CASE WHEN jsonb_typeof(payload->'data'->'amount') = 'number'
+                   AND (payload->'data'->>'amount') ~ '^[1-9][0-9]{0,17}$'
+                  THEN (payload->'data'->>'amount')::bigint END
 WHERE processed_at IS NOT NULL
   AND result NOT IN ('unknown_order','no_amount','awaiting_status','already_processed')
-  AND jsonb_typeof(payload->'data'->'amount') = 'number';
+  AND jsonb_typeof(payload->'data'->'amount') = 'number'
+  AND (payload->'data'->>'amount') ~ '^[1-9][0-9]{0,17}$';
 
 CREATE INDEX payment_events_awaiting_idx ON payment_events (result, received_at)
     WHERE result = 'awaiting_status';

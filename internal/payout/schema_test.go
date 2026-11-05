@@ -243,13 +243,26 @@ func TestReconciliationRunDateUnique(t *testing.T) {
 
 func TestPaymentEventsAmountBackfilled(t *testing.T) {
 	f := newFixture(t)
-	// The backfill expression of migration 00016 against a sample payload.
-	var amount *int64
-	require.NoError(t, f.pool.QueryRow(context.Background(),
-		`SELECT CASE WHEN jsonb_typeof(p->'data'->'amount') = 'number' THEN (p->'data'->>'amount')::bigint END
-		 FROM (SELECT '{"data":{"amount":200000}}'::jsonb AS p) s`).Scan(&amount))
-	require.NotNil(t, amount)
-	require.EqualValues(t, 200000, *amount)
+	// The guarded backfill expression of migration 00016 (keep in sync):
+	// only a positive integer amount is cast, anything else stays NULL and
+	// never aborts the migration.
+	const expr = `CASE WHEN jsonb_typeof(p->'data'->'amount') = 'number'
+		AND (p->'data'->>'amount') ~ '^[1-9][0-9]{0,17}$'
+		THEN (p->'data'->>'amount')::bigint END`
+	for payload, want := range map[string]*int64{
+		`{"data":{"amount":200000}}`:               ptr(int64(200000)),
+		`{"data":{"amount":1500.5}}`:               nil,
+		`{"data":{"amount":0}}`:                    nil,
+		`{"data":{"amount":-5000}}`:                nil,
+		`{"data":{"amount":"200000"}}`:             nil,
+		`{"data":{"amount":99999999999999999999}}`: nil,
+		`{"data":{}}`:                              nil,
+	} {
+		var amount *int64
+		require.NoError(t, f.pool.QueryRow(context.Background(),
+			`SELECT `+expr+` FROM (SELECT $1::jsonb AS p) s`, payload).Scan(&amount), payload)
+		require.Equal(t, want, amount, payload)
+	}
 
 	// The column exists and rejects non-positive values.
 	err := f.exec(t, `INSERT INTO payment_events (id, provider, dedupe_key, signature_valid, payload, received_at, amount)
@@ -258,3 +271,5 @@ func TestPaymentEventsAmountBackfilled(t *testing.T) {
 	f.mustExec(t, `INSERT INTO payment_events (id, provider, dedupe_key, signature_valid, payload, received_at, amount)
 		VALUES ($1, 'payos', 'k2', true, '{}', now(), 5)`, newID(t))
 }
+
+func ptr[T any](v T) *T { return &v }

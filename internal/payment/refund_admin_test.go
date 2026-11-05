@@ -108,6 +108,15 @@ func TestCompleteRefund_HTTP(t *testing.T) {
 		http.StatusForbidden, "forbidden")
 	requireHTTPCode(t, e.do(t, "POST", "/v1/admin/refunds/not-a-uuid/complete", tok, `{"transfer_reference":"FT1"}`),
 		http.StatusNotFound, "not_found")
+	// An unknown id is 404 before the body is validated.
+	unknown := "/v1/admin/refunds/" + uuid.Must(uuid.NewV7()).String() + "/complete"
+	for _, body := range []string{
+		`{"transfer_reference":"FT1"}`,
+		`{"transfer_reference":""}`,
+		`{"transfer_reference":"FT1","proof_file_id":"` + uuid.Must(uuid.NewV7()).String() + `"}`,
+	} {
+		requireHTTPCode(t, e.do(t, "POST", unknown, tok, body), http.StatusNotFound, "not_found")
+	}
 	requireHTTPCode(t, e.do(t, "POST", path, tok, `{"transfer_reference":"FT1","x":1}`), http.StatusBadRequest, "invalid_request")
 	requireHTTPCode(t, e.do(t, "POST", path, tok, `{"transfer_reference":""}`), http.StatusUnprocessableEntity, "invalid_transfer_reference")
 	rec := e.do(t, "POST", path, tok, `{"transfer_reference":"FT1"}`)

@@ -146,23 +146,25 @@ func lockRefund(ctx context.Context, q *store.Queries, id uuid.UUID) (store.Refu
 // CompleteRefund records that a pending refund was transferred by hand: the
 // trimmed transfer reference (1..100 runes, else
 // ErrTransferReferenceInvalid) and an optional refund_proof file uploaded by
-// the actor (else files.ErrInvalidFile). In one tx it locks only the refund
+// the actor (else files.ErrInvalidFile), both checked after the refund is
+// locked (an unknown id is not found first). In one tx it locks only the refund
 // (awaiting_bank_info is ErrRefundAwaitingBankInfo, completed
 // ErrRefundAlreadyCompleted), completes it, audits refund.complete and emails
 // the customer's account address. No ledger entry: the refund's money left
 // the partner's balance when the refund was decided.
 func (s *Service) CompleteRefund(ctx context.Context, actor, id uuid.UUID, in CompleteRefundInput) (Refund, error) {
-	ref, ok := validText(in.TransferReference, maxTransferReferenceRunes)
-	if !ok {
-		return Refund{}, ErrTransferReferenceInvalid
-	}
 	now := s.clock.Now()
 	var out Refund
 	err := db.InTx(ctx, s.pool, func(tx pgx.Tx) error {
+		// The refund first: an unknown id is 404 whatever the body holds.
 		q := store.New(tx)
 		cur, err := lockRefund(ctx, q, id)
 		if err != nil {
 			return err
+		}
+		ref, ok := validText(in.TransferReference, maxTransferReferenceRunes)
+		if !ok {
+			return ErrTransferReferenceInvalid
 		}
 		switch cur.Status {
 		case RefundAwaitingBankInfo:

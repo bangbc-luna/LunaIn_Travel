@@ -40,18 +40,20 @@ func TestE2E_Payout(t *testing.T) {
 		"account_number": "0123456789", "account_holder": "Nguyễn Văn Bình",
 	}, http.StatusOK, nil)
 
-	// 2. Two bookings of 380.000 each, paid, checked in, released.
+	// 2. Two bookings of 380.000 each, paid, checked in, released. The visit
+	// is the next day so the payments are still inside the reconciliation's
+	// 72h window at step 8 (created 11-05 09:00, run 11-07 09:30).
 	items := []map[string]any{{"ticket_type_id": w.adult.ID, "quantity": 2}, {"ticket_type_id": w.child.ID, "quantity": 1}}
 	const gross, commission = int64(380_000), int64(38_000)
 	var views [2]booking.BookingView
 	for i, key := range []string{"payout-1", "payout-2"} {
-		v := a.book(t, w, key, "2026-11-07", items)
+		v := a.book(t, w, key, "2026-11-06", items)
 		require.Equal(t, gross, v.GrossAmount)
 		a.call(t, "POST", "/v1/dev/payments/"+orderCode(t, v)+"/simulate-paid", "", map[string]any{}, http.StatusOK, nil)
 		a.call(t, "GET", "/v1/bookings/"+v.ID.String(), w.ct, nil, http.StatusOK, &views[i])
 		require.Equal(t, booking.StatusConfirmed, views[i].Status)
 	}
-	a.clock.T = time.Date(2026, 11, 7, 8, 30, 0, 0, clock.VN)
+	a.clock.T = time.Date(2026, 11, 6, 8, 30, 0, 0, clock.VN)
 	a.relogin(t, w)
 	for _, v := range views {
 		a.call(t, "POST", "/v1/partner/check-ins", w.pt, map[string]string{"qr_token": *v.QRToken}, http.StatusOK, nil)
@@ -79,7 +81,13 @@ func TestE2E_Payout(t *testing.T) {
 	require.Equal(t, "NGUYEN VAN BINH", po.Bank.AccountHolder)
 
 	// 5. A second request while one is open is a conflict.
-	a.call(t, "POST", "/v1/partner/payouts", w.pt, map[string]any{"amount": 100_000}, http.StatusConflict, nil)
+	var conflict struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	a.call(t, "POST", "/v1/partner/payouts", w.pt, map[string]any{"amount": 100_000}, http.StatusConflict, &conflict)
+	require.Equal(t, "payout_already_open", conflict.Error.Code)
 
 	// 6. Admin approves, uploads the transfer proof and marks it paid.
 	pp := "/v1/admin/payouts/" + po.ID.String()
@@ -96,10 +104,12 @@ func TestE2E_Payout(t *testing.T) {
 	require.Equal(t, po.ClosingAvailable, po.OpeningAvailable+statementSum(po.Statement))
 	require.Equal(t, ledger.Balance{Available: 184_000}, a.balance(t, w.pt))
 
-	// 8. The reconciliation finds nothing wrong.
+	// 8. The reconciliation checks both payments with the provider and
+	// finds nothing wrong.
 	var rec payment.Reconciliation
 	a.call(t, "POST", "/v1/admin/reconciliations/run", w.admin, nil, http.StatusOK, &rec)
 	require.Equal(t, "ok", rec.Status, "%+v", rec.Mismatches)
+	require.Equal(t, 2, rec.CheckedPayments)
 	require.Empty(t, rec.Mismatches)
 
 	// 9. A −200.000 adjustment takes available below zero: no payout possible.

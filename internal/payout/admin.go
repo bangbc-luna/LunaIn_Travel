@@ -202,26 +202,28 @@ func (s *Service) Approve(ctx context.Context, actor, id uuid.UUID) (Payout, err
 // trimmed transfer reference (1..100 runes, else
 // ErrTransferReferenceInvalid) and a payout_proof file uploaded by the actor
 // (missing is ErrProofRequired, another's or another purpose is
-// files.ErrInvalidFile). A payout not approved is ErrInvalidState. It posts
-// no ledger entry: the money left available at hold time. Audited as
-// payout.mark_paid; the owner's email names the snapshot account.
+// files.ErrInvalidFile), checked after the payout is locked, so an unknown
+// id is ErrPayoutNotFound first. A payout not approved is ErrInvalidState.
+// It posts no ledger entry: the money left available at hold time. Audited
+// as payout.mark_paid; the owner's email names the snapshot account.
 func (s *Service) MarkPaid(ctx context.Context, actor, id uuid.UUID, in MarkPaidInput) (Payout, error) {
-	ref, ok := validText(in.TransferReference, maxTransferReferenceRunes)
-	if !ok {
-		return Payout{}, ErrTransferReferenceInvalid
-	}
-	if in.ProofFileID == uuid.Nil {
-		return Payout{}, ErrProofRequired
-	}
 	now := s.clock.Now()
 	var out Payout
 	err := db.InTx(ctx, s.pool, func(tx pgx.Tx) error {
-		if err := s.files.Owned(ctx, tx, in.ProofFileID, actor, proofPurpose); err != nil {
-			return err
-		}
+		// The payout first: an unknown id is 404 whatever the body holds.
 		q := store.New(tx)
 		cur, err := lockPayout(ctx, q, id)
 		if err != nil {
+			return err
+		}
+		ref, ok := validText(in.TransferReference, maxTransferReferenceRunes)
+		if !ok {
+			return ErrTransferReferenceInvalid
+		}
+		if in.ProofFileID == uuid.Nil {
+			return ErrProofRequired
+		}
+		if err := s.files.Owned(ctx, tx, in.ProofFileID, actor, proofPurpose); err != nil {
 			return err
 		}
 		if cur.Status != StatusApproved {
@@ -255,23 +257,25 @@ func (s *Service) MarkPaid(ctx context.Context, actor, id uuid.UUID, in MarkPaid
 
 // Reject closes a requested or approved payout as rejected (anything else is
 // ErrInvalidState) with the trimmed reason (1..500 runes, else
-// ErrRejectReasonInvalid) and gives the amount back to available
-// (payout_reversal), whatever available is now. The payouts row is locked
+// ErrRejectReasonInvalid, checked after the payout is locked) and gives the
+// amount back to available (payout_reversal), whatever available is now. The payouts row is locked
 // before ledger.PostPayoutReversal takes partner_balances (DB §1.1). Audited
 // as payout.reject; the owner is emailed the reason.
 func (s *Service) Reject(ctx context.Context, actor, id uuid.UUID, reason string) (Payout, error) {
-	reason, ok := validText(reason, maxRejectReasonRunes)
-	if !ok {
-		return Payout{}, ErrRejectReasonInvalid
-	}
 	now := s.clock.Now()
 	var out Payout
 	err := db.InTx(ctx, s.pool, func(tx pgx.Tx) error {
+		// The payout first: an unknown id is 404 whatever the reason.
 		q := store.New(tx)
 		cur, err := lockPayout(ctx, q, id)
 		if err != nil {
 			return err
 		}
+		trimmed, ok := validText(reason, maxRejectReasonRunes)
+		if !ok {
+			return ErrRejectReasonInvalid
+		}
+		reason = trimmed
 		if cur.Status != StatusRequested && cur.Status != StatusApproved {
 			return ErrInvalidState
 		}
