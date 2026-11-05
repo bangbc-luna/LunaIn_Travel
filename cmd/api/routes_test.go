@@ -19,6 +19,7 @@ import (
 	"github.com/bangbc-luna/lunain-travel/internal/files"
 	"github.com/bangbc-luna/lunain-travel/internal/geo"
 	"github.com/bangbc-luna/lunain-travel/internal/identity"
+	"github.com/bangbc-luna/lunain-travel/internal/ledger"
 	"github.com/bangbc-luna/lunain-travel/internal/listing"
 	"github.com/bangbc-luna/lunain-travel/internal/partner"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/auth"
@@ -66,6 +67,7 @@ func newTestApp(t *testing.T) *testApp {
 		Pool: pool, Issuer: issuer, ClientIP: httpx.ClientIPFunc(0),
 		Identity: idSvc, Settings: settings.NewService(pool, clk), Files: fileSvc,
 		Geo: geoSvc, Catalog: catSvc, Partner: partnerSvc, Listing: listingSvc,
+		Ledger: ledger.NewService(pool, clk),
 	})
 	return &testApp{
 		handler: httpx.Chain(mux, httpx.RequestID, httpx.Recover), issuer: issuer,
@@ -199,6 +201,7 @@ var partnerRoutes = []route{
 	{"POST /v1/partner/listings/{id}/submit", "/v1/partner/listings/" + uuid.Nil.String() + "/submit"},
 	{"POST /v1/partner/listings/{id}/publish", "/v1/partner/listings/" + uuid.Nil.String() + "/publish"},
 	{"POST /v1/partner/listings/{id}/unpublish", "/v1/partner/listings/" + uuid.Nil.String() + "/unpublish"},
+	{"GET /v1/partner/balance", "/v1/partner/balance"},
 }
 
 // recordedUnder returns the recorded patterns whose path starts with prefix.

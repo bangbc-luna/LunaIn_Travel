@@ -12,6 +12,7 @@ import (
 	"github.com/bangbc-luna/lunain-travel/internal/files"
 	"github.com/bangbc-luna/lunain-travel/internal/geo"
 	"github.com/bangbc-luna/lunain-travel/internal/identity"
+	"github.com/bangbc-luna/lunain-travel/internal/ledger"
 	"github.com/bangbc-luna/lunain-travel/internal/listing"
 	"github.com/bangbc-luna/lunain-travel/internal/partner"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/auth"
@@ -31,6 +32,7 @@ type muxDeps struct {
 	Catalog  *catalog.Service
 	Partner  *partner.Service
 	Listing  *listing.Service
+	Ledger   *ledger.Service
 }
 
 // buildMux registers every HTTP route and returns the mux plus every pattern
@@ -48,6 +50,7 @@ func buildMux(d muxDeps) (*http.ServeMux, []string) {
 	d.Listing.PartnerRoutes(rr, d.Issuer, d.Partner.RequireMember())
 	d.Listing.AdminRoutes(rr, d.Issuer)
 	d.Listing.PublicRoutes(rr)
+	d.Ledger.PartnerRoutes(rr, d.Issuer, d.Partner.RequireMember())
 	rr.HandleFunc("GET /healthz", healthz)
 	rr.HandleFunc("GET /readyz", readyz(d.Pool))
 	rr.HandleFunc("/", httpx.NotFound)

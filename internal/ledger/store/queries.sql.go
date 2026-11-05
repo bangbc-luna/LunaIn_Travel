@@ -7,9 +7,44 @@ package store
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 )
+
+const addSettlementNetPending = `-- name: AddSettlementNetPending :exec
+UPDATE booking_settlements
+SET net_pending = net_pending + $1, updated_at = $2
+WHERE booking_id = $3
+`
+
+type AddSettlementNetPendingParams struct {
+	Delta     int64
+	Now       time.Time
+	BookingID uuid.UUID
+}
+
+func (q *Queries) AddSettlementNetPending(ctx context.Context, arg AddSettlementNetPendingParams) error {
+	_, err := q.db.Exec(ctx, addSettlementNetPending, arg.Delta, arg.Now, arg.BookingID)
+	return err
+}
+
+const ensurePartnerBalance = `-- name: EnsurePartnerBalance :exec
+INSERT INTO partner_balances (partner_id, created_at, updated_at)
+VALUES ($1, $2, $2)
+ON CONFLICT (partner_id) DO NOTHING
+`
+
+type EnsurePartnerBalanceParams struct {
+	PartnerID uuid.UUID
+	Now       time.Time
+}
+
+// Creates the balance row lazily; LockPartnerBalance follows in the same tx.
+func (q *Queries) EnsurePartnerBalance(ctx context.Context, arg EnsurePartnerBalanceParams) error {
+	_, err := q.db.Exec(ctx, ensurePartnerBalance, arg.PartnerID, arg.Now)
+	return err
+}
 
 const getPartnerBalance = `-- name: GetPartnerBalance :one
 SELECT partner_id, pending, available, last_seq, created_at, updated_at FROM partner_balances WHERE partner_id = $1
@@ -27,4 +62,226 @@ func (q *Queries) GetPartnerBalance(ctx context.Context, partnerID uuid.UUID) (P
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const insertLedgerEntry = `-- name: InsertLedgerEntry :exec
+INSERT INTO ledger_entries (id, partner_id, seq, available_after, booking_id, kind, bucket, amount, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
+`
+
+type InsertLedgerEntryParams struct {
+	ID             uuid.UUID
+	PartnerID      uuid.UUID
+	Seq            int64
+	AvailableAfter int64
+	BookingID      *uuid.UUID
+	Kind           string
+	Bucket         string
+	Amount         int64
+	Now            time.Time
+}
+
+func (q *Queries) InsertLedgerEntry(ctx context.Context, arg InsertLedgerEntryParams) error {
+	_, err := q.db.Exec(ctx, insertLedgerEntry,
+		arg.ID,
+		arg.PartnerID,
+		arg.Seq,
+		arg.AvailableAfter,
+		arg.BookingID,
+		arg.Kind,
+		arg.Bucket,
+		arg.Amount,
+		arg.Now,
+	)
+	return err
+}
+
+const insertPlatformCommission = `-- name: InsertPlatformCommission :exec
+INSERT INTO platform_commission_entries (id, booking_id, service_type, kind, amount, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $6)
+`
+
+type InsertPlatformCommissionParams struct {
+	ID          uuid.UUID
+	BookingID   uuid.UUID
+	ServiceType string
+	Kind        string
+	Amount      int64
+	Now         time.Time
+}
+
+func (q *Queries) InsertPlatformCommission(ctx context.Context, arg InsertPlatformCommissionParams) error {
+	_, err := q.db.Exec(ctx, insertPlatformCommission,
+		arg.ID,
+		arg.BookingID,
+		arg.ServiceType,
+		arg.Kind,
+		arg.Amount,
+		arg.Now,
+	)
+	return err
+}
+
+const insertSettlement = `-- name: InsertSettlement :exec
+INSERT INTO booking_settlements (booking_id, partner_id, net_pending, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $4)
+`
+
+type InsertSettlementParams struct {
+	BookingID  uuid.UUID
+	PartnerID  uuid.UUID
+	NetPending int64
+	Now        time.Time
+}
+
+func (q *Queries) InsertSettlement(ctx context.Context, arg InsertSettlementParams) error {
+	_, err := q.db.Exec(ctx, insertSettlement,
+		arg.BookingID,
+		arg.PartnerID,
+		arg.NetPending,
+		arg.Now,
+	)
+	return err
+}
+
+const lastAvailableAfter = `-- name: LastAvailableAfter :one
+SELECT available_after FROM ledger_entries
+WHERE partner_id = $1
+ORDER BY seq DESC
+LIMIT 1
+`
+
+func (q *Queries) LastAvailableAfter(ctx context.Context, partnerID uuid.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, lastAvailableAfter, partnerID)
+	var available_after int64
+	err := row.Scan(&available_after)
+	return available_after, err
+}
+
+const ledgerTotals = `-- name: LedgerTotals :one
+SELECT
+    COALESCE(SUM(amount) FILTER (WHERE bucket = 'pending'), 0)::bigint   AS pending,
+    COALESCE(SUM(amount) FILTER (WHERE bucket = 'available'), 0)::bigint AS available,
+    COUNT(*)::bigint                                                     AS entries,
+    COALESCE(MAX(seq), 0)::bigint                                        AS max_seq
+FROM ledger_entries
+WHERE partner_id = $1
+`
+
+type LedgerTotalsRow struct {
+	Pending   int64
+	Available int64
+	Entries   int64
+	MaxSeq    int64
+}
+
+// Totals Verify compares with the partner_balances cache.
+func (q *Queries) LedgerTotals(ctx context.Context, partnerID uuid.UUID) (LedgerTotalsRow, error) {
+	row := q.db.QueryRow(ctx, ledgerTotals, partnerID)
+	var i LedgerTotalsRow
+	err := row.Scan(
+		&i.Pending,
+		&i.Available,
+		&i.Entries,
+		&i.MaxSeq,
+	)
+	return i, err
+}
+
+const lockPartnerBalance = `-- name: LockPartnerBalance :one
+SELECT partner_id, pending, available, last_seq, created_at, updated_at FROM partner_balances WHERE partner_id = $1 FOR UPDATE
+`
+
+// partner_balances is the LAST lock of the global order (DB §1.1): nothing
+// else may be locked after it in the same transaction.
+func (q *Queries) LockPartnerBalance(ctx context.Context, partnerID uuid.UUID) (PartnerBalance, error) {
+	row := q.db.QueryRow(ctx, lockPartnerBalance, partnerID)
+	var i PartnerBalance
+	err := row.Scan(
+		&i.PartnerID,
+		&i.Pending,
+		&i.Available,
+		&i.LastSeq,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const lockSettlement = `-- name: LockSettlement :one
+SELECT booking_id, partner_id, net_pending, release_due_at, released_at, created_at, updated_at FROM booking_settlements WHERE booking_id = $1 FOR UPDATE
+`
+
+// A booking child row: locked after bookings and before partner_balances.
+func (q *Queries) LockSettlement(ctx context.Context, bookingID uuid.UUID) (BookingSettlement, error) {
+	row := q.db.QueryRow(ctx, lockSettlement, bookingID)
+	var i BookingSettlement
+	err := row.Scan(
+		&i.BookingID,
+		&i.PartnerID,
+		&i.NetPending,
+		&i.ReleaseDueAt,
+		&i.ReleasedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const markSettlementReleased = `-- name: MarkSettlementReleased :exec
+UPDATE booking_settlements
+SET net_pending = 0, released_at = $1::timestamptz, updated_at = $1
+WHERE booking_id = $2
+`
+
+type MarkSettlementReleasedParams struct {
+	Now       time.Time
+	BookingID uuid.UUID
+}
+
+func (q *Queries) MarkSettlementReleased(ctx context.Context, arg MarkSettlementReleasedParams) error {
+	_, err := q.db.Exec(ctx, markSettlementReleased, arg.Now, arg.BookingID)
+	return err
+}
+
+const setSettlementReleaseDue = `-- name: SetSettlementReleaseDue :exec
+UPDATE booking_settlements
+SET release_due_at = $1::timestamptz, updated_at = $2
+WHERE booking_id = $3 AND release_due_at IS NULL
+`
+
+type SetSettlementReleaseDueParams struct {
+	ReleaseDueAt time.Time
+	Now          time.Time
+	BookingID    uuid.UUID
+}
+
+func (q *Queries) SetSettlementReleaseDue(ctx context.Context, arg SetSettlementReleaseDueParams) error {
+	_, err := q.db.Exec(ctx, setSettlementReleaseDue, arg.ReleaseDueAt, arg.Now, arg.BookingID)
+	return err
+}
+
+const updatePartnerBalance = `-- name: UpdatePartnerBalance :exec
+UPDATE partner_balances
+SET pending = $1, available = $2, last_seq = $3, updated_at = $4
+WHERE partner_id = $5
+`
+
+type UpdatePartnerBalanceParams struct {
+	Pending   int64
+	Available int64
+	LastSeq   int64
+	Now       time.Time
+	PartnerID uuid.UUID
+}
+
+func (q *Queries) UpdatePartnerBalance(ctx context.Context, arg UpdatePartnerBalanceParams) error {
+	_, err := q.db.Exec(ctx, updatePartnerBalance,
+		arg.Pending,
+		arg.Available,
+		arg.LastSeq,
+		arg.Now,
+		arg.PartnerID,
+	)
+	return err
 }

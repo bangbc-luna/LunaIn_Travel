@@ -20,6 +20,7 @@ import (
 	"github.com/bangbc-luna/lunain-travel/internal/files"
 	"github.com/bangbc-luna/lunain-travel/internal/geo"
 	"github.com/bangbc-luna/lunain-travel/internal/identity"
+	"github.com/bangbc-luna/lunain-travel/internal/ledger"
 	"github.com/bangbc-luna/lunain-travel/internal/listing"
 	"github.com/bangbc-luna/lunain-travel/internal/partner"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/auth"
@@ -199,6 +200,7 @@ func serve(log *slog.Logger) error {
 		Pool: pool, Issuer: issuer, ClientIP: httpx.ClientIPFunc(cfg.TrustedProxyHops),
 		Identity: idSvc, Settings: settings.NewService(pool, clock.Real{}), Files: fileSvc,
 		Geo: geoSvc, Catalog: catSvc, Partner: partnerSvc, Listing: listingSvc,
+		Ledger: ledger.NewService(pool, clock.Real{}),
 	})
 
 	srv := &http.Server{
