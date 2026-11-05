@@ -49,8 +49,8 @@ func TestCreateLink_SignsAndSendsHeaders(t *testing.T) {
 			t.Fatal(err)
 		}
 		desc := body["description"].(string)
-		if len([]rune(desc)) > 25 {
-			t.Errorf("description too long: %q", desc)
+		if desc != "LABCD2345" {
+			t.Errorf("description = %q", desc)
 		}
 		want := hmacHex(testChecksum, "amount=150000&cancelUrl=https://app/cancel&description="+desc+
 			"&orderCode=42&returnUrl=https://app/return")
@@ -69,7 +69,7 @@ func TestCreateLink_SignsAndSendsHeaders(t *testing.T) {
 	})
 	link, err := p.CreateLink(context.Background(), payment.LinkRequest{
 		OrderCode: 42, Amount: 150000,
-		Description: "Ve tham quan Vinpearl Nha Trang dac biet",
+		Description: "LABCD2345",
 		ExpiresAt:   time.Unix(1900000000, 0),
 	})
 	if err != nil {
@@ -87,8 +87,74 @@ func TestCreateLink_ErrorCode(t *testing.T) {
 	p := newClient(t, func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"code":"01","desc":"Invalid params"}`))
 	})
-	_, err := p.CreateLink(context.Background(), payment.LinkRequest{OrderCode: 1, Amount: 1000, Description: "x"})
+	_, err := p.CreateLink(context.Background(), payment.LinkRequest{OrderCode: 1, Amount: 1000, Description: "LABCD2345"})
 	if err == nil || !strings.Contains(err.Error(), "Invalid params") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestCreateLink_ProviderError(t *testing.T) {
+	p := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"code":"01","desc":"Invalid params"}`))
+	})
+	_, err := p.CreateLink(context.Background(), payment.LinkRequest{OrderCode: 1, Amount: 1000, Description: "LABCD2345"})
+	var pe *payment.ProviderError
+	if !errors.As(err, &pe) || pe.Code != "01" || pe.Desc != "Invalid params" {
+		t.Fatalf("err = %v, want *ProviderError{01}", err)
+	}
+}
+
+func TestCreateLink_ValidatesDescriptionBeforeHTTP(t *testing.T) {
+	var hits int
+	p := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		_, _ = w.Write([]byte(`{"code":"00","desc":"ok","data":{"checkoutUrl":"u","paymentLinkId":"l"}}`))
+	})
+	ctx := context.Background()
+	for _, tc := range []struct {
+		desc string
+		want error
+	}{
+		{"ABCDEFGHIJ", payment.ErrDescriptionTooLong},
+		{"Lđ1234567", payment.ErrInvalidDescription},
+		{"has space", payment.ErrInvalidDescription},
+		{"", payment.ErrInvalidDescription},
+	} {
+		_, err := p.CreateLink(ctx, payment.LinkRequest{OrderCode: 1, Amount: 1000, Description: tc.desc})
+		if !errors.Is(err, tc.want) {
+			t.Errorf("%q: err = %v, want %v", tc.desc, err, tc.want)
+		}
+	}
+	if hits != 0 {
+		t.Fatalf("server got %d requests for invalid descriptions", hits)
+	}
+	if _, err := p.CreateLink(ctx, payment.LinkRequest{OrderCode: 1, Amount: 1000, Description: "Abc123XYZ"}); err != nil {
+		t.Fatalf("9-char ASCII rejected: %v", err)
+	}
+	if hits != 1 {
+		t.Fatalf("hits = %d", hits)
+	}
+}
+
+func TestDescriptionForCheckout(t *testing.T) {
+	got, err := payment.DescriptionForCheckout("COABCD2345")
+	if err != nil || got != "LABCD2345" || len(got) != payment.MaxDescriptionLen {
+		t.Fatalf("got %q, %v", got, err)
+	}
+	for _, bad := range []string{"", "COABCD234", "COABCD23456", "XXABCD2345", "COABCD234I", "COabcd2345", "COABCD234U"} {
+		if _, err := payment.DescriptionForCheckout(bad); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+}
+
+func TestGetStatus_ProviderError(t *testing.T) {
+	p := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"code":"01","desc":"not found"}`))
+	})
+	_, err := p.GetStatus(context.Background(), 42)
+	var pe *payment.ProviderError
+	if !errors.As(err, &pe) || pe.Code != "01" {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -97,7 +163,7 @@ func TestCreateLink_HTTPError(t *testing.T) {
 	p := newClient(t, func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "boom", http.StatusInternalServerError)
 	})
-	if _, err := p.CreateLink(context.Background(), payment.LinkRequest{OrderCode: 1, Amount: 1000, Description: "x"}); err == nil {
+	if _, err := p.CreateLink(context.Background(), payment.LinkRequest{OrderCode: 1, Amount: 1000, Description: "LABCD2345"}); err == nil {
 		t.Fatal("want error")
 	}
 }
@@ -195,7 +261,7 @@ func TestVerifyWebhook_ValidAndTampered(t *testing.T) {
 func TestFake_MarkPaidProducesVerifiableWebhook(t *testing.T) {
 	f := payment.NewFake()
 	ctx := context.Background()
-	link, err := f.CreateLink(ctx, payment.LinkRequest{OrderCode: 7, Amount: 5000, Description: "x"})
+	link, err := f.CreateLink(ctx, payment.LinkRequest{OrderCode: 7, Amount: 5000, Description: "LABCD2345"})
 	if err != nil {
 		t.Fatal(err)
 	}

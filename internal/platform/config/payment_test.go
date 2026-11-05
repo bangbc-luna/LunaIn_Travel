@@ -45,9 +45,7 @@ func TestConfig_PaymentProvider(t *testing.T) {
 	})
 	t.Run("dev with keys defaults to payos", func(t *testing.T) {
 		setRequired(t)
-		t.Setenv("PAYOS_CLIENT_ID", "c")
-		t.Setenv("PAYOS_API_KEY", "k")
-		t.Setenv("PAYOS_CHECKSUM_KEY", "s")
+		setPayOS(t)
 		cfg, err := config.Load()
 		if err != nil {
 			t.Fatal(err)
@@ -93,4 +91,44 @@ func TestConfig_PaymentProvider(t *testing.T) {
 			t.Fatal("want error")
 		}
 	})
+}
+
+func TestConfig_ExplicitPayOSRequiresEverythingInDev(t *testing.T) {
+	setRequired(t)
+	t.Setenv("PAYMENT_PROVIDER", "payos")
+	t.Setenv("PAYOS_CLIENT_ID", "c")
+	t.Setenv("PAYOS_API_KEY", "k")
+	t.Setenv("PAYOS_CHECKSUM_KEY", "s")
+	_, err := config.Load()
+	if err == nil || !strings.Contains(err.Error(), "PAYOS_RETURN_URL") {
+		t.Fatalf("err = %v, want PAYOS_RETURN_URL", err)
+	}
+}
+
+func TestConfig_ProdRequiresHTTPSBaseURL(t *testing.T) {
+	setProd(t)
+	setPayOS(t)
+	t.Setenv("PAYOS_BASE_URL", "http://api.example.com")
+	_, err := config.Load()
+	if err == nil || !strings.Contains(err.Error(), "PAYOS_BASE_URL") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestConfig_PaymentWarnings(t *testing.T) {
+	setRequired(t)
+	t.Setenv("PAYOS_CLIENT_ID", "c")
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := strings.Join(cfg.PaymentWarnings(), "|")
+	if !strings.Contains(w, "FAKE") || !strings.Contains(w, "PAYOS_API_KEY") || !strings.Contains(w, "PAYOS_CHECKSUM_KEY") {
+		t.Errorf("warnings = %q", w)
+	}
+	t.Setenv("PAYOS_CLIENT_ID", "")
+	cfg, _ = config.Load()
+	if w := strings.Join(cfg.PaymentWarnings(), "|"); !strings.Contains(w, "FAKE") || strings.Contains(w, "missing") {
+		t.Errorf("warnings = %q", w)
+	}
 }

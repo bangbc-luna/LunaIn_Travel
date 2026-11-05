@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/caarlos0/env/v11"
 )
@@ -46,7 +47,35 @@ type Config struct {
 	PayOSReturnURL   string
 	PayOSCancelURL   string
 
-	trustedProxyHopsSet bool
+	trustedProxyHopsSet      bool
+	paymentProviderDefaulted bool
+}
+
+// PaymentWarnings returns startup warnings about the payment setup: the fake
+// provider is active, and PayOS variables that are missing when only some of
+// the keys/URLs were provided without an explicit PAYMENT_PROVIDER.
+func (c Config) PaymentWarnings() []string {
+	if c.PaymentProvider != "fake" {
+		return nil
+	}
+	w := []string{"payment provider is FAKE — webhooks signed with a public test key"}
+	var missing []string
+	set := 0
+	for _, f := range []struct{ name, val string }{
+		{"PAYOS_CLIENT_ID", c.PayOSClientID}, {"PAYOS_API_KEY", c.PayOSAPIKey},
+		{"PAYOS_CHECKSUM_KEY", c.PayOSChecksumKey},
+		{"PAYOS_RETURN_URL", c.PayOSReturnURL}, {"PAYOS_CANCEL_URL", c.PayOSCancelURL},
+	} {
+		if f.val == "" {
+			missing = append(missing, f.name)
+		} else {
+			set++
+		}
+	}
+	if c.paymentProviderDefaulted && set > 0 && len(missing) > 0 {
+		w = append(w, "PayOS settings partially configured, falling back to fake; missing: "+strings.Join(missing, ", "))
+	}
+	return w
 }
 
 // rawEnv mirrors the environment; secrets are strings because env would
@@ -116,10 +145,12 @@ func Load() (Config, error) {
 		PayOSReturnURL:   raw.PayOSReturnURL,
 		PayOSCancelURL:   raw.PayOSCancelURL,
 	}
+	cfg.paymentProviderDefaulted = cfg.PaymentProvider == ""
 	if cfg.PaymentProvider == "" {
 		// Unset: use PayOS when fully keyed, otherwise fake outside prod.
 		// In prod, missing keys are reported by validate.
-		hasKeys := cfg.PayOSClientID != "" && cfg.PayOSAPIKey != "" && cfg.PayOSChecksumKey != ""
+		hasKeys := cfg.PayOSClientID != "" && cfg.PayOSAPIKey != "" && cfg.PayOSChecksumKey != "" &&
+			cfg.PayOSReturnURL != "" && cfg.PayOSCancelURL != ""
 		if hasKeys || cfg.AppEnv == "prod" {
 			cfg.PaymentProvider = "payos"
 		} else {
@@ -171,19 +202,17 @@ func (c Config) validate() error {
 			return errors.New("PAYMENT_PROVIDER must be payos when APP_ENV=prod")
 		}
 	case "payos":
-		required := []struct{ name, val string }{
+		for _, f := range []struct{ name, val string }{
 			{"PAYOS_CLIENT_ID", c.PayOSClientID}, {"PAYOS_API_KEY", c.PayOSAPIKey},
 			{"PAYOS_CHECKSUM_KEY", c.PayOSChecksumKey}, {"PAYOS_BASE_URL", c.PayOSBaseURL},
-		}
-		if c.AppEnv == "prod" {
-			required = append(required,
-				struct{ name, val string }{"PAYOS_RETURN_URL", c.PayOSReturnURL},
-				struct{ name, val string }{"PAYOS_CANCEL_URL", c.PayOSCancelURL})
-		}
-		for _, f := range required {
+			{"PAYOS_RETURN_URL", c.PayOSReturnURL}, {"PAYOS_CANCEL_URL", c.PayOSCancelURL},
+		} {
 			if f.val == "" {
 				return fmt.Errorf("%s is required when PAYMENT_PROVIDER=payos", f.name)
 			}
+		}
+		if c.AppEnv == "prod" && !strings.HasPrefix(c.PayOSBaseURL, "https://") {
+			return errors.New("PAYOS_BASE_URL must start with https:// when APP_ENV=prod")
 		}
 	default:
 		return fmt.Errorf("PAYMENT_PROVIDER must be payos or fake, got %q", c.PaymentProvider)

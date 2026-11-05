@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,11 +25,58 @@ const DefaultPayOSBaseURL = "https://api-merchant.payos.vn"
 
 const (
 	requestTimeout = 10 * time.Second
-	// maxDescriptionRunes is the PayOS description limit for bank accounts
-	// linked through PayOS (9 for accounts that are not; see report).
-	maxDescriptionRunes = 25
-	successCode         = "00"
+	successCode    = "00"
 )
+
+// MaxDescriptionLen is the longest payment-link description we send. PayOS
+// docs (https://payos.vn/docs/api/) allow 9 characters for bank accounts not
+// linked through PayOS and 25 for linked ones; we use the safe 9 for both.
+const MaxDescriptionLen = 9
+
+var (
+	// ErrInvalidDescription: description is empty or not ASCII [A-Za-z0-9].
+	ErrInvalidDescription = errors.New("payment: description must be ASCII letters/digits only")
+	// ErrDescriptionTooLong: description exceeds MaxDescriptionLen.
+	ErrDescriptionTooLong = errors.New("payment: description too long")
+)
+
+// ProviderError is a well-formed PayOS answer with code != "00", as opposed
+// to a transport or decoding failure.
+type ProviderError struct {
+	Code string
+	Desc string
+}
+
+func (e *ProviderError) Error() string {
+	return fmt.Sprintf("payos: code %s: %s", e.Code, e.Desc)
+}
+
+func validateDescription(d string) error {
+	if d == "" {
+		return ErrInvalidDescription
+	}
+	for i := 0; i < len(d); i++ {
+		c := d[i]
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z') {
+			return ErrInvalidDescription
+		}
+	}
+	if len(d) > MaxDescriptionLen {
+		return ErrDescriptionTooLong
+	}
+	return nil
+}
+
+var checkoutCodeRe = regexp.MustCompile(`^CO[0-9A-HJKMNP-TV-Z]{8}$`)
+
+// DescriptionForCheckout derives the 9-character transfer description
+// ("L" + the 8 random characters) from a checkout code "CO" + 8 chars.
+func DescriptionForCheckout(checkoutCode string) (string, error) {
+	if !checkoutCodeRe.MatchString(checkoutCode) {
+		return "", fmt.Errorf("payment: invalid checkout code %q", checkoutCode)
+	}
+	return "L" + checkoutCode[2:], nil
+}
 
 // ErrInvalidSignature is returned when a webhook signature does not match.
 var ErrInvalidSignature = errors.New("payment: invalid webhook signature")
@@ -160,22 +208,17 @@ func (p *PayOS) do(ctx context.Context, method, path string, body any) (json.Raw
 		return nil, fmt.Errorf("payos: decode response: %w", jsonErr)
 	}
 	if env.Code != successCode {
-		return nil, fmt.Errorf("payos: %s %s: code %s: %s", method, path, env.Code, env.Desc)
+		return nil, fmt.Errorf("payos: %s %s: %w", method, path, &ProviderError{Code: env.Code, Desc: env.Desc})
 	}
 	return env.Data, nil
 }
 
-func truncateRunes(s string, n int) string {
-	r := []rune(s)
-	if len(r) <= n {
-		return s
-	}
-	return string(r[:n])
-}
-
 // CreateLink creates a payment link (POST /v2/payment-requests).
 func (p *PayOS) CreateLink(ctx context.Context, req LinkRequest) (Link, error) {
-	desc := truncateRunes(req.Description, maxDescriptionRunes)
+	desc := req.Description
+	if err := validateDescription(desc); err != nil {
+		return Link{}, err
+	}
 	sigData := "amount=" + strconv.FormatInt(req.Amount, 10) +
 		"&cancelUrl=" + p.cfg.CancelURL +
 		"&description=" + desc +

@@ -120,6 +120,9 @@ func serve(log *slog.Logger) error {
 	}
 
 	log.Info("config loaded", "env", cfg.AppEnv, "trusted_proxy_hops", cfg.TrustedProxyHops)
+	for _, w := range cfg.PaymentWarnings() {
+		log.Warn(w)
+	}
 
 	connectCtx, cancelConnect := context.WithTimeout(context.Background(), 30*time.Second)
 	pool, err := db.Connect(connectCtx, cfg.DatabaseURL)
