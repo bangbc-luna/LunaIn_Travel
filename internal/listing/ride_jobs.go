@@ -45,32 +45,38 @@ func PeriodicJobs() []*river.PeriodicJob {
 
 // GenerateTrips extends every active schedule's trips to the 60-day horizon
 // (see generateForSchedule) and returns how many trips it inserted or
-// reopened. Each schedule runs in its own tx holding its row FOR UPDATE (so
-// it serializes with a partner edit, which locks the listing then the
-// schedule); a schedule that fails is logged and the others go on.
-// Idempotent: trips are unique per (listing_id, departure_at).
+// reopened. It also sweeps the trips a schedule no longer covers (inactive,
+// or after valid_to) that a schedule edit kept because they had seats held
+// and whose seats have since been released (SweepScheduleTrips). Each
+// schedule runs in its own tx holding its row FOR UPDATE (so it serializes
+// with a partner edit, which locks the listing then the schedule); a schedule
+// that fails is logged and the others go on, and the failures are returned
+// joined at the end so the job run shows as failed. Idempotent: trips are
+// unique per (listing_id, departure_at).
 func (s *Service) GenerateTrips(ctx context.Context) (int, error) {
 	now := s.clock.Now()
 	today := vnDate(now)
 	horizon := today
 	horizon.Time = today.Time.AddDate(0, 0, tripHorizonDays-1)
-	ids, err := store.New(s.pool).ListSchedulesToGenerate(ctx, store.ListSchedulesToGenerateParams{Today: today, Horizon: horizon})
+	ids, err := store.New(s.pool).ListSchedulesToGenerate(ctx, store.ListSchedulesToGenerateParams{Today: today, Horizon: horizon, Now: now})
 	if err != nil {
 		return 0, fmt.Errorf("list schedules to generate: %w", err)
 	}
 	total := 0
+	var failed []error
 	for _, id := range ids {
 		if err := ctx.Err(); err != nil {
-			return total, err
+			return total, errors.Join(append(failed, err)...)
 		}
 		n, err := s.generateOne(ctx, id, now)
 		if err != nil {
 			s.log.Error("listing: generate trips failed", "schedule_id", id, "err", err)
+			failed = append(failed, fmt.Errorf("schedule %s: %w", id, err))
 			continue
 		}
 		total += n
 	}
-	return total, nil
+	return total, errors.Join(failed...)
 }
 
 func (s *Service) generateOne(ctx context.Context, id uuid.UUID, now time.Time) (int, error) {
@@ -82,6 +88,15 @@ func (s *Service) generateOne(ctx context.Context, id uuid.UUID, now time.Time) 
 		}
 		if err != nil {
 			return fmt.Errorf("lock ride schedule: %w", err)
+		}
+		swept, err := store.New(tx).SweepScheduleTrips(ctx, store.SweepScheduleTripsParams{
+			ScheduleID: sc.ID, Reason: scheduleCancelMsg, Now: now,
+		})
+		if err != nil {
+			return fmt.Errorf("sweep schedule trips: %w", err)
+		}
+		if swept > 0 {
+			s.log.Info("listing: cancelled trips outside their schedule", "schedule_id", sc.ID, "trips", swept)
 		}
 		n, err = s.generateForSchedule(ctx, tx, sc, now)
 		return err

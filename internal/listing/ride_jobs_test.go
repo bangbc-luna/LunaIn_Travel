@@ -134,8 +134,76 @@ func TestGenerateTrips_ContinuesAfterFailure(t *testing.T) {
 	require.NoError(t, err)
 	e.Clock.T = rideNow.AddDate(0, 0, 1)
 	n, err := e.Svc.GenerateTrips(ctx)
-	require.NoError(t, err)
+	require.ErrorContains(t, err, sa.ID.String())
 	require.Equal(t, 1, n) // b's new day only
 	require.Len(t, e.trips(t, b.ID), 60)
 	require.Len(t, e.trips(t, a.ID), 59)
+}
+
+// Trips a schedule edit kept because seats were held are cancelled by the
+// job once those seats are released (Ruling 1); trips of an active schedule
+// in range are left alone.
+func TestGenerateTrips_SweepsReleasedTripsOutsideSchedule(t *testing.T) {
+	e, p := rideEnv(t)
+	ctx := context.Background()
+	l := e.routed(t, p)
+	off := e.schedule(t, p, l, daily("07:00"))
+	short := e.schedule(t, p, l, daily("09:00"))
+	kept := e.tripAt(t, l.ID, vnAt(2026, 11, 14, 7, 0))
+	e.reserve(t, kept.ID, 2)
+	late := e.tripAt(t, l.ID, vnAt(2026, 11, 20, 9, 0))
+	e.reserve(t, late.ID, 1)
+
+	_, err := e.Svc.UpdateRideSchedule(ctx, p.ID, p.OwnerUserID, l.ID, off.ID, listing.RideSchedulePatch{Active: ptr(false)})
+	require.NoError(t, err)
+	_, err = e.Svc.UpdateRideSchedule(ctx, p.ID, p.OwnerUserID, l.ID, short.ID, listing.RideSchedulePatch{ValidTo: ptr("2026-11-10")})
+	require.NoError(t, err)
+	status := func(id uuid.UUID) (string, *string) {
+		var st string
+		var src *string
+		require.NoError(t, e.Pool.QueryRow(ctx, `SELECT status, cancel_source FROM ride_trips WHERE id = $1`, id).Scan(&st, &src))
+		return st, src
+	}
+
+	// Seats still held: the edit and the job keep both trips.
+	_, err = e.Svc.GenerateTrips(ctx)
+	require.NoError(t, err)
+	st, _ := status(kept.ID)
+	require.Equal(t, "scheduled", st)
+	st, _ = status(late.ID)
+	require.Equal(t, "scheduled", st)
+
+	// Seats released: the next run cancels them.
+	e.reserve(t, kept.ID, 0)
+	e.reserve(t, late.ID, 0)
+	_, err = e.Svc.GenerateTrips(ctx)
+	require.NoError(t, err)
+	for _, id := range []uuid.UUID{kept.ID, late.ID} {
+		st, src := status(id)
+		require.Equal(t, "cancelled", st)
+		require.Equal(t, "schedule", *src)
+	}
+	require.Equal(t, 1, e.count(t, `SELECT count(*) FROM ride_trips WHERE id = $1 AND cancelled_by IS NULL
+		AND cancelled_reason = 'Lịch chạy đã thay đổi'`, kept.ID))
+	// The in-range trips of the shortened schedule are untouched.
+	require.Equal(t, 5, e.count(t, `SELECT count(*) FROM ride_trips WHERE schedule_id = $1 AND status = 'scheduled'`, short.ID))
+
+	// Nothing left to sweep: a further run has no work for these schedules.
+	n, err := e.Svc.GenerateTrips(ctx)
+	require.NoError(t, err)
+	require.Zero(t, n)
+}
+
+// The sweep never touches the trips of an active schedule in range, booked
+// or not.
+func TestGenerateTrips_SweepLeavesActiveScheduleTrips(t *testing.T) {
+	e, p := rideEnv(t)
+	ctx := context.Background()
+	l := e.routed(t, p)
+	s := e.schedule(t, p, l, daily("07:00"))
+	_, err := e.Pool.Exec(ctx, `UPDATE ride_schedules SET generated_until = NULL WHERE id = $1`, s.ID)
+	require.NoError(t, err)
+	_, err = e.Svc.GenerateTrips(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 59, e.count(t, `SELECT count(*) FROM ride_trips WHERE schedule_id = $1 AND status = 'scheduled'`, s.ID))
 }

@@ -1348,22 +1348,29 @@ func (q *Queries) ListRideSchedules(ctx context.Context, arg ListRideSchedulesPa
 }
 
 const listSchedulesToGenerate = `-- name: ListSchedulesToGenerate :many
-SELECT id FROM ride_schedules
-WHERE active
-  AND (valid_to IS NULL OR valid_to >= $1::date)
-  AND (generated_until IS NULL OR generated_until < LEAST(COALESCE(valid_to, $2::date), $2::date))
-ORDER BY id
+SELECT s.id FROM ride_schedules s
+WHERE (s.active
+       AND (s.valid_to IS NULL OR s.valid_to >= $1::date)
+       AND (s.generated_until IS NULL OR s.generated_until < LEAST(COALESCE(s.valid_to, $2::date), $2::date)))
+   OR EXISTS (SELECT 1 FROM ride_trips t
+              WHERE t.schedule_id = s.id AND t.departure_at > $3::timestamptz
+                AND t.status = 'scheduled' AND t.seats_reserved = 0
+                AND (NOT s.active
+                     OR (s.valid_to IS NOT NULL AND (t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date > s.valid_to)))
+ORDER BY s.id
 `
 
 type ListSchedulesToGenerateParams struct {
 	Today   pgtype.Date
 	Horizon pgtype.Date
+	Now     time.Time
 }
 
-// Schedules the generation job still has to extend: active, not expired and
-// not yet generated up to min(valid_to, horizon).
+// Schedules the job has work for: active ones not expired and not yet
+// generated up to min(valid_to, horizon), and any schedule that still has an
+// out-of-range trip to sweep (see SweepScheduleTrips).
 func (q *Queries) ListSchedulesToGenerate(ctx context.Context, arg ListSchedulesToGenerateParams) ([]uuid.UUID, error) {
-	rows, err := q.db.Query(ctx, listSchedulesToGenerate, arg.Today, arg.Horizon)
+	rows, err := q.db.Query(ctx, listSchedulesToGenerate, arg.Today, arg.Horizon, arg.Now)
 	if err != nil {
 		return nil, err
 	}
@@ -1962,6 +1969,36 @@ func (q *Queries) SubmitListing(ctx context.Context, arg SubmitListingParams) (L
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const sweepScheduleTrips = `-- name: SweepScheduleTrips :execrows
+UPDATE ride_trips t
+SET status = 'cancelled', cancelled_reason = $1::text, cancelled_at = $2::timestamptz,
+    cancelled_by = NULL, cancel_source = 'schedule', updated_at = $2::timestamptz
+FROM ride_schedules s
+WHERE s.id = $3::uuid AND t.schedule_id = s.id AND t.departure_at > $2::timestamptz
+  AND t.status = 'scheduled' AND t.seats_reserved = 0
+  AND (NOT s.active
+       OR (s.valid_to IS NOT NULL AND (t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date > s.valid_to))
+`
+
+type SweepScheduleTripsParams struct {
+	Reason     string
+	Now        time.Time
+	ScheduleID uuid.UUID
+}
+
+// Cancels the future, unbooked, still scheduled trips of a schedule that it
+// no longer covers (schedule inactive, or the trip's VN date after
+// valid_to): trips kept by a schedule edit because they had seats held, once
+// those seats are released. seats_reserved = 0 is re-checked per row, so a
+// concurrent reservation wins.
+func (q *Queries) SweepScheduleTrips(ctx context.Context, arg SweepScheduleTripsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, sweepScheduleTrips, arg.Reason, arg.Now, arg.ScheduleID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const unhideListing = `-- name: UnhideListing :one

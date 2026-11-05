@@ -327,14 +327,35 @@ UPDATE ride_schedules SET generated_until = @generated_until, updated_at = @now 
 SELECT count(*) FROM ride_schedules
 WHERE listing_id = @listing_id AND active AND (valid_to IS NULL OR valid_to >= @today::date);
 
--- Schedules the generation job still has to extend: active, not expired and
--- not yet generated up to min(valid_to, horizon).
+-- Schedules the job has work for: active ones not expired and not yet
+-- generated up to min(valid_to, horizon), and any schedule that still has an
+-- out-of-range trip to sweep (see SweepScheduleTrips).
 -- name: ListSchedulesToGenerate :many
-SELECT id FROM ride_schedules
-WHERE active
-  AND (valid_to IS NULL OR valid_to >= @today::date)
-  AND (generated_until IS NULL OR generated_until < LEAST(COALESCE(valid_to, @horizon::date), @horizon::date))
-ORDER BY id;
+SELECT s.id FROM ride_schedules s
+WHERE (s.active
+       AND (s.valid_to IS NULL OR s.valid_to >= @today::date)
+       AND (s.generated_until IS NULL OR s.generated_until < LEAST(COALESCE(s.valid_to, @horizon::date), @horizon::date)))
+   OR EXISTS (SELECT 1 FROM ride_trips t
+              WHERE t.schedule_id = s.id AND t.departure_at > @now::timestamptz
+                AND t.status = 'scheduled' AND t.seats_reserved = 0
+                AND (NOT s.active
+                     OR (s.valid_to IS NOT NULL AND (t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date > s.valid_to)))
+ORDER BY s.id;
+
+-- Cancels the future, unbooked, still scheduled trips of a schedule that it
+-- no longer covers (schedule inactive, or the trip's VN date after
+-- valid_to): trips kept by a schedule edit because they had seats held, once
+-- those seats are released. seats_reserved = 0 is re-checked per row, so a
+-- concurrent reservation wins.
+-- name: SweepScheduleTrips :execrows
+UPDATE ride_trips t
+SET status = 'cancelled', cancelled_reason = @reason::text, cancelled_at = @now::timestamptz,
+    cancelled_by = NULL, cancel_source = 'schedule', updated_at = @now::timestamptz
+FROM ride_schedules s
+WHERE s.id = @schedule_id::uuid AND t.schedule_id = s.id AND t.departure_at > @now::timestamptz
+  AND t.status = 'scheduled' AND t.seats_reserved = 0
+  AND (NOT s.active
+       OR (s.valid_to IS NOT NULL AND (t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date > s.valid_to));
 
 -- Inserts the schedule's trips; a trip the schedule itself cancelled at the
 -- same departure is reopened. Any other existing trip (one-off, running, or
