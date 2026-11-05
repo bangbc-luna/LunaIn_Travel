@@ -511,3 +511,6 @@ WHERE t.status = 'scheduled'
   AND t.seat_capacity - t.seats_reserved >= @seats::int
 ORDER BY t.departure_at, t.price_per_seat, t.id
 LIMIT @lim OFFSET @off;
+
+-- name: GetRentalStore :one
+SELECT * FROM rental_stores WHERE listing_id = @listing_id;

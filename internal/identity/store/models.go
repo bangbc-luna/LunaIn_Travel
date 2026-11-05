@@ -129,6 +129,25 @@ type BookingItem struct {
 	UpdatedAt   time.Time
 }
 
+type BookingRentalDetail struct {
+	BookingID               uuid.UUID
+	ListingID               uuid.UUID
+	VehicleModelID          uuid.UUID
+	PickupPointID           uuid.UUID
+	PickupAt                time.Time
+	ReturnAt                time.Time
+	Period                  pgtype.Range[pgtype.Timestamptz]
+	Days                    int32
+	ModelName               string
+	PickupPointName         string
+	PickupAddress           string
+	DestinationProvinceCode string
+	HoldsVehicle            bool
+	HoldUntil               *time.Time
+	CreatedAt               time.Time
+	UpdatedAt               time.Time
+}
+
 type BookingReschedule struct {
 	ID            uuid.UUID
 	BookingID     uuid.UUID
@@ -553,6 +572,50 @@ type Refund struct {
 	UpdatedAt             time.Time
 	BankInfoReminderCount int32
 	BankInfoRemindedAt    *time.Time
+}
+
+type RentalPickupPoint struct {
+	ID           uuid.UUID
+	ListingID    uuid.UUID
+	Name         string
+	Address      string
+	ProvinceCode string
+	WardCode     string
+	DeliveryFee  int64
+	Active       bool
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
+type RentalStore struct {
+	ListingID         uuid.UUID
+	HandoverOpen      pgtype.Time
+	HandoverClose     pgtype.Time
+	DeliveryAvailable bool
+	DepositTerms      *string
+	DocumentsTerms    *string
+	LateFeeTerms      *string
+	AllowedAreaTerms  *string
+	OtherTerms        *string
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+}
+
+type RentalVehicleModel struct {
+	ID            uuid.UUID
+	ListingID     uuid.UUID
+	VehicleKind   string
+	Name          string
+	ModelYear     int16
+	Seats         int32
+	IncludedItems *string
+	Tags          []string
+	PricePerDay   int64
+	Quantity      int32
+	CoverFileID   pgtype.UUID
+	Active        bool
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
 }
 
 type RideRoute struct {

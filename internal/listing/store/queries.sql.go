@@ -412,6 +412,29 @@ func (q *Queries) GetPublicListingBySlug(ctx context.Context, slug string) (GetP
 	return i, err
 }
 
+const getRentalStore = `-- name: GetRentalStore :one
+SELECT listing_id, handover_open, handover_close, delivery_available, deposit_terms, documents_terms, late_fee_terms, allowed_area_terms, other_terms, created_at, updated_at FROM rental_stores WHERE listing_id = $1
+`
+
+func (q *Queries) GetRentalStore(ctx context.Context, listingID uuid.UUID) (RentalStore, error) {
+	row := q.db.QueryRow(ctx, getRentalStore, listingID)
+	var i RentalStore
+	err := row.Scan(
+		&i.ListingID,
+		&i.HandoverOpen,
+		&i.HandoverClose,
+		&i.DeliveryAvailable,
+		&i.DepositTerms,
+		&i.DocumentsTerms,
+		&i.LateFeeTerms,
+		&i.AllowedAreaTerms,
+		&i.OtherTerms,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getRideRoute = `-- name: GetRideRoute :one
 SELECT listing_id, origin_province_code, origin_ward_code, origin_name, origin_address, dest_province_code, dest_ward_code, dest_name, dest_address, duration_minutes, vehicle_description, created_at, updated_at FROM ride_routes WHERE listing_id = $1
 `

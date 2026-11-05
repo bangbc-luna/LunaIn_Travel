@@ -570,3 +570,151 @@ func TestBookingCheckedInNeedsTimestamp(t *testing.T) {
 	requireViolation(t, err, "23514", "bookings_checked_in_at_check")
 	require.NoError(t, f.exec(t, `UPDATE bookings SET status = 'checked_in', checked_in_at = now() WHERE id = $1`, f.booking))
 }
+
+// --- Self-drive rental schema (migration 00018) ---
+
+// newRentalStore inserts a self_drive_rental listing of partner with its store.
+func (f *fixture) newRentalStore(t *testing.T, partner uuid.UUID) uuid.UUID {
+	t.Helper()
+	listing := newID(t)
+	f.mustExec(t, `INSERT INTO listings (id, partner_id, service_type, title, slug)
+		VALUES ($1, $2, 'self_drive_rental', 'Cho thuê xe', $3)`, listing, partner, "slug-"+listing.String())
+	f.mustExec(t, `INSERT INTO rental_stores (listing_id, handover_open, handover_close) VALUES ($1, '07:00', '21:00')`, listing)
+	return listing
+}
+
+func (f *fixture) insertRentalModel(t *testing.T, id, listing uuid.UUID, price, quantity int64) error {
+	t.Helper()
+	return f.exec(t, `INSERT INTO rental_vehicle_models (id, listing_id, vehicle_kind, name, model_year, seats, price_per_day, quantity)
+		VALUES ($1, $2, 'car', 'Vios', 2023, 5, $3, $4)`, id, listing, price, quantity)
+}
+
+func (f *fixture) insertRentalPoint(t *testing.T, id, listing uuid.UUID) {
+	t.Helper()
+	w, p := f.wardPair(t, 0)
+	f.mustExec(t, `INSERT INTO rental_pickup_points (id, listing_id, name, address, province_code, ward_code)
+		VALUES ($1, $2, 'Cửa hàng', '1 A', $3, $4)`, id, listing, p, w)
+}
+
+// insertRentalBooking inserts a request-mode self_drive_rental booking.
+func (f *fixture) insertRentalBooking(t *testing.T, id, listing uuid.UUID) {
+	t.Helper()
+	f.mustExec(t, `INSERT INTO bookings (
+		id, code, checkout_id, customer_id, partner_id, listing_id, service_type, booking_mode, status,
+		service_start_at, service_end_at, original_service_start_at,
+		gross_amount, commission_rate_bps, commission_amount, cancellation_policy_snapshot,
+		contact_name, contact_phone, contact_email, response_due_at, qr_token
+	) VALUES ($1, $2, $3, $4, $5, $6, 'self_drive_rental', 'request', 'requested',
+		'2026-12-01 01:00:00Z', '2026-12-02 03:00:00Z', '2026-12-01 01:00:00Z',
+		1000000, 1000, 100000, '[]', 'A', '0900000000', 'a@customer.test', now(), $7)`,
+		id, randCode(t, "LT"), f.checkout, f.customer, f.partner, listing, randToken(t))
+}
+
+func (f *fixture) insertRentalDetail(t *testing.T, booking, listing, model, point uuid.UUID, pickup, ret string, holds bool, holdUntil any) error {
+	t.Helper()
+	return f.exec(t, `INSERT INTO booking_rental_details (
+		booking_id, listing_id, vehicle_model_id, pickup_point_id, pickup_at, return_at, days,
+		model_name, pickup_point_name, pickup_address, destination_province_code,
+		holds_vehicle, hold_until)
+		VALUES ($1, $2, $3, $4, $5::timestamptz, $6::timestamptz, 2, 'Vios', 'Cửa hàng', '1 A',
+		        (SELECT province_code FROM wards ORDER BY code LIMIT 1), $7, $8)`,
+		booking, listing, model, point, pickup, ret, holds, holdUntil)
+}
+
+func TestRentalModelQuantityCheck(t *testing.T) {
+	f := newFixture(t)
+	listing := f.newRentalStore(t, f.partner)
+	requireViolation(t, f.insertRentalModel(t, newID(t), listing, 500000, -1), "23514", "")
+	requireViolation(t, f.insertRentalModel(t, newID(t), listing, 0, 1), "23514", "")
+	require.NoError(t, f.insertRentalModel(t, newID(t), listing, 500000, 0))
+}
+
+func TestRentalStoreHandoverOrder(t *testing.T) {
+	f := newFixture(t)
+	listing := newID(t)
+	f.mustExec(t, `INSERT INTO listings (id, partner_id, service_type, title, slug)
+		VALUES ($1, $2, 'self_drive_rental', 'Cho thuê xe', $3)`, listing, f.partner, "slug-"+listing.String())
+	err := f.exec(t, `INSERT INTO rental_stores (listing_id, handover_open, handover_close) VALUES ($1, '08:00', '08:00')`, listing)
+	requireViolation(t, err, "23514", "")
+}
+
+// rentalDetailFixture returns a rental booking with a model and pickup point of one listing.
+func rentalDetailFixture(t *testing.T) (f *fixture, booking, listing, model, point uuid.UUID) {
+	f = newFixture(t)
+	listing = f.newRentalStore(t, f.partner)
+	model, point, booking = newID(t), newID(t), newID(t)
+	require.NoError(t, f.insertRentalModel(t, model, listing, 500000, 2))
+	f.insertRentalPoint(t, point, listing)
+	f.insertRentalBooking(t, booking, listing)
+	return
+}
+
+func TestRentalDetailModelMustMatchListing(t *testing.T) {
+	f, booking, listing, _, point := rentalDetailFixture(t)
+	other := f.newRentalStore(t, f.partner)
+	otherModel := newID(t)
+	require.NoError(t, f.insertRentalModel(t, otherModel, other, 500000, 2))
+	err := f.insertRentalDetail(t, booking, listing, otherModel, point, "2026-12-01 01:00:00Z", "2026-12-02 03:00:00Z", true, nil)
+	requireViolation(t, err, "23503", "booking_rental_details_vehicle_model_id_listing_id_fkey")
+}
+
+func TestRentalDetailPointMustMatchListing(t *testing.T) {
+	f, booking, listing, model, _ := rentalDetailFixture(t)
+	other := f.newRentalStore(t, f.partner)
+	otherPoint := newID(t)
+	f.insertRentalPoint(t, otherPoint, other)
+	err := f.insertRentalDetail(t, booking, listing, model, otherPoint, "2026-12-01 01:00:00Z", "2026-12-02 03:00:00Z", true, nil)
+	requireViolation(t, err, "23503", "booking_rental_details_pickup_point_id_listing_id_fkey")
+}
+
+func TestRentalDetailPeriodGenerated(t *testing.T) {
+	f, booking, listing, model, point := rentalDetailFixture(t)
+	// 08:00 VN day 1 to 10:00 VN day 2.
+	require.NoError(t, f.insertRentalDetail(t, booking, listing, model, point, "2026-12-01 01:00:00Z", "2026-12-02 03:00:00Z", true, nil))
+	var touching, overlapping bool
+	require.NoError(t, f.pool.QueryRow(context.Background(), `SELECT
+		period && tstzrange('2026-12-02 03:00:00Z', '2026-12-02 04:00:00Z', '[)'),
+		period && tstzrange('2026-12-02 02:59:00Z', '2026-12-02 04:00:00Z', '[)')
+		FROM booking_rental_details WHERE booking_id = $1`, booking).Scan(&touching, &overlapping))
+	require.False(t, touching)
+	require.True(t, overlapping)
+}
+
+func TestRentalDetailHoldUntilNeedsHolds(t *testing.T) {
+	f, booking, listing, model, point := rentalDetailFixture(t)
+	err := f.insertRentalDetail(t, booking, listing, model, point, "2026-12-01 01:00:00Z", "2026-12-02 03:00:00Z", false, "2026-12-01 00:00:00Z")
+	requireViolation(t, err, "23514", "")
+	require.NoError(t, f.insertRentalDetail(t, booking, listing, model, point, "2026-12-01 01:00:00Z", "2026-12-02 03:00:00Z", true, "2026-12-01 00:00:00Z"))
+}
+
+func TestRentalDetailReturnAfterPickup(t *testing.T) {
+	f, booking, listing, model, point := rentalDetailFixture(t)
+	err := f.insertRentalDetail(t, booking, listing, model, point, "2026-12-01 01:00:00Z", "2026-12-01 01:00:00Z", true, nil)
+	requireViolation(t, err, "23514", "")
+}
+
+func TestBookingInServiceNeedsTimestamp(t *testing.T) {
+	f := newFixture(t)
+	err := f.exec(t, `UPDATE bookings SET status = 'in_service' WHERE id = $1`, f.booking)
+	requireViolation(t, err, "23514", "bookings_in_service_at_check")
+	require.NoError(t, f.exec(t, `UPDATE bookings SET status = 'in_service', in_service_at = now() WHERE id = $1`, f.booking))
+}
+
+func TestBookingAwaitingNeedsAcceptance(t *testing.T) {
+	f := newFixture(t)
+	id := newID(t)
+	require.NoError(t, f.insertBookingFull(t, id, f.listing, f.partner, f.checkout, f.customer, "request", "requested"))
+	err := f.exec(t, `UPDATE bookings SET status = 'awaiting_payment', hold_expires_at = now(), hold_release_at = now() WHERE id = $1`, id)
+	requireViolation(t, err, "23514", "bookings_accepted_check")
+	require.NoError(t, f.exec(t, `UPDATE bookings SET status = 'awaiting_payment', hold_expires_at = now(), hold_release_at = now(),
+		accepted_at = now(), payment_due_at = now() WHERE id = $1`, id))
+}
+
+func TestBookingRejectedNeedsReason(t *testing.T) {
+	f := newFixture(t)
+	id := newID(t)
+	require.NoError(t, f.insertBookingFull(t, id, f.listing, f.partner, f.checkout, f.customer, "request", "requested"))
+	err := f.exec(t, `UPDATE bookings SET status = 'rejected', rejected_at = now() WHERE id = $1`, id)
+	requireViolation(t, err, "23514", "bookings_reject_reason_check")
+	require.NoError(t, f.exec(t, `UPDATE bookings SET status = 'rejected', rejected_at = now(), reject_reason = 'hết xe' WHERE id = $1`, id))
+}

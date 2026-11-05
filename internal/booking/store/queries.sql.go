@@ -342,6 +342,34 @@ func (q *Queries) GetIdempotencyKey(ctx context.Context, arg GetIdempotencyKeyPa
 	return i, err
 }
 
+const getRentalDetails = `-- name: GetRentalDetails :one
+SELECT booking_id, listing_id, vehicle_model_id, pickup_point_id, pickup_at, return_at, period, days, model_name, pickup_point_name, pickup_address, destination_province_code, holds_vehicle, hold_until, created_at, updated_at FROM booking_rental_details WHERE booking_id = $1
+`
+
+func (q *Queries) GetRentalDetails(ctx context.Context, bookingID uuid.UUID) (BookingRentalDetail, error) {
+	row := q.db.QueryRow(ctx, getRentalDetails, bookingID)
+	var i BookingRentalDetail
+	err := row.Scan(
+		&i.BookingID,
+		&i.ListingID,
+		&i.VehicleModelID,
+		&i.PickupPointID,
+		&i.PickupAt,
+		&i.ReturnAt,
+		&i.Period,
+		&i.Days,
+		&i.ModelName,
+		&i.PickupPointName,
+		&i.PickupAddress,
+		&i.DestinationProvinceCode,
+		&i.HoldsVehicle,
+		&i.HoldUntil,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getRideDetails = `-- name: GetRideDetails :one
 SELECT booking_id, listing_id, trip_id, seats, direction, origin_name, dest_name, created_at, updated_at FROM booking_ride_details WHERE booking_id = $1
 `

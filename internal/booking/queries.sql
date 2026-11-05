@@ -305,3 +305,6 @@ SELECT b.id, b.checkout_id, d.trip_id FROM bookings b
 JOIN booking_ride_details d ON d.booking_id = b.id
 WHERE b.checkout_id = ANY(@checkout_ids::uuid[])
 ORDER BY b.id;
+
+-- name: GetRentalDetails :one
+SELECT * FROM booking_rental_details WHERE booking_id = @booking_id;
