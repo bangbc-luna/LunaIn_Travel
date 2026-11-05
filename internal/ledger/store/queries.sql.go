@@ -281,18 +281,20 @@ func (q *Queries) LedgerTotals(ctx context.Context, partnerID uuid.UUID) (Ledger
 const listDueReleases = `-- name: ListDueReleases :many
 SELECT booking_id FROM booking_settlements
 WHERE released_at IS NULL AND release_due_at <= $1::timestamptz
+  AND NOT (booking_id = ANY($2::uuid[]))
 ORDER BY release_due_at, booking_id
-LIMIT $2
+LIMIT $3
 `
 
 type ListDueReleasesParams struct {
-	Now time.Time
-	Lim int32
+	Now  time.Time
+	Skip []uuid.UUID
+	Lim  int32
 }
 
 // Release job: settlements due and not released (booking_settlements_release_due_idx).
 func (q *Queries) ListDueReleases(ctx context.Context, arg ListDueReleasesParams) ([]uuid.UUID, error) {
-	rows, err := q.db.Query(ctx, listDueReleases, arg.Now, arg.Lim)
+	rows, err := q.db.Query(ctx, listDueReleases, arg.Now, arg.Skip, arg.Lim)
 	if err != nil {
 		return nil, err
 	}

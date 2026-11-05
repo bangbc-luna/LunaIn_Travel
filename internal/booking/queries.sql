@@ -132,6 +132,7 @@ UPDATE bookings SET status = 'expired', updated_at = @now WHERE id = @id;
 -- name: ListHoldsToRelease :many
 SELECT id, checkout_id FROM bookings
 WHERE status = 'pending_payment' AND hold_release_at <= @now::timestamptz
+  AND NOT (checkout_id = ANY(@skip::uuid[]))
 ORDER BY hold_release_at, id
 LIMIT @lim;
 
@@ -140,8 +141,20 @@ LIMIT @lim;
 -- name: ListNoShowCandidates :many
 SELECT id FROM bookings
 WHERE status = 'confirmed' AND service_type = 'attraction_ticket' AND service_end_at < @now
+  AND NOT (id = ANY(@skip::uuid[]))
 ORDER BY service_end_at, id
 LIMIT @lim;
+
+-- Idempotency cleanup: at most @lim keys created before @cutoff
+-- (idempotency_keys_created_idx).
+-- name: PurgeIdempotencyKeys :execrows
+DELETE FROM idempotency_keys
+WHERE ctid IN (
+    SELECT k.ctid FROM idempotency_keys k
+    WHERE k.created_at < @cutoff::timestamptz
+    ORDER BY k.created_at
+    LIMIT @lim
+);
 
 -- name: LockBooking :one
 SELECT * FROM bookings WHERE id = @id FOR UPDATE;

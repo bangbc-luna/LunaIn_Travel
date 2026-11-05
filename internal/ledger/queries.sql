@@ -87,6 +87,7 @@ WHERE e.available_after <> e.running;
 -- name: ListDueReleases :many
 SELECT booking_id FROM booking_settlements
 WHERE released_at IS NULL AND release_due_at <= @now::timestamptz
+  AND NOT (booking_id = ANY(@skip::uuid[]))
 ORDER BY release_due_at, booking_id
 LIMIT @lim;
 

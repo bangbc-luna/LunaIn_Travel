@@ -106,6 +106,14 @@ type Service struct {
 	ledger   *ledger.Service
 	jobs     *river.Client[pgx.Tx]
 	log      *slog.Logger
+
+	// Periodic jobs: rows backing off after a failure, one tracker per job.
+	holdBackoff, noShowBackoff, releaseBackoff jobBackoff
+	// batchSize overrides jobBatchSize when > 0 (tests).
+	batchSize int32
+	// beforeItem, when set (tests), runs inside each job item's transaction
+	// before any work; an error fails the item.
+	beforeItem func(id uuid.UUID) error
 }
 
 // NewService builds a Service.

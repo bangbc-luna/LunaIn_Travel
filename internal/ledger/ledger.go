@@ -268,9 +268,13 @@ func (s *Service) ReleaseIfDue(ctx context.Context, tx pgx.Tx, bookingID uuid.UU
 
 // DueReleases lists (unlocked) up to limit bookings whose settlement is due
 // for release at now and not released yet, oldest due first. The caller then
-// locks each booking FOR UPDATE and calls Release.
-func (s *Service) DueReleases(ctx context.Context, now time.Time, limit int32) ([]uuid.UUID, error) {
-	ids, err := store.New(s.pool).ListDueReleases(ctx, store.ListDueReleasesParams{Now: now, Lim: limit})
+// locks each booking FOR UPDATE and calls Release. Bookings in skip are left
+// out (rows backing off after a failure).
+func (s *Service) DueReleases(ctx context.Context, now time.Time, limit int32, skip []uuid.UUID) ([]uuid.UUID, error) {
+	if skip == nil {
+		skip = []uuid.UUID{}
+	}
+	ids, err := store.New(s.pool).ListDueReleases(ctx, store.ListDueReleasesParams{Now: now, Lim: limit, Skip: skip})
 	if err != nil {
 		return nil, fmt.Errorf("list due releases: %w", err)
 	}
