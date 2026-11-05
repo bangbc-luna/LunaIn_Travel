@@ -610,7 +610,7 @@ func (c *confirmation) expireBooking(ctx context.Context, b store.Booking) error
 	if err := c.history(ctx, b, StatusExpired, &reason); err != nil {
 		return err
 	}
-	return c.s.releaseRideSeats(ctx, c.tx, b)
+	return c.s.releaseHold(ctx, c.tx, b)
 }
 
 // confirmBooking moves a locked booking to confirmed (from pending_payment,

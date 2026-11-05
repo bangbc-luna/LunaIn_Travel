@@ -231,7 +231,7 @@ func serve(log *slog.Logger) error {
 	ledgerSvc := ledger.NewService(pool, clock.Real{})
 	bookingSvc := booking.NewService(booking.Deps{
 		Pool: pool, Clock: clock.Real{}, Listings: listingSvc, Catalog: catSvc, Settings: settingsSvc,
-		Identity: idSvc, Payments: paymentSvc, Ledger: ledgerSvc, Jobs: jobClient, Log: log,
+		Identity: idSvc, Payments: paymentSvc, Ledger: ledgerSvc, Partners: partnerSvc, Jobs: jobClient, Log: log,
 	})
 	expireHolds.Service, noShow.Service, release.Service, purgeIdem.Service = bookingSvc, bookingSvc, bookingSvc, bookingSvc
 	completeRides.Service = bookingSvc

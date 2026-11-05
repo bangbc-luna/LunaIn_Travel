@@ -152,7 +152,8 @@ func normalizeAdminReason(reason string) (string, error) {
 // cancelRideCheckout (both legs of a round trip together).
 //
 // Lock order (DB §1.1): the customer's refund account (a users child) is
-// saved first, then the checkout and the booking are locked FOR UPDATE and
+// saved first, then the capacity rows (lockCheckoutCapacity), then the
+// checkout and the booking are locked FOR UPDATE and
 // the state re-checked, then cancelLocked does the rest.
 func (s *Service) cancel(ctx context.Context, bookingID uuid.UUID, owner *uuid.UUID, c cancellation) error {
 	b, err := store.New(s.pool).GetBooking(ctx, bookingID)
@@ -182,6 +183,10 @@ func (s *Service) cancel(ctx context.Context, bookingID uuid.UUID, owner *uuid.U
 			if _, err := s.payments.SaveRefundAccountTx(ctx, tx, b.CustomerID, *c.bank); err != nil {
 				return err
 			}
+		}
+		// The capacity rows (a rental's model) come before the checkout.
+		if err := s.lockCheckoutCapacity(ctx, tx, b.CheckoutID); err != nil {
+			return err
 		}
 		co, err := q.LockCheckout(ctx, b.CheckoutID)
 		if err != nil {
@@ -256,9 +261,10 @@ func (s *Service) cancelLocked(ctx context.Context, tx pgx.Tx, co store.Checkout
 	if err := s.ledger.Release(ctx, tx, b.ID); err != nil {
 		return 0, fmt.Errorf("release: %w", err)
 	}
-	// A ride booking's seats go back to its trip (the caller holds the trip
-	// lock); nothing for an attraction.
-	if err := s.releaseRideSeats(ctx, tx, b); err != nil {
+	// A ride booking's seats go back to its trip, a rental's vehicle is no
+	// longer held (the caller holds the capacity lock); nothing for an
+	// attraction.
+	if err := s.releaseHold(ctx, tx, b); err != nil {
 		return 0, err
 	}
 	if c.actorKind == actorAdmin {

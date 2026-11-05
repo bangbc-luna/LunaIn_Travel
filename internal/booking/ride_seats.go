@@ -22,27 +22,10 @@ func sortedIDs(ids []uuid.UUID) []uuid.UUID {
 	return slices.Compact(out)
 }
 
-// lockCheckoutTrips locks the trips of a checkout's ride bookings (none for
-// an attraction checkout). Every tx that locks a checkout holding ride
-// bookings calls it first: ride_trips come before checkouts in the lock
-// order (DB §1.1). The trip ids are read unlocked; a booking's trip never
-// changes.
-func (s *Service) lockCheckoutTrips(ctx context.Context, tx pgx.Tx, checkoutID uuid.UUID) error {
-	ids, err := store.New(tx).ListCheckoutRideTrips(ctx, checkoutID)
-	if err != nil {
-		return fmt.Errorf("list checkout ride trips: %w", err)
-	}
-	if len(ids) == 0 {
-		return nil
-	}
-	_, err = s.listings.LockTrips(ctx, tx, ids)
-	return err
-}
-
 // releaseRideSeats returns the seats of a ride booking to its trip, in the
 // caller's tx, which holds the trip lock and moves the booking to expired or
 // cancelled. A booking of another service type has no seats: nothing is
-// done.
+// done. Lifecycle code calls it through releaseHold (capacity.go).
 func (s *Service) releaseRideSeats(ctx context.Context, tx pgx.Tx, b store.Booking) error {
 	if b.ServiceType != serviceTypeRide {
 		return nil
@@ -127,7 +110,7 @@ func (s *Service) releaseOverdueOnTrips(ctx context.Context, tx pgx.Tx, tripIDs 
 		if err := insertHistory(ctx, q, b, StatusExpired, actorSystem, nil, &reason, now); err != nil {
 			return nil, err
 		}
-		if err := s.releaseRideSeats(ctx, tx, b); err != nil {
+		if err := s.releaseHold(ctx, tx, b); err != nil {
 			return nil, err
 		}
 	}

@@ -230,9 +230,9 @@ func (s *Service) cancelLink(ctx context.Context, orderCode int64) {
 // bookings expired and the order codes of the payments expired.
 func (s *Service) expireCheckout(ctx context.Context, tx pgx.Tx, checkoutID uuid.UUID, now time.Time) (int, []int64, error) {
 	q := store.New(tx)
-	// The ride trips first (DB §1.1): an expired ride booking returns its
-	// seats in this tx.
-	if err := s.lockCheckoutTrips(ctx, tx, checkoutID); err != nil {
+	// The capacity rows first (DB §1.1): an expired booking gives back its
+	// seats or vehicle in this tx (releaseHold).
+	if err := s.lockCheckoutCapacity(ctx, tx, checkoutID); err != nil {
 		return 0, nil, err
 	}
 	co, err := q.LockCheckout(ctx, checkoutID)
@@ -254,7 +254,7 @@ func (s *Service) expireCheckout(ctx context.Context, tx pgx.Tx, checkoutID uuid
 			if err := insertHistory(ctx, q, b, StatusExpired, actorSystem, nil, &reason, now); err != nil {
 				return 0, nil, err
 			}
-			if err := s.releaseRideSeats(ctx, tx, b); err != nil {
+			if err := s.releaseHold(ctx, tx, b); err != nil {
 				return 0, nil, err
 			}
 			bookings[i].Status = StatusExpired

@@ -39,6 +39,23 @@ INSERT INTO bookings (
 )
 ON CONFLICT (code) DO NOTHING;
 
+-- A Request Booking awaiting the partner: no hold columns, no payment yet.
+-- name: InsertRequestedBooking :execrows
+INSERT INTO bookings (
+    id, code, checkout_id, customer_id, partner_id, listing_id, service_type, booking_mode, status,
+    service_start_at, service_end_at, original_service_start_at,
+    gross_amount, commission_rate_bps, commission_amount, cancellation_policy_snapshot,
+    contact_name, contact_phone, contact_email, customer_note,
+    response_due_at, qr_token, created_at, updated_at
+) VALUES (
+    @id, @code, @checkout_id, @customer_id, @partner_id, @listing_id, @service_type, 'request', 'requested',
+    @service_start_at, @service_end_at, @service_start_at,
+    @gross_amount, @commission_rate_bps, @commission_amount, @cancellation_policy_snapshot,
+    @contact_name, @contact_phone, @contact_email, sqlc.narg(customer_note),
+    @response_due_at, @qr_token, @now, @now
+)
+ON CONFLICT (code) DO NOTHING;
+
 -- name: InsertBookingItem :exec
 INSERT INTO booking_items (id, booking_id, line_kind, description, unit_price, quantity, line_total, created_at, updated_at)
 VALUES (@id, @booking_id, @line_kind, @description, @unit_price, @quantity::int, @line_total, @now, @now);
@@ -109,10 +126,14 @@ SELECT sqlc.embed(b),
        COALESCE(to_char(d.slot_start, 'HH24:MI'), '')::text AS slot_start,
        COALESCE(to_char(d.slot_end, 'HH24:MI'), '')::text AS slot_end,
        r.trip_id,
-       r.seats
+       r.seats,
+       rd.vehicle_model_id,
+       rd.pickup_at AS rental_pickup_at,
+       rd.return_at AS rental_return_at
 FROM bookings b
 LEFT JOIN booking_attraction_details d ON d.booking_id = b.id
 LEFT JOIN booking_ride_details r ON r.booking_id = b.id
+LEFT JOIN booking_rental_details rd ON rd.booking_id = b.id
 WHERE b.checkout_id = @checkout_id
 ORDER BY b.id;
 
@@ -325,3 +346,32 @@ held AS (
 SELECT h1.m AS vehicle_model_id,
        max((SELECT count(*) FROM held h2 WHERE h2.m = h1.m AND h2.p @> lower(h1.p)))::int AS peak
 FROM held h1 GROUP BY h1.m;
+
+-- name: InsertRentalDetail :exec
+INSERT INTO booking_rental_details (
+    booking_id, listing_id, vehicle_model_id, pickup_point_id, pickup_at, return_at, days,
+    model_name, pickup_point_name, pickup_address, destination_province_code,
+    holds_vehicle, hold_until, created_at, updated_at
+) VALUES (
+    @booking_id, @listing_id, @vehicle_model_id, @pickup_point_id, @pickup_at, @return_at, @days::int,
+    @model_name, @pickup_point_name, @pickup_address, @destination_province_code,
+    true, @hold_until, @now, @now
+);
+
+-- holds_vehicle / hold_until follow the booking status and change in the tx
+-- that changes it; the caller holds the model lock.
+-- name: SetRentalHold :exec
+UPDATE booking_rental_details
+SET holds_vehicle = @holds_vehicle, hold_until = sqlc.narg(hold_until), updated_at = @now
+WHERE booking_id = @booking_id;
+
+-- Models of a checkout's rental bookings, unlocked (a booking's model never
+-- changes), so the caller can lock them before the checkout.
+-- name: ListCheckoutRentalModels :many
+SELECT DISTINCT d.vehicle_model_id FROM booking_rental_details d
+JOIN bookings b ON b.id = d.booking_id
+WHERE b.checkout_id = @checkout_id
+ORDER BY d.vehicle_model_id;
+
+-- name: ProvinceExists :one
+SELECT EXISTS (SELECT 1 FROM provinces WHERE code = @code);

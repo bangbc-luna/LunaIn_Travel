@@ -59,6 +59,7 @@ const (
 	codeInsertTries    = 5
 	endpointAttraction = "POST /v1/bookings/attraction"
 	endpointRide       = "POST /v1/bookings/ride"
+	endpointRental     = "POST /v1/bookings/rental"
 )
 
 var (
@@ -90,6 +91,9 @@ type Deps struct {
 	Identity *identity.Service
 	Payments *payment.Service
 	Ledger   *ledger.Service
+	// Partners finds the partner owner's email (*partner.Service). May be
+	// nil in tests: partner emails are then only logged.
+	Partners PartnerContact
 	// Jobs queues customer emails (outbox). May be nil in tests that send
 	// no email: emails are then only logged.
 	Jobs *river.Client[pgx.Tx]
@@ -106,6 +110,7 @@ type Service struct {
 	identity *identity.Service
 	payments *payment.Service
 	ledger   *ledger.Service
+	partners PartnerContact
 	jobs     *river.Client[pgx.Tx]
 	log      *slog.Logger
 
@@ -126,7 +131,7 @@ func NewService(d Deps) *Service {
 	}
 	return &Service{
 		pool: d.Pool, clock: d.Clock, listings: d.Listings, catalog: d.Catalog, settings: d.Settings,
-		identity: d.Identity, payments: d.Payments, ledger: d.Ledger, jobs: d.Jobs, log: log,
+		identity: d.Identity, payments: d.Payments, ledger: d.Ledger, partners: d.Partners, jobs: d.Jobs, log: log,
 	}
 }
 

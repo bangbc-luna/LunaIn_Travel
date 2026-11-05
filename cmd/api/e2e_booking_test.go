@@ -86,7 +86,7 @@ func newE2EApp(t *testing.T, now time.Time) *e2eApp {
 	ledgerSvc := ledger.NewService(pool, clk)
 	bookingSvc := booking.NewService(booking.Deps{
 		Pool: pool, Clock: clk, Listings: listingSvc, Catalog: catSvc, Settings: settingsSvc,
-		Identity: idSvc, Payments: paymentSvc, Ledger: ledgerSvc, Jobs: jobClient,
+		Identity: idSvc, Payments: paymentSvc, Ledger: ledgerSvc, Partners: partnerSvc, Jobs: jobClient,
 		Log: slog.New(slog.DiscardHandler),
 	})
 	paymentSvc.SetOps(payment.OpsDeps{Jobs: jobClient, Users: idSvc, Files: fileSvc})

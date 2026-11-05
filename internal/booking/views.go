@@ -73,12 +73,39 @@ type RideView struct {
 	PairedBookingID *uuid.UUID `json:"paired_booking_id"`
 }
 
+// RentalView is the vehicle, pickup point and period of a self-drive rental
+// booking (snapshots taken at request time). PickupAt and ReturnAt are its
+// service_start_at and service_end_at; the vehicle is returned at the same
+// point.
+type RentalView struct {
+	VehicleModelID          uuid.UUID `json:"vehicle_model_id"`
+	ModelName               string    `json:"model_name"`
+	PickupPointID           uuid.UUID `json:"pickup_point_id"`
+	PickupPointName         string    `json:"pickup_point_name"`
+	PickupAddress           string    `json:"pickup_address"`
+	PickupAt                time.Time `json:"pickup_at"`
+	ReturnAt                time.Time `json:"return_at"`
+	Days                    int       `json:"days"`
+	DestinationProvinceCode string    `json:"destination_province_code"`
+}
+
+// RequestView is the partner-answer and payment deadlines of a Request
+// Booking.
+type RequestView struct {
+	ResponseDueAt *time.Time `json:"response_due_at"`
+	PaymentDueAt  *time.Time `json:"payment_due_at"`
+	AcceptedAt    *time.Time `json:"accepted_at"`
+	RejectedAt    *time.Time `json:"rejected_at"`
+	RejectReason  *string    `json:"reject_reason"`
+}
+
 // BookingView is one booking as its customer, its partner or the admin sees
 // it. QRToken is only ever set for the owning customer of a confirmed,
-// checked_in or completed booking (omitted otherwise); Payment only for the
-// owning customer while pending_payment;
+// checked_in, in_service or completed booking (omitted otherwise); Payment
+// only for the owning customer while pending_payment or awaiting_payment;
 // CommissionRateBps/CommissionAmount only for the partner and the admin.
-// Ride is set for a scheduled ride booking only.
+// Ride is set for a scheduled ride booking only, Rental for a self-drive
+// rental only, Request for a Request Booking only.
 type BookingView struct {
 	ID                 uuid.UUID                  `json:"id"`
 	Code               string                     `json:"code"`
@@ -88,6 +115,8 @@ type BookingView struct {
 	VisitDate          string                     `json:"visit_date"`
 	TimeSlot           SlotView                   `json:"time_slot"`
 	Ride               *RideView                  `json:"ride,omitempty"`
+	Rental             *RentalView                `json:"rental,omitempty"`
+	Request            *RequestView               `json:"request,omitempty"`
 	ServiceStartAt     time.Time                  `json:"service_start_at"`
 	ServiceEndAt       time.Time                  `json:"service_end_at"`
 	Items              []ItemView                 `json:"items"`
@@ -216,6 +245,24 @@ func (s *Service) load(ctx context.Context, row store.GetBookingDetailRow, aud a
 			v.Ride.PairedBookingID = &paired[0]
 		}
 	}
+	if b.ServiceType == serviceTypeRental {
+		d, err := q.GetRentalDetails(ctx, b.ID)
+		if err != nil {
+			return v, fmt.Errorf("get rental details: %w", err)
+		}
+		v.Rental = &RentalView{
+			VehicleModelID: d.VehicleModelID, ModelName: d.ModelName,
+			PickupPointID: d.PickupPointID, PickupPointName: d.PickupPointName, PickupAddress: d.PickupAddress,
+			PickupAt: d.PickupAt, ReturnAt: d.ReturnAt, Days: int(d.Days),
+			DestinationProvinceCode: d.DestinationProvinceCode,
+		}
+	}
+	if b.BookingMode == bookingModeRequest {
+		v.Request = &RequestView{
+			ResponseDueAt: b.ResponseDueAt, PaymentDueAt: b.PaymentDueAt,
+			AcceptedAt: b.AcceptedAt, RejectedAt: b.RejectedAt, RejectReason: b.RejectReason,
+		}
+	}
 	items, err := q.ListBookingItems(ctx, b.ID)
 	if err != nil {
 		return v, fmt.Errorf("list booking items: %w", err)
@@ -228,7 +275,7 @@ func (s *Service) load(ctx context.Context, row store.GetBookingDetailRow, aud a
 		}
 	}
 	// The payment link is the customer's only.
-	if aud == forCustomer && b.Status == StatusPendingPayment {
+	if aud == forCustomer && (b.Status == StatusPendingPayment || b.Status == StatusAwaitingPayment) {
 		p, err := s.payments.PendingForCheckout(ctx, b.CheckoutID)
 		if err != nil {
 			return v, err
@@ -239,7 +286,8 @@ func (s *Service) load(ctx context.Context, row store.GetBookingDetailRow, aud a
 	}
 	switch aud {
 	case forCustomer:
-		if b.Status == StatusConfirmed || b.Status == StatusCheckedIn || b.Status == StatusCompleted {
+		switch b.Status {
+		case StatusConfirmed, StatusCheckedIn, StatusInService, StatusCompleted:
 			tok := b.QrToken
 			v.QRToken = &tok
 		}
@@ -258,6 +306,9 @@ func (s *Service) load(ctx context.Context, row store.GetBookingDetailRow, aud a
 			legs[i] = r.Booking
 		}
 		v.CanCancel = rideCancelBlock(legs, s.clock.Now(), true) == nil
+	} else if requestWithdrawable(b) {
+		// Withdrawn for free while unpaid; only the customer withdraws.
+		v.CanCancel = aud == forCustomer
 	} else {
 		v.CanCancel = canCancel(b, s.clock.Now())
 	}

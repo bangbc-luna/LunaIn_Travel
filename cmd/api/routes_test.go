@@ -368,6 +368,7 @@ func TestPublicRoutes(t *testing.T) {
 var customerBookingRoutes = []route{
 	{"POST /v1/bookings/attraction", "/v1/bookings/attraction"},
 	{"POST /v1/bookings/ride", "/v1/bookings/ride"},
+	{"POST /v1/bookings/rental", "/v1/bookings/rental"},
 	{"GET /v1/bookings", "/v1/bookings"},
 	{"GET /v1/bookings/{id}", "/v1/bookings/" + uuid.Nil.String()},
 	{"POST /v1/bookings/{id}/pay", "/v1/bookings/" + uuid.Nil.String() + "/pay"},

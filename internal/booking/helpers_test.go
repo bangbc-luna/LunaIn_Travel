@@ -107,7 +107,7 @@ func newBareEnv(t *testing.T) *env {
 	require.NoError(t, err)
 	svc := booking.NewService(booking.Deps{
 		Pool: pool, Clock: clk, Listings: lSvc, Catalog: cat, Settings: settings.NewService(pool, clk),
-		Identity: idSvc, Payments: paySvc, Ledger: ledgerSvc, Jobs: jobClient,
+		Identity: idSvc, Payments: paySvc, Ledger: ledgerSvc, Partners: pSvc, Jobs: jobClient,
 	})
 	mux := http.NewServeMux()
 	svc.CustomerRoutes(mux, iss)

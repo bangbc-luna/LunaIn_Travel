@@ -120,7 +120,7 @@ func (s *Service) cancelRideCheckout(ctx context.Context, bookingID uuid.UUID, o
 				return err
 			}
 		}
-		if err := s.lockCheckoutTrips(ctx, tx, b.CheckoutID); err != nil {
+		if err := s.lockCheckoutCapacity(ctx, tx, b.CheckoutID); err != nil {
 			return err
 		}
 		co, err := q.LockCheckout(ctx, b.CheckoutID)
