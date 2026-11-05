@@ -219,3 +219,6 @@ JOIN bookings b ON b.id = d.booking_id
 WHERE d.time_slot_id = @time_slot_id AND d.visit_date >= (@from_date::text)::date
   AND (@weekdays::int & (1 << (extract(isodow FROM d.visit_date)::int - 1))) <> 0
   AND b.status IN ('pending_payment', 'confirmed');
+
+-- name: GetRideDetails :one
+SELECT * FROM booking_ride_details WHERE booking_id = @booking_id;

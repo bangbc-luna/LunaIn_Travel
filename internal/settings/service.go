@@ -49,6 +49,7 @@ type Settings struct {
 	ReleaseDelayDays           int   `json:"release_delay_days"`
 	MinPayoutAmount            int64 `json:"min_payout_amount"`
 	RescheduleWindowDays       int   `json:"reschedule_window_days"`
+	RideBookingCutoffMinutes   int   `json:"ride_booking_cutoff_minutes"`
 }
 
 // Patch is a partial update: nil fields keep their current value.
@@ -64,6 +65,7 @@ type Patch struct {
 	ReleaseDelayDays           *int   `json:"release_delay_days"`
 	MinPayoutAmount            *int64 `json:"min_payout_amount"`
 	RescheduleWindowDays       *int   `json:"reschedule_window_days"`
+	RideBookingCutoffMinutes   *int   `json:"ride_booking_cutoff_minutes"`
 }
 
 // Holiday is one catalog entry; Date is formatted YYYY-MM-DD.
@@ -101,6 +103,7 @@ func fromRow(r store.PlatformSetting) Settings {
 		ReleaseDelayDays:           int(r.ReleaseDelayDays),
 		MinPayoutAmount:            r.MinPayoutAmount,
 		RescheduleWindowDays:       int(r.RescheduleWindowDays),
+		RideBookingCutoffMinutes:   int(r.RideBookingCutoffMinutes),
 	}
 }
 
@@ -139,6 +142,7 @@ func (p Patch) apply(cur Settings) Settings {
 	setInt(&cur.CharterAutoCompleteHours, p.CharterAutoCompleteHours)
 	setInt(&cur.ReleaseDelayDays, p.ReleaseDelayDays)
 	setInt(&cur.RescheduleWindowDays, p.RescheduleWindowDays)
+	setInt(&cur.RideBookingCutoffMinutes, p.RideBookingCutoffMinutes)
 	if p.MinPayoutAmount != nil {
 		cur.MinPayoutAmount = *p.MinPayoutAmount
 	}
@@ -169,6 +173,7 @@ func (v Settings) validate() error {
 		{"charter_late_confirm_min_hours", v.CharterLateConfirmMinHours},
 		{"ride_no_show_after_minutes", v.RideNoShowAfterMinutes},
 		{"release_delay_days", v.ReleaseDelayDays},
+		{"ride_booking_cutoff_minutes", v.RideBookingCutoffMinutes},
 	}
 	for _, f := range positive {
 		if f.val <= 0 {
@@ -220,6 +225,7 @@ func (s *Service) Update(ctx context.Context, actor uuid.UUID, p Patch) (Setting
 			ReleaseDelayDays:           int32(after.ReleaseDelayDays),
 			MinPayoutAmount:            after.MinPayoutAmount,
 			RescheduleWindowDays:       int32(after.RescheduleWindowDays),
+			RideBookingCutoffMinutes:   int32(after.RideBookingCutoffMinutes),
 			UpdatedBy:                  pgtype.UUID{Bytes: actor, Valid: true},
 			Now:                        now,
 		}); err != nil {

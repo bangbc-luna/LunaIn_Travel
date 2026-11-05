@@ -316,6 +316,32 @@ func (q *Queries) GetPublicListingBySlug(ctx context.Context, slug string) (GetP
 	return i, err
 }
 
+const getRideTrip = `-- name: GetRideTrip :one
+SELECT id, listing_id, schedule_id, departure_at, seat_capacity, seats_reserved, price_per_seat, status, cancelled_reason, cancelled_at, cancelled_by, cancel_source, created_at, updated_at FROM ride_trips WHERE id = $1
+`
+
+func (q *Queries) GetRideTrip(ctx context.Context, id uuid.UUID) (RideTrip, error) {
+	row := q.db.QueryRow(ctx, getRideTrip, id)
+	var i RideTrip
+	err := row.Scan(
+		&i.ID,
+		&i.ListingID,
+		&i.ScheduleID,
+		&i.DepartureAt,
+		&i.SeatCapacity,
+		&i.SeatsReserved,
+		&i.PricePerSeat,
+		&i.Status,
+		&i.CancelledReason,
+		&i.CancelledAt,
+		&i.CancelledBy,
+		&i.CancelSource,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getTicketType = `-- name: GetTicketType :one
 SELECT id, listing_id, name, description, audience, price, active, sort_order, created_at, updated_at FROM attraction_ticket_types WHERE id = $1 AND listing_id = $2
 `

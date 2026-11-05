@@ -312,6 +312,27 @@ func (q *Queries) GetIdempotencyKey(ctx context.Context, arg GetIdempotencyKeyPa
 	return i, err
 }
 
+const getRideDetails = `-- name: GetRideDetails :one
+SELECT booking_id, listing_id, trip_id, seats, direction, origin_name, dest_name, created_at, updated_at FROM booking_ride_details WHERE booking_id = $1
+`
+
+func (q *Queries) GetRideDetails(ctx context.Context, bookingID uuid.UUID) (BookingRideDetail, error) {
+	row := q.db.QueryRow(ctx, getRideDetails, bookingID)
+	var i BookingRideDetail
+	err := row.Scan(
+		&i.BookingID,
+		&i.ListingID,
+		&i.TripID,
+		&i.Seats,
+		&i.Direction,
+		&i.OriginName,
+		&i.DestName,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const hasReschedule = `-- name: HasReschedule :one
 SELECT EXISTS (SELECT 1 FROM booking_reschedules WHERE booking_id = $1)
 `

@@ -267,3 +267,6 @@ SELECT * FROM listings WHERE id = @id FOR SHARE;
 
 -- name: IsListingVisible :one
 SELECT EXISTS (SELECT 1 FROM visible_listings WHERE id = @id);
+
+-- name: GetRideTrip :one
+SELECT * FROM ride_trips WHERE id = @id;

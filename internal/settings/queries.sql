@@ -17,6 +17,7 @@ UPDATE platform_settings SET
     release_delay_days             = @release_delay_days,
     min_payout_amount              = @min_payout_amount,
     reschedule_window_days         = @reschedule_window_days,
+    ride_booking_cutoff_minutes    = @ride_booking_cutoff_minutes,
     updated_by                     = @updated_by,
     updated_at                     = @now
 WHERE id = 1;

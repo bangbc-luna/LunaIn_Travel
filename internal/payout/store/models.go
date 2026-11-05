@@ -142,6 +142,18 @@ type BookingReschedule struct {
 	UpdatedAt     time.Time
 }
 
+type BookingRideDetail struct {
+	BookingID  uuid.UUID
+	ListingID  uuid.UUID
+	TripID     uuid.UUID
+	Seats      int32
+	Direction  string
+	OriginName string
+	DestName   string
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
+}
+
 type BookingSettlement struct {
 	BookingID    uuid.UUID
 	PartnerID    uuid.UUID
@@ -497,6 +509,7 @@ type PlatformSetting struct {
 	UpdatedBy                  *uuid.UUID
 	CreatedAt                  time.Time
 	UpdatedAt                  time.Time
+	RideBookingCutoffMinutes   int32
 }
 
 type Province struct {
@@ -540,6 +553,54 @@ type Refund struct {
 	UpdatedAt             time.Time
 	BankInfoReminderCount int32
 	BankInfoRemindedAt    *time.Time
+}
+
+type RideRoute struct {
+	ListingID          uuid.UUID
+	OriginProvinceCode string
+	OriginWardCode     string
+	OriginName         string
+	OriginAddress      string
+	DestProvinceCode   string
+	DestWardCode       string
+	DestName           string
+	DestAddress        string
+	DurationMinutes    int32
+	VehicleDescription string
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
+}
+
+type RideSchedule struct {
+	ID             uuid.UUID
+	ListingID      uuid.UUID
+	DepartureTime  pgtype.Time
+	Weekdays       int16
+	SeatCapacity   int32
+	PricePerSeat   int64
+	ValidFrom      pgtype.Date
+	ValidTo        pgtype.Date
+	Active         bool
+	GeneratedUntil pgtype.Date
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
+type RideTrip struct {
+	ID              uuid.UUID
+	ListingID       uuid.UUID
+	ScheduleID      *uuid.UUID
+	DepartureAt     time.Time
+	SeatCapacity    int32
+	SeatsReserved   int32
+	PricePerSeat    int64
+	Status          string
+	CancelledReason *string
+	CancelledAt     *time.Time
+	CancelledBy     *uuid.UUID
+	CancelSource    *string
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
 }
 
 type ServiceType struct {

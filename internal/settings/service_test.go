@@ -66,6 +66,7 @@ func TestGet_ReturnsSeededDefaults(t *testing.T) {
 	require.Equal(t, 1, s.ReleaseDelayDays)
 	require.Equal(t, int64(100000), s.MinPayoutAmount)
 	require.Equal(t, 14, s.RescheduleWindowDays)
+	require.Equal(t, 60, s.RideBookingCutoffMinutes)
 }
 
 func TestUpdate_PartialAndAudited(t *testing.T) {
@@ -187,4 +188,29 @@ func TestAddHoliday_NameLimit(t *testing.T) {
 	list, err := e.Svc.ListHolidays(ctx, 2026)
 	require.NoError(t, err)
 	require.Equal(t, strings.Repeat("ễ", 100), list[0].Name)
+}
+
+func TestUpdate_RideBookingCutoff(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+
+	got, err := e.Svc.Update(ctx, e.Admin, settings.Patch{RideBookingCutoffMinutes: ptr(0)})
+	require.NoError(t, err)
+	require.Equal(t, 0, got.RideBookingCutoffMinutes)
+
+	got, err = e.Svc.Update(ctx, e.Admin, settings.Patch{RideBookingCutoffMinutes: ptr(120)})
+	require.NoError(t, err)
+	require.Equal(t, 120, got.RideBookingCutoffMinutes)
+	again, err := e.Svc.Get(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 120, again.RideBookingCutoffMinutes)
+
+	_, err = e.Svc.Update(ctx, e.Admin, settings.Patch{RideBookingCutoffMinutes: ptr(-1)})
+	status, code := appCode(t, err)
+	require.Equal(t, http.StatusUnprocessableEntity, status)
+	require.Equal(t, "invalid_settings", code)
+	require.Contains(t, err.Error(), "ride_booking_cutoff_minutes")
+	again, err = e.Svc.Get(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 120, again.RideBookingCutoffMinutes)
 }
