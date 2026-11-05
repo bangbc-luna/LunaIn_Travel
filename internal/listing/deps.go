@@ -49,7 +49,9 @@ type FileChecker interface {
 // calendar dates.
 type BookingGuard interface {
 	ActiveBookingsOnDate(ctx context.Context, tx pgx.Tx, listingID uuid.UUID, date time.Time) (int, error)
-	ActiveBookingsForSlot(ctx context.Context, tx pgx.Tx, slotID uuid.UUID, from time.Time) (int, error)
+	// weekdays is a mask (Monday = bit 0 ... Sunday = bit 6): only visit
+	// dates on those weekdays count.
+	ActiveBookingsForSlot(ctx context.Context, tx pgx.Tx, slotID uuid.UUID, from time.Time, weekdays int) (int, error)
 }
 
 // Deps are the collaborators of Service.

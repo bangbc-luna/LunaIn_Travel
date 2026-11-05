@@ -197,7 +197,7 @@ func (s *Service) reconfirmChecks(ctx context.Context, tx pgx.Tx, rows []store.L
 }
 
 // slotStillOffered: the booking's service has not started and its time slot
-// still runs on the visit date.
+// still runs on the visit date at the booked start and end times.
 func (s *Service) slotStillOffered(ctx context.Context, tx pgx.Tx, r store.ListCheckoutBookingsRow, now time.Time) (bool, error) {
 	b := r.Booking
 	if b.ServiceType != serviceTypeAttraction || r.TimeSlotID == nil || !b.ServiceStartAt.After(now) {
@@ -211,7 +211,21 @@ func (s *Service) slotStillOffered(ctx context.Context, tx pgx.Tx, r store.ListC
 	if err != nil {
 		return false, err
 	}
-	return slices.ContainsFunc(slots, func(sl listing.TimeSlot) bool { return sl.ID == *r.TimeSlotID }), nil
+	i := slices.IndexFunc(slots, func(sl listing.TimeSlot) bool { return sl.ID == *r.TimeSlotID })
+	if i < 0 {
+		return false, nil
+	}
+	// The slot's times may have changed after the hold expired (the booking
+	// guard no longer counted it): re-confirm only the times that were sold.
+	start, err := slots[i].StartAt(day)
+	if err != nil {
+		return false, err
+	}
+	end, err := slots[i].EndAt(day)
+	if err != nil {
+		return false, err
+	}
+	return start.Equal(b.ServiceStartAt) && end.Equal(b.ServiceEndAt), nil
 }
 
 // confirmation is one HandlePaid call after the locks were taken.

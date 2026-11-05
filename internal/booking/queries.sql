@@ -195,9 +195,12 @@ JOIN bookings b ON b.id = d.booking_id
 WHERE d.listing_id = @listing_id AND d.visit_date = (@visit_date::text)::date
   AND b.status IN ('pending_payment', 'confirmed');
 
--- BookingGuard: active bookings on a time slot from a Vietnam date on.
+-- BookingGuard: active bookings on a time slot from a Vietnam date on whose
+-- visit date's weekday is in the mask (isodow 1 = Monday = bit 0, as
+-- listing.weekdayBit).
 -- name: CountActiveBookingsForSlot :one
 SELECT count(*)::int FROM booking_attraction_details d
 JOIN bookings b ON b.id = d.booking_id
 WHERE d.time_slot_id = @time_slot_id AND d.visit_date >= (@from_date::text)::date
+  AND (@weekdays::int & (1 << (extract(isodow FROM d.visit_date)::int - 1))) <> 0
   AND b.status IN ('pending_payment', 'confirmed');

@@ -73,17 +73,21 @@ const countActiveBookingsForSlot = `-- name: CountActiveBookingsForSlot :one
 SELECT count(*)::int FROM booking_attraction_details d
 JOIN bookings b ON b.id = d.booking_id
 WHERE d.time_slot_id = $1 AND d.visit_date >= ($2::text)::date
+  AND ($3::int & (1 << (extract(isodow FROM d.visit_date)::int - 1))) <> 0
   AND b.status IN ('pending_payment', 'confirmed')
 `
 
 type CountActiveBookingsForSlotParams struct {
 	TimeSlotID uuid.UUID
 	FromDate   string
+	Weekdays   int32
 }
 
-// BookingGuard: active bookings on a time slot from a Vietnam date on.
+// BookingGuard: active bookings on a time slot from a Vietnam date on whose
+// visit date's weekday is in the mask (isodow 1 = Monday = bit 0, as
+// listing.weekdayBit).
 func (q *Queries) CountActiveBookingsForSlot(ctx context.Context, arg CountActiveBookingsForSlotParams) (int32, error) {
-	row := q.db.QueryRow(ctx, countActiveBookingsForSlot, arg.TimeSlotID, arg.FromDate)
+	row := q.db.QueryRow(ctx, countActiveBookingsForSlot, arg.TimeSlotID, arg.FromDate, arg.Weekdays)
 	var column_1 int32
 	err := row.Scan(&column_1)
 	return column_1, err

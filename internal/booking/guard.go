@@ -33,10 +33,11 @@ func (Guard) ActiveBookingsOnDate(ctx context.Context, tx pgx.Tx, listingID uuid
 }
 
 // ActiveBookingsForSlot counts the active bookings on slotID whose visit date
-// is on or after the Vietnam calendar date of from.
-func (Guard) ActiveBookingsForSlot(ctx context.Context, tx pgx.Tx, slotID uuid.UUID, from time.Time) (int, error) {
+// is on or after the Vietnam calendar date of from and falls on a weekday in
+// the weekdays mask (Monday = bit 0 ... Sunday = bit 6).
+func (Guard) ActiveBookingsForSlot(ctx context.Context, tx pgx.Tx, slotID uuid.UUID, from time.Time, weekdays int) (int, error) {
 	n, err := store.New(tx).CountActiveBookingsForSlot(ctx, store.CountActiveBookingsForSlotParams{
-		TimeSlotID: slotID, FromDate: from.In(clock.VN).Format(dateLayout),
+		TimeSlotID: slotID, FromDate: from.In(clock.VN).Format(dateLayout), Weekdays: int32(weekdays),
 	})
 	if err != nil {
 		return 0, fmt.Errorf("count active bookings for slot: %w", err)

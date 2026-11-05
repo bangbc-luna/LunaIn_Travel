@@ -236,13 +236,16 @@ func (s *Service) guardDate(ctx context.Context, tx pgx.Tx, listingID uuid.UUID,
 	return nil
 }
 
+// allWeekdays is the weekday mask of every day (Monday = bit 0, weekdayBit).
+const allWeekdays = 0b1111111
+
 // guardSlot rejects a change to slotID while it has active bookings from today
-// (Vietnam) on.
-func (s *Service) guardSlot(ctx context.Context, tx pgx.Tx, slotID uuid.UUID, now time.Time) error {
+// (Vietnam) on whose visit date falls on a weekday in the weekdays mask.
+func (s *Service) guardSlot(ctx context.Context, tx pgx.Tx, slotID uuid.UUID, now time.Time, weekdays int) error {
 	if s.bookings == nil {
 		return nil
 	}
-	n, err := s.bookings.ActiveBookingsForSlot(ctx, tx, slotID, vnDate(now).Time)
+	n, err := s.bookings.ActiveBookingsForSlot(ctx, tx, slotID, vnDate(now).Time, weekdays)
 	if err != nil {
 		return err
 	}
@@ -609,8 +612,16 @@ func (s *Service) UpdateTimeSlot(ctx context.Context, partnerID, actor, listingI
 		if err := checkOverlap(ctx, q, listingID, slotID, f); err != nil {
 			return err
 		}
-		if f.Start != old.Start || f.End != old.End || f.Weekdays != old.Weekdays || (old.Active && !f.Active) {
-			if err := s.guardSlot(ctx, tx, slotID, now); err != nil {
+		// A time change or deactivation strands every booking on the slot; a
+		// weekday edit only those on removed weekdays; adding weekdays none.
+		guard := 0
+		if removed := old.Weekdays &^ f.Weekdays; f.Start != old.Start || f.End != old.End || (old.Active && !f.Active) {
+			guard = allWeekdays
+		} else if removed != 0 {
+			guard = removed
+		}
+		if guard != 0 {
+			if err := s.guardSlot(ctx, tx, slotID, now, guard); err != nil {
 				return err
 			}
 		}

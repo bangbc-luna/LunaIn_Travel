@@ -105,3 +105,32 @@ func TestRescheduleWaitsForPartnerScheduleWrite(t *testing.T) {
 	requireErr(t, <-done, http.StatusUnprocessableEntity, "slot_unavailable")
 	require.Equal(t, visitDate, e.str(t, `SELECT visit_date::text FROM booking_attraction_details WHERE booking_id = $1`, v.ID))
 }
+
+// Ruling 24: a weekday edit is guarded only for the removed weekdays; adding
+// weekdays is always allowed. The fixture booking is on Saturday 2026-11-07.
+func TestSlotWeekdayGuardChecksOnlyRemovedWeekdays(t *testing.T) {
+	e := newEnv(t)
+	e.paidBooking(t)
+	noMonday, all, noSaturday := 0b1111110, everyDay, 0b1011111
+
+	require.NoError(t, e.patchSlot(listing.TimeSlotPatch{Weekdays: &noMonday}), "remove an unbooked weekday")
+	require.NoError(t, e.patchSlot(listing.TimeSlotPatch{Weekdays: &all}), "add a weekday with bookings on the slot")
+	requireErr(t, e.patchSlot(listing.TimeSlotPatch{Weekdays: &noSaturday}), http.StatusConflict, "has_active_bookings")
+	end := "18:00"
+	requireErr(t, e.patchSlot(listing.TimeSlotPatch{EndTime: &end}), http.StatusConflict, "has_active_bookings")
+	require.Equal(t, everyDay, e.count(t, `SELECT weekdays FROM attraction_time_slots WHERE id = $1`, e.Slot.ID))
+}
+
+// Ruling 25: a slot whose times changed after the hold expired is not the
+// service that was sold: the late transfer is refunded in full, no ledger.
+func TestLatePaid_RefundsWhenSlotTimeChanged(t *testing.T) {
+	e := newEnv(t)
+	v := e.create(t, "k")
+	oc := e.orderCode(t, v.ID)
+	e.expire(t, v.ID)
+	start := "09:00"
+	require.NoError(t, e.patchSlot(listing.TimeSlotPatch{StartTime: &start}), "the expired booking no longer blocks")
+	e.pay(t, oc, gross)
+	e.requireLateRefund(t, v, oc)
+	require.NoError(t, e.Ledger.Verify(context.Background(), e.P.ID))
+}
