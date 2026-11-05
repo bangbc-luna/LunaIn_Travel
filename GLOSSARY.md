@@ -48,6 +48,12 @@ _Avoid_: Bus ticket, shuttle
 Một lần chạy cụ thể của một Route vào một ngày giờ khởi hành, có số ghế giới hạn.
 _Avoid_: Departure, journey
 
+**Ride Schedule** (Lịch chạy):
+Lịch lặp của một Route (giờ khởi hành, các thứ trong tuần, khoảng ngày hiệu lực, số ghế, giá mỗi ghế). Hệ thống sinh sẵn các Trip từ lịch này cho 60 ngày tới.
+
+**Round Trip** (Khứ hồi):
+Hai Booking riêng (chiều đi và chiều về) trong cùng một Checkout, thanh toán chung một lần. Chiều về là Route ngược lại của cùng đối tác, cùng số ghế; hai chiều được hủy cùng nhau.
+
 **Private Charter** (Xe bao chuyến):
 Loại dịch vụ xe có tài xế mà khách bao nguyên xe; giá tính theo km cộng phụ phí.
 _Avoid_: Taxi, private transfer
