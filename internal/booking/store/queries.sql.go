@@ -69,6 +69,47 @@ func (q *Queries) ConfirmBooking(ctx context.Context, arg ConfirmBookingParams) 
 	return err
 }
 
+const countActiveBookingsForSlot = `-- name: CountActiveBookingsForSlot :one
+SELECT count(*)::int FROM booking_attraction_details d
+JOIN bookings b ON b.id = d.booking_id
+WHERE d.time_slot_id = $1 AND d.visit_date >= ($2::text)::date
+  AND b.status IN ('pending_payment', 'confirmed')
+`
+
+type CountActiveBookingsForSlotParams struct {
+	TimeSlotID uuid.UUID
+	FromDate   string
+}
+
+// BookingGuard: active bookings on a time slot from a Vietnam date on.
+func (q *Queries) CountActiveBookingsForSlot(ctx context.Context, arg CountActiveBookingsForSlotParams) (int32, error) {
+	row := q.db.QueryRow(ctx, countActiveBookingsForSlot, arg.TimeSlotID, arg.FromDate)
+	var column_1 int32
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
+const countActiveBookingsOnDate = `-- name: CountActiveBookingsOnDate :one
+SELECT count(*)::int FROM booking_attraction_details d
+JOIN bookings b ON b.id = d.booking_id
+WHERE d.listing_id = $1 AND d.visit_date = ($2::text)::date
+  AND b.status IN ('pending_payment', 'confirmed')
+`
+
+type CountActiveBookingsOnDateParams struct {
+	ListingID uuid.UUID
+	VisitDate string
+}
+
+// BookingGuard: active (pending_payment, confirmed) bookings of a listing on
+// a Vietnam calendar date.
+func (q *Queries) CountActiveBookingsOnDate(ctx context.Context, arg CountActiveBookingsOnDateParams) (int32, error) {
+	row := q.db.QueryRow(ctx, countActiveBookingsOnDate, arg.ListingID, arg.VisitDate)
+	var column_1 int32
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const expireBooking = `-- name: ExpireBooking :exec
 UPDATE bookings SET status = 'expired', updated_at = $1 WHERE id = $2
 `

@@ -186,3 +186,18 @@ WHERE booking_id = @booking_id;
 UPDATE bookings
 SET status = 'completed', checked_in_at = @now::timestamptz, completed_at = @now::timestamptz, updated_at = @now
 WHERE id = @id;
+
+-- BookingGuard: active (pending_payment, confirmed) bookings of a listing on
+-- a Vietnam calendar date.
+-- name: CountActiveBookingsOnDate :one
+SELECT count(*)::int FROM booking_attraction_details d
+JOIN bookings b ON b.id = d.booking_id
+WHERE d.listing_id = @listing_id AND d.visit_date = (@visit_date::text)::date
+  AND b.status IN ('pending_payment', 'confirmed');
+
+-- BookingGuard: active bookings on a time slot from a Vietnam date on.
+-- name: CountActiveBookingsForSlot :one
+SELECT count(*)::int FROM booking_attraction_details d
+JOIN bookings b ON b.id = d.booking_id
+WHERE d.time_slot_id = @time_slot_id AND d.visit_date >= (@from_date::text)::date
+  AND b.status IN ('pending_payment', 'confirmed');

@@ -207,6 +207,7 @@ func serve(log *slog.Logger) error {
 
 	listingSvc := listing.NewService(listing.Deps{
 		Pool: pool, Clock: clock.Real{}, Partners: partnerSvc, Catalog: catSvc, Geo: geoSvc, Files: fileSvc,
+		BookingGuard: booking.Guard{},
 	})
 
 	settingsSvc := settings.NewService(pool, clock.Real{})

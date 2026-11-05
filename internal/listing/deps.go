@@ -5,6 +5,7 @@ package listing
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -41,6 +42,16 @@ type FileChecker interface {
 	PublicURL(ctx context.Context, tx pgx.Tx, id uuid.UUID) (string, error)
 }
 
+// BookingGuard counts active (pending_payment or confirmed) bookings so the
+// partner cannot move or close a schedule that customers already hold.
+// Implemented by booking.Guard. Callers hold the listing FOR NO KEY UPDATE in
+// tx before asking (see AddClosedDate). date and from are read as Vietnam
+// calendar dates.
+type BookingGuard interface {
+	ActiveBookingsOnDate(ctx context.Context, tx pgx.Tx, listingID uuid.UUID, date time.Time) (int, error)
+	ActiveBookingsForSlot(ctx context.Context, tx pgx.Tx, slotID uuid.UUID, from time.Time) (int, error)
+}
+
 // Deps are the collaborators of Service.
 type Deps struct {
 	Pool     *pgxpool.Pool
@@ -49,6 +60,8 @@ type Deps struct {
 	Catalog  ServiceTypeChecker
 	Geo      LocationValidator
 	Files    FileChecker
+	// BookingGuard may be nil (tests without bookings): the checks are skipped.
+	BookingGuard BookingGuard
 }
 
 // Service implements the listing use cases.
@@ -59,9 +72,10 @@ type Service struct {
 	catalog  ServiceTypeChecker
 	geo      LocationValidator
 	files    FileChecker
+	bookings BookingGuard
 }
 
 // NewService builds a Service.
 func NewService(d Deps) *Service {
-	return &Service{pool: d.Pool, clock: d.Clock, partners: d.Partners, catalog: d.Catalog, geo: d.Geo, files: d.Files}
+	return &Service{pool: d.Pool, clock: d.Clock, partners: d.Partners, catalog: d.Catalog, geo: d.Geo, files: d.Files, bookings: d.BookingGuard}
 }

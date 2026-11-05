@@ -94,7 +94,7 @@ func newBareEnv(t *testing.T) *env {
 		Pool: pool, Clock: clk, Users: idSvc, Catalog: cat, Geo: geoSvc, Files: fileSvc,
 	})
 	lSvc := listing.NewService(listing.Deps{
-		Pool: pool, Clock: clk, Partners: pSvc, Catalog: cat, Geo: geoSvc, Files: fileSvc,
+		Pool: pool, Clock: clk, Partners: pSvc, Catalog: cat, Geo: geoSvc, Files: fileSvc, BookingGuard: booking.Guard{},
 	})
 	fake := payment.NewFake()
 	fake.Now = clk.Now

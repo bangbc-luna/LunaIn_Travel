@@ -75,8 +75,8 @@ func rescheduleNotAllowed(msg string) error {
 // attraction details follow the new slot; a booking_reschedules row and the
 // history record the move.
 //
-// Lock order: the slot checks only read listing rows (which come before
-// bookings), then the booking is locked FOR UPDATE and re-checked.
+// Lock order: the listing FOR SHARE (ShareListingLock), the slot checks
+// (reads), then the booking FOR UPDATE, re-checked.
 func (s *Service) Reschedule(ctx context.Context, customerID, bookingID uuid.UUID, visitDate string, slotID uuid.UUID) (BookingView, error) {
 	b, err := store.New(s.pool).GetBooking(ctx, bookingID)
 	if errors.Is(err, pgx.ErrNoRows) || (err == nil && b.CustomerID != customerID) {
@@ -105,6 +105,12 @@ func (s *Service) Reschedule(ctx context.Context, customerID, bookingID uuid.UUI
 		}
 		if day.Before(startOfDayVN(now)) {
 			return ErrVisitDatePast
+		}
+		// Listing FOR SHARE before reading the schedule: a partner closing
+		// the date or changing the slot holds it FOR NO KEY UPDATE while the
+		// booking guard counts, so the two serialize (listing.guardDate).
+		if err := s.listings.ShareListingLock(ctx, tx, b.ListingID); err != nil {
+			return err
 		}
 		slots, err := s.listings.SlotsForDate(ctx, tx, b.ListingID, day)
 		if err != nil {

@@ -70,6 +70,7 @@ func newTestAppEnv(t *testing.T, appEnv string) *testApp {
 	})
 	listingSvc := listing.NewService(listing.Deps{
 		Pool: pool, Clock: clk, Partners: partnerSvc, Catalog: catSvc, Geo: geoSvc, Files: fileSvc,
+		BookingGuard: booking.Guard{},
 	})
 	settingsSvc := settings.NewService(pool, clk)
 	paymentSvc := payment.NewService(pool, clk, payment.NewFake(), nil)
