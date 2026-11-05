@@ -230,15 +230,19 @@ ORDER BY created_at DESC, id DESC
 LIMIT 20;
 
 -- Public search over visible_listings (the single visibility rule, see
--- migration 00010). price_from is the cheapest active ticket type, 0 when
--- there is none (prices are > 0 by CHECK; sqlc cannot type a nullable
+-- migration 00010). price_from is the cheapest active ticket type or, for a
+-- ride, the cheapest active schedule, 0 when there is none (prices are > 0 by
+-- CHECK; sqlc cannot type a nullable
 -- aggregate, so 0 means NULL). With q: ILIKE on the escaped pattern
 -- (ESCAPE '\') or trigram similarity >= 0.3, best match first; without q:
 -- newest first.
 -- name: SearchPublicListings :many
 SELECT sqlc.embed(l),
-       (SELECT COALESCE(min(tt.price), 0) FROM attraction_ticket_types tt
-        WHERE tt.listing_id = l.id AND tt.active)::bigint AS price_from
+       COALESCE((SELECT min(tt.price) FROM attraction_ticket_types tt
+                 WHERE tt.listing_id = l.id AND tt.active),
+                (SELECT min(rs.price_per_seat) FROM ride_schedules rs
+                 WHERE rs.listing_id = l.id AND rs.active),
+                0)::bigint AS price_from
 FROM visible_listings l
 WHERE (sqlc.narg(service_type)::text IS NULL OR l.service_type = sqlc.narg(service_type))
   AND (sqlc.narg(province_code)::text IS NULL OR l.province_code = sqlc.narg(province_code))
@@ -252,8 +256,11 @@ LIMIT @lim OFFSET @off;
 
 -- name: GetPublicListingBySlug :one
 SELECT sqlc.embed(l),
-       (SELECT COALESCE(min(tt.price), 0) FROM attraction_ticket_types tt
-        WHERE tt.listing_id = l.id AND tt.active)::bigint AS price_from
+       COALESCE((SELECT min(tt.price) FROM attraction_ticket_types tt
+                 WHERE tt.listing_id = l.id AND tt.active),
+                (SELECT min(rs.price_per_seat) FROM ride_schedules rs
+                 WHERE rs.listing_id = l.id AND rs.active),
+                0)::bigint AS price_from
 FROM visible_listings l
 WHERE l.slug = @slug;
 
@@ -478,3 +485,29 @@ WHERE id = @id AND status = 'scheduled' AND departure_at > @now
 -- name: ReleaseSeats :execrows
 UPDATE ride_trips SET seats_reserved = seats_reserved - @n::int, updated_at = now()
 WHERE id = @id;
+
+-- Public trip search. The bookable cutoff is read from platform_settings in
+-- the same statement: departure_at > now + max(ride_booking_cutoff_minutes,
+-- hold_minutes + hold_grace_minutes). Ward filters are optional.
+-- name: SearchRideTrips :many
+SELECT t.id AS trip_id, l.id AS listing_id, l.slug, l.title,
+       r.origin_province_code, r.origin_ward_code, r.origin_name, r.origin_address,
+       r.dest_province_code, r.dest_ward_code, r.dest_name, r.dest_address,
+       r.duration_minutes, r.vehicle_description,
+       t.departure_at, t.price_per_seat,
+       (t.seat_capacity - t.seats_reserved)::int AS seats_left
+FROM ride_trips t
+JOIN ride_routes r ON r.listing_id = t.listing_id
+JOIN visible_listings l ON l.id = t.listing_id
+CROSS JOIN (SELECT sqlc.arg(now)::timestamptz + GREATEST(ride_booking_cutoff_minutes, hold_minutes + hold_grace_minutes) * interval '1 minute' AS earliest
+            FROM platform_settings WHERE id = 1) ps
+WHERE t.status = 'scheduled'
+  AND r.origin_province_code = @origin_province
+  AND r.dest_province_code = @dest_province
+  AND (sqlc.narg(origin_ward)::text IS NULL OR r.origin_ward_code = sqlc.narg(origin_ward))
+  AND (sqlc.narg(dest_ward)::text IS NULL OR r.dest_ward_code = sqlc.narg(dest_ward))
+  AND t.departure_at >= @day_start::timestamptz AND t.departure_at < @day_end::timestamptz
+  AND t.departure_at > ps.earliest
+  AND t.seat_capacity - t.seats_reserved >= @seats::int
+ORDER BY t.departure_at, t.price_per_seat, t.id
+LIMIT @lim OFFSET @off;

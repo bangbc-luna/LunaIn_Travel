@@ -362,8 +362,11 @@ func (q *Queries) GetOwnedListing(ctx context.Context, arg GetOwnedListingParams
 
 const getPublicListingBySlug = `-- name: GetPublicListingBySlug :one
 SELECT l.id, l.partner_id, l.service_type, l.title, l.slug, l.summary, l.description, l.cover_file_id, l.province_code, l.ward_code, l.address, l.latitude, l.longitude, l.review_status, l.rejection_reason, l.submitted_at, l.reviewed_at, l.reviewed_by, l.visibility, l.hidden_reason, l.hidden_at, l.hidden_by, l.hidden_from_visibility, l.rating_sum, l.rating_count, l.created_at, l.updated_at,
-       (SELECT COALESCE(min(tt.price), 0) FROM attraction_ticket_types tt
-        WHERE tt.listing_id = l.id AND tt.active)::bigint AS price_from
+       COALESCE((SELECT min(tt.price) FROM attraction_ticket_types tt
+                 WHERE tt.listing_id = l.id AND tt.active),
+                (SELECT min(rs.price_per_seat) FROM ride_schedules rs
+                 WHERE rs.listing_id = l.id AND rs.active),
+                0)::bigint AS price_from
 FROM visible_listings l
 WHERE l.slug = $1
 `
@@ -2005,8 +2008,11 @@ func (q *Queries) ReserveSeats(ctx context.Context, arg ReserveSeatsParams) (int
 
 const searchPublicListings = `-- name: SearchPublicListings :many
 SELECT l.id, l.partner_id, l.service_type, l.title, l.slug, l.summary, l.description, l.cover_file_id, l.province_code, l.ward_code, l.address, l.latitude, l.longitude, l.review_status, l.rejection_reason, l.submitted_at, l.reviewed_at, l.reviewed_by, l.visibility, l.hidden_reason, l.hidden_at, l.hidden_by, l.hidden_from_visibility, l.rating_sum, l.rating_count, l.created_at, l.updated_at,
-       (SELECT COALESCE(min(tt.price), 0) FROM attraction_ticket_types tt
-        WHERE tt.listing_id = l.id AND tt.active)::bigint AS price_from
+       COALESCE((SELECT min(tt.price) FROM attraction_ticket_types tt
+                 WHERE tt.listing_id = l.id AND tt.active),
+                (SELECT min(rs.price_per_seat) FROM ride_schedules rs
+                 WHERE rs.listing_id = l.id AND rs.active),
+                0)::bigint AS price_from
 FROM visible_listings l
 WHERE ($1::text IS NULL OR l.service_type = $1)
   AND ($2::text IS NULL OR l.province_code = $2)
@@ -2034,8 +2040,9 @@ type SearchPublicListingsRow struct {
 }
 
 // Public search over visible_listings (the single visibility rule, see
-// migration 00010). price_from is the cheapest active ticket type, 0 when
-// there is none (prices are > 0 by CHECK; sqlc cannot type a nullable
+// migration 00010). price_from is the cheapest active ticket type or, for a
+// ride, the cheapest active schedule, 0 when there is none (prices are > 0 by
+// CHECK; sqlc cannot type a nullable
 // aggregate, so 0 means NULL). With q: ILIKE on the escaped pattern
 // (ESCAPE '\') or trigram similarity >= 0.3, best match first; without q:
 // newest first.
@@ -2084,6 +2091,115 @@ func (q *Queries) SearchPublicListings(ctx context.Context, arg SearchPublicList
 			&i.VisibleListing.CreatedAt,
 			&i.VisibleListing.UpdatedAt,
 			&i.PriceFrom,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const searchRideTrips = `-- name: SearchRideTrips :many
+SELECT t.id AS trip_id, l.id AS listing_id, l.slug, l.title,
+       r.origin_province_code, r.origin_ward_code, r.origin_name, r.origin_address,
+       r.dest_province_code, r.dest_ward_code, r.dest_name, r.dest_address,
+       r.duration_minutes, r.vehicle_description,
+       t.departure_at, t.price_per_seat,
+       (t.seat_capacity - t.seats_reserved)::int AS seats_left
+FROM ride_trips t
+JOIN ride_routes r ON r.listing_id = t.listing_id
+JOIN visible_listings l ON l.id = t.listing_id
+CROSS JOIN (SELECT $1::timestamptz + GREATEST(ride_booking_cutoff_minutes, hold_minutes + hold_grace_minutes) * interval '1 minute' AS earliest
+            FROM platform_settings WHERE id = 1) ps
+WHERE t.status = 'scheduled'
+  AND r.origin_province_code = $2
+  AND r.dest_province_code = $3
+  AND ($4::text IS NULL OR r.origin_ward_code = $4)
+  AND ($5::text IS NULL OR r.dest_ward_code = $5)
+  AND t.departure_at >= $6::timestamptz AND t.departure_at < $7::timestamptz
+  AND t.departure_at > ps.earliest
+  AND t.seat_capacity - t.seats_reserved >= $8::int
+ORDER BY t.departure_at, t.price_per_seat, t.id
+LIMIT $10 OFFSET $9
+`
+
+type SearchRideTripsParams struct {
+	Now            time.Time
+	OriginProvince string
+	DestProvince   string
+	OriginWard     *string
+	DestWard       *string
+	DayStart       time.Time
+	DayEnd         time.Time
+	Seats          int32
+	Off            int32
+	Lim            int32
+}
+
+type SearchRideTripsRow struct {
+	TripID             uuid.UUID
+	ListingID          uuid.UUID
+	Slug               string
+	Title              string
+	OriginProvinceCode string
+	OriginWardCode     string
+	OriginName         string
+	OriginAddress      string
+	DestProvinceCode   string
+	DestWardCode       string
+	DestName           string
+	DestAddress        string
+	DurationMinutes    int32
+	VehicleDescription string
+	DepartureAt        time.Time
+	PricePerSeat       int64
+	SeatsLeft          int32
+}
+
+// Public trip search. The bookable cutoff is read from platform_settings in
+// the same statement: departure_at > now + max(ride_booking_cutoff_minutes,
+// hold_minutes + hold_grace_minutes). Ward filters are optional.
+func (q *Queries) SearchRideTrips(ctx context.Context, arg SearchRideTripsParams) ([]SearchRideTripsRow, error) {
+	rows, err := q.db.Query(ctx, searchRideTrips,
+		arg.Now,
+		arg.OriginProvince,
+		arg.DestProvince,
+		arg.OriginWard,
+		arg.DestWard,
+		arg.DayStart,
+		arg.DayEnd,
+		arg.Seats,
+		arg.Off,
+		arg.Lim,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []SearchRideTripsRow
+	for rows.Next() {
+		var i SearchRideTripsRow
+		if err := rows.Scan(
+			&i.TripID,
+			&i.ListingID,
+			&i.Slug,
+			&i.Title,
+			&i.OriginProvinceCode,
+			&i.OriginWardCode,
+			&i.OriginName,
+			&i.OriginAddress,
+			&i.DestProvinceCode,
+			&i.DestWardCode,
+			&i.DestName,
+			&i.DestAddress,
+			&i.DurationMinutes,
+			&i.VehicleDescription,
+			&i.DepartureAt,
+			&i.PricePerSeat,
+			&i.SeatsLeft,
 		); err != nil {
 			return nil, err
 		}
