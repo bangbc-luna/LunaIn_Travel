@@ -2,6 +2,7 @@ package booking
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/bangbc-luna/lunain-travel/internal/booking/store"
+	"github.com/bangbc-luna/lunain-travel/internal/listing"
 )
 
 // Capacity rules per service type, kept out of the shared lifecycle code
@@ -83,6 +85,86 @@ func (s *Service) setRentalHold(ctx context.Context, tx pgx.Tx, bookingID uuid.U
 func (s *Service) keepHoldUntil(ctx context.Context, tx pgx.Tx, b store.Booking, until time.Time) error {
 	if b.ServiceType == serviceTypeRental {
 		return s.setRentalHold(ctx, tx, b.ID, true, &until)
+	}
+	return nil
+}
+
+// holdForService makes the capacity hold of a booking that becomes
+// confirmed permanent, in the caller's tx, which holds its capacity lock: a
+// rental booking holds its vehicle with no end (holds_vehicle true,
+// hold_until NULL), also when a late payment re-confirms it after its hold
+// was released. Ride seats stay counted on the trip (reserveRideSeats takes
+// them again after an expiry); an attraction holds nothing.
+func (s *Service) holdForService(ctx context.Context, tx pgx.Tx, b store.Booking) error {
+	if b.ServiceType == serviceTypeRental {
+		return s.setRentalHold(ctx, tx, b.ID, true, nil)
+	}
+	return nil
+}
+
+// rentalModelIDs returns the vehicle models of a checkout's rental bookings,
+// sorted (the lock order); none for another checkout. A booking's model never
+// changes, so the unlocked read is enough.
+func rentalModelIDs(rows []store.ListCheckoutBookingsRow) []uuid.UUID {
+	var ids []uuid.UUID
+	for _, r := range rows {
+		if r.VehicleModelID != nil {
+			ids = append(ids, *r.VehicleModelID)
+		}
+	}
+	return sortedIDs(ids)
+}
+
+// rentalChecks decides, with the checkout's vehicle models locked (models,
+// as locked) and before the checkout is locked, whether each rental booking
+// of rows can be (re-)confirmed by the money arriving now, and records it in
+// rebookable for every rental booking:
+//
+//   - awaiting_payment, not late: yes; its vehicle is still held for it.
+//   - Late (expired, or awaiting_payment past hold_release_at; lateBooking):
+//     only an accepted request (accepted_at set: a request that expired
+//     unanswered was never accepted by the partner), with its listing
+//     bookable (checked by reconfirmChecks; a late booking it did not see is
+//     errStateChanged), not yet picked up (pickup_at > now), and one vehicle
+//     of its model still free over [pickup_at, return_at): the model active
+//     and the peak of the other holds plus one within its quantity
+//     (rentalAvailable, excluding this booking) (spec §8).
+//   - Anything else (requested, rejected, cancelled, ...): no.
+//
+// A checkout holds a single rental booking (CreateRental), so the
+// availability checks of its late bookings never compete with each other.
+func (s *Service) rentalChecks(ctx context.Context, tx pgx.Tx, rows []store.ListCheckoutBookingsRow, models map[uuid.UUID]listing.RentalModel, rebookable map[uuid.UUID]bool, now time.Time) error {
+	q := store.New(tx)
+	for _, r := range rows {
+		b := r.Booking
+		if b.ServiceType != serviceTypeRental {
+			continue
+		}
+		if r.VehicleModelID == nil || r.RentalPickupAt == nil || r.RentalReturnAt == nil {
+			return fmt.Errorf("booking: rental booking %s has no rental details", b.ID)
+		}
+		ok := false
+		switch {
+		case lateBooking(b, now):
+			listed, checked := rebookable[b.ID]
+			if !checked {
+				return errStateChanged
+			}
+			model, found := models[*r.VehicleModelID]
+			ok = listed && found && b.AcceptedAt != nil && r.RentalPickupAt.After(now)
+			if ok {
+				err := s.rentalAvailable(ctx, q, model, *r.RentalPickupAt, *r.RentalReturnAt, now, b.ID)
+				switch {
+				case errors.Is(err, ErrVehicleUnavailable):
+					ok = false
+				case err != nil:
+					return err
+				}
+			}
+		case b.Status == StatusAwaitingPayment:
+			ok = true
+		}
+		rebookable[b.ID] = ok
 	}
 	return nil
 }

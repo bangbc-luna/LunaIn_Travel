@@ -647,13 +647,21 @@ func (s *Service) Pay(ctx context.Context, customerID, id uuid.UUID) (BookingVie
 	if b.HoldExpiresAt == nil || !s.clock.Now().Before(*b.HoldExpiresAt) {
 		return BookingView{}, ErrHoldExpired
 	}
-	_, err = s.payments.StartPayment(ctx, b.CheckoutID)
+	p, err := s.payments.StartPayment(ctx, b.CheckoutID)
 	if errors.Is(err, payment.ErrPaymentNotFound) {
 		// No pending payment: after a refunded underpayment a new one is
 		// reserved with the same deadline (M-4), then its link created.
 		if _, err = s.payments.ReissueAfterMismatch(ctx, b.CheckoutID); err == nil {
-			_, err = s.payments.StartPayment(ctx, b.CheckoutID)
+			p, err = s.payments.StartPayment(ctx, b.CheckoutID)
 		}
+	}
+	if err == nil && (p.Status == payment.StatusCancelled || p.Status == payment.StatusExpired) {
+		// The payment was cancelled (a withdraw) or expired while its link
+		// was being created: the link may now be live at the provider, after
+		// the withdraw or expiry already cancelled links. Cancel it (money
+		// paid on it anyway is refunded by the webhook).
+		s.cancelLink(ctx, p.OrderCode)
+		return BookingView{}, ErrBookingNotPayable
 	}
 	if err != nil {
 		if errors.Is(err, payment.ErrPaymentExpired) {
