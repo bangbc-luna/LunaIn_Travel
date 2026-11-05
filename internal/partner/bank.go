@@ -4,22 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"regexp"
-	"strings"
 	"time"
-	"unicode"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"golang.org/x/text/unicode/norm"
 
 	"github.com/bangbc-luna/lunain-travel/internal/partner/store"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/db"
-)
-
-var (
-	bankBINRe       = regexp.MustCompile(`^[0-9]{6}$`)
-	accountNumberRe = regexp.MustCompile(`^[0-9]{6,19}$`)
+	"github.com/bangbc-luna/lunain-travel/internal/platform/validate"
 )
 
 // BankAccount is one payout account of a partner. Exactly one row per
@@ -42,43 +34,19 @@ type BankAccountInput struct {
 	AccountHolder string `json:"account_holder"`
 }
 
-// NormalizeAccountHolder renders a name the way it is printed on a bank card:
-// upper case without Vietnamese diacritics (đ becomes D) and with runs of
-// whitespace collapsed to one space.
-func NormalizeAccountHolder(s string) string {
-	var b strings.Builder
-	for _, r := range norm.NFD.String(s) {
-		switch {
-		case unicode.Is(unicode.Mn, r):
-			continue
-		case r == 'đ' || r == 'Đ':
-			r = 'D'
-		default:
-			r = unicode.ToUpper(r)
-		}
-		b.WriteRune(r)
-	}
-	return strings.Join(strings.Fields(b.String()), " ")
-}
+// NormalizeAccountHolder renders a name the way it is printed on a bank card
+// (see validate.NormalizeAccountHolder).
+func NormalizeAccountHolder(s string) string { return validate.NormalizeAccountHolder(s) }
 
 func (in BankAccountInput) normalize() (BankAccountInput, error) {
-	out := BankAccountInput{
-		BankBIN:       strings.TrimSpace(in.BankBIN),
-		AccountNumber: strings.TrimSpace(in.AccountNumber),
-		AccountHolder: NormalizeAccountHolder(in.AccountHolder),
-	}
-	if !bankBINRe.MatchString(out.BankBIN) {
-		return out, invalidBankAccount("bank_bin phải gồm đúng 6 chữ số")
-	}
-	if !accountNumberRe.MatchString(out.AccountNumber) {
-		return out, invalidBankAccount("account_number phải gồm 6 đến 19 chữ số")
+	acc, msg := validate.NormalizeBankAccount(in.BankBIN, in.AccountNumber, in.AccountHolder)
+	out := BankAccountInput{BankBIN: acc.BIN, AccountNumber: acc.Number, AccountHolder: acc.Holder}
+	if msg != "" {
+		return out, invalidBankAccount(msg)
 	}
 	var err error
 	if out.BankName, err = normalizeText(in.BankName, "bank_name", true, maxTextLen); err != nil {
 		return out, invalidBankAccount("bank_name không được để trống (tối đa 200 ký tự)")
-	}
-	if out.AccountHolder == "" || len([]rune(out.AccountHolder)) > maxTextLen {
-		return out, invalidBankAccount("account_holder không được để trống (tối đa 200 ký tự)")
 	}
 	return out, nil
 }
