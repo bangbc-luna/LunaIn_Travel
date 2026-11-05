@@ -12,6 +12,23 @@ import (
 	"github.com/google/uuid"
 )
 
+const completeCheckIn = `-- name: CompleteCheckIn :exec
+UPDATE bookings
+SET status = 'completed', checked_in_at = $1::timestamptz, completed_at = $1::timestamptz, updated_at = $1
+WHERE id = $2
+`
+
+type CompleteCheckInParams struct {
+	Now time.Time
+	ID  uuid.UUID
+}
+
+// Attraction check-in completes the booking at once.
+func (q *Queries) CompleteCheckIn(ctx context.Context, arg CompleteCheckInParams) error {
+	_, err := q.db.Exec(ctx, completeCheckIn, arg.Now, arg.ID)
+	return err
+}
+
 const confirmBooking = `-- name: ConfirmBooking :exec
 UPDATE bookings SET status = 'confirmed', confirmed_at = $1::timestamptz, updated_at = $1 WHERE id = $2
 `
@@ -638,6 +655,78 @@ func (q *Queries) ListCheckoutBookings(ctx context.Context, checkoutID uuid.UUID
 	return items, nil
 }
 
+const listHoldsToRelease = `-- name: ListHoldsToRelease :many
+SELECT id, checkout_id FROM bookings
+WHERE status = 'pending_payment' AND hold_release_at <= $1::timestamptz
+ORDER BY hold_release_at, id
+LIMIT $2
+`
+
+type ListHoldsToReleaseParams struct {
+	Now time.Time
+	Lim int32
+}
+
+type ListHoldsToReleaseRow struct {
+	ID         uuid.UUID
+	CheckoutID uuid.UUID
+}
+
+// Hold expiry job: bookings past their hold release (bookings_hold_release_idx).
+func (q *Queries) ListHoldsToRelease(ctx context.Context, arg ListHoldsToReleaseParams) ([]ListHoldsToReleaseRow, error) {
+	rows, err := q.db.Query(ctx, listHoldsToRelease, arg.Now, arg.Lim)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListHoldsToReleaseRow
+	for rows.Next() {
+		var i ListHoldsToReleaseRow
+		if err := rows.Scan(&i.ID, &i.CheckoutID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listNoShowCandidates = `-- name: ListNoShowCandidates :many
+SELECT id FROM bookings
+WHERE status = 'confirmed' AND service_type = 'attraction_ticket' AND service_end_at < $1
+ORDER BY service_end_at, id
+LIMIT $2
+`
+
+type ListNoShowCandidatesParams struct {
+	Now time.Time
+	Lim int32
+}
+
+// No-show job: confirmed attraction bookings whose service ended
+// (bookings_service_end_idx).
+func (q *Queries) ListNoShowCandidates(ctx context.Context, arg ListNoShowCandidatesParams) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listNoShowCandidates, arg.Now, arg.Lim)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listStatusHistory = `-- name: ListStatusHistory :many
 SELECT id, booking_id, from_status, to_status, actor_kind, actor_user_id, reason, created_at, updated_at FROM booking_status_history WHERE booking_id = $1 ORDER BY created_at, id
 `
@@ -670,6 +759,57 @@ func (q *Queries) ListStatusHistory(ctx context.Context, bookingID uuid.UUID) ([
 		return nil, err
 	}
 	return items, nil
+}
+
+const lockBooking = `-- name: LockBooking :one
+SELECT id, code, checkout_id, customer_id, partner_id, listing_id, service_type, booking_mode, status, service_start_at, service_end_at, original_service_start_at, gross_amount, commission_rate_bps, commission_amount, cancellation_policy_snapshot, contact_name, contact_phone, contact_email, customer_note, hold_expires_at, hold_release_at, response_due_at, payment_due_at, accepted_at, rejected_at, reject_reason, confirmed_at, checked_in_at, in_service_at, completed_at, no_show_at, cancelled_at, cancel_kind, cancel_reason, cancelled_by, qr_token, created_at, updated_at FROM bookings WHERE id = $1 FOR UPDATE
+`
+
+func (q *Queries) LockBooking(ctx context.Context, id uuid.UUID) (Booking, error) {
+	row := q.db.QueryRow(ctx, lockBooking, id)
+	var i Booking
+	err := row.Scan(
+		&i.ID,
+		&i.Code,
+		&i.CheckoutID,
+		&i.CustomerID,
+		&i.PartnerID,
+		&i.ListingID,
+		&i.ServiceType,
+		&i.BookingMode,
+		&i.Status,
+		&i.ServiceStartAt,
+		&i.ServiceEndAt,
+		&i.OriginalServiceStartAt,
+		&i.GrossAmount,
+		&i.CommissionRateBps,
+		&i.CommissionAmount,
+		&i.CancellationPolicySnapshot,
+		&i.ContactName,
+		&i.ContactPhone,
+		&i.ContactEmail,
+		&i.CustomerNote,
+		&i.HoldExpiresAt,
+		&i.HoldReleaseAt,
+		&i.ResponseDueAt,
+		&i.PaymentDueAt,
+		&i.AcceptedAt,
+		&i.RejectedAt,
+		&i.RejectReason,
+		&i.ConfirmedAt,
+		&i.CheckedInAt,
+		&i.InServiceAt,
+		&i.CompletedAt,
+		&i.NoShowAt,
+		&i.CancelledAt,
+		&i.CancelKind,
+		&i.CancelReason,
+		&i.CancelledBy,
+		&i.QrToken,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }
 
 const lockCheckout = `-- name: LockCheckout :one
@@ -755,6 +895,134 @@ func (q *Queries) LockCheckoutBookings(ctx context.Context, checkoutID uuid.UUID
 		return nil, err
 	}
 	return items, nil
+}
+
+const lockPartnerBookingByCode = `-- name: LockPartnerBookingByCode :one
+SELECT id, code, checkout_id, customer_id, partner_id, listing_id, service_type, booking_mode, status, service_start_at, service_end_at, original_service_start_at, gross_amount, commission_rate_bps, commission_amount, cancellation_policy_snapshot, contact_name, contact_phone, contact_email, customer_note, hold_expires_at, hold_release_at, response_due_at, payment_due_at, accepted_at, rejected_at, reject_reason, confirmed_at, checked_in_at, in_service_at, completed_at, no_show_at, cancelled_at, cancel_kind, cancel_reason, cancelled_by, qr_token, created_at, updated_at FROM bookings WHERE code = $1 AND partner_id = $2 FOR UPDATE
+`
+
+type LockPartnerBookingByCodeParams struct {
+	Code      string
+	PartnerID uuid.UUID
+}
+
+// Check-in by hand: the partner's booking with this code, locked.
+func (q *Queries) LockPartnerBookingByCode(ctx context.Context, arg LockPartnerBookingByCodeParams) (Booking, error) {
+	row := q.db.QueryRow(ctx, lockPartnerBookingByCode, arg.Code, arg.PartnerID)
+	var i Booking
+	err := row.Scan(
+		&i.ID,
+		&i.Code,
+		&i.CheckoutID,
+		&i.CustomerID,
+		&i.PartnerID,
+		&i.ListingID,
+		&i.ServiceType,
+		&i.BookingMode,
+		&i.Status,
+		&i.ServiceStartAt,
+		&i.ServiceEndAt,
+		&i.OriginalServiceStartAt,
+		&i.GrossAmount,
+		&i.CommissionRateBps,
+		&i.CommissionAmount,
+		&i.CancellationPolicySnapshot,
+		&i.ContactName,
+		&i.ContactPhone,
+		&i.ContactEmail,
+		&i.CustomerNote,
+		&i.HoldExpiresAt,
+		&i.HoldReleaseAt,
+		&i.ResponseDueAt,
+		&i.PaymentDueAt,
+		&i.AcceptedAt,
+		&i.RejectedAt,
+		&i.RejectReason,
+		&i.ConfirmedAt,
+		&i.CheckedInAt,
+		&i.InServiceAt,
+		&i.CompletedAt,
+		&i.NoShowAt,
+		&i.CancelledAt,
+		&i.CancelKind,
+		&i.CancelReason,
+		&i.CancelledBy,
+		&i.QrToken,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const lockPartnerBookingByQR = `-- name: LockPartnerBookingByQR :one
+SELECT id, code, checkout_id, customer_id, partner_id, listing_id, service_type, booking_mode, status, service_start_at, service_end_at, original_service_start_at, gross_amount, commission_rate_bps, commission_amount, cancellation_policy_snapshot, contact_name, contact_phone, contact_email, customer_note, hold_expires_at, hold_release_at, response_due_at, payment_due_at, accepted_at, rejected_at, reject_reason, confirmed_at, checked_in_at, in_service_at, completed_at, no_show_at, cancelled_at, cancel_kind, cancel_reason, cancelled_by, qr_token, created_at, updated_at FROM bookings WHERE qr_token = $1 AND partner_id = $2 FOR UPDATE
+`
+
+type LockPartnerBookingByQRParams struct {
+	QrToken   string
+	PartnerID uuid.UUID
+}
+
+// Check-in: the partner's booking with this QR token, locked.
+func (q *Queries) LockPartnerBookingByQR(ctx context.Context, arg LockPartnerBookingByQRParams) (Booking, error) {
+	row := q.db.QueryRow(ctx, lockPartnerBookingByQR, arg.QrToken, arg.PartnerID)
+	var i Booking
+	err := row.Scan(
+		&i.ID,
+		&i.Code,
+		&i.CheckoutID,
+		&i.CustomerID,
+		&i.PartnerID,
+		&i.ListingID,
+		&i.ServiceType,
+		&i.BookingMode,
+		&i.Status,
+		&i.ServiceStartAt,
+		&i.ServiceEndAt,
+		&i.OriginalServiceStartAt,
+		&i.GrossAmount,
+		&i.CommissionRateBps,
+		&i.CommissionAmount,
+		&i.CancellationPolicySnapshot,
+		&i.ContactName,
+		&i.ContactPhone,
+		&i.ContactEmail,
+		&i.CustomerNote,
+		&i.HoldExpiresAt,
+		&i.HoldReleaseAt,
+		&i.ResponseDueAt,
+		&i.PaymentDueAt,
+		&i.AcceptedAt,
+		&i.RejectedAt,
+		&i.RejectReason,
+		&i.ConfirmedAt,
+		&i.CheckedInAt,
+		&i.InServiceAt,
+		&i.CompletedAt,
+		&i.NoShowAt,
+		&i.CancelledAt,
+		&i.CancelKind,
+		&i.CancelReason,
+		&i.CancelledBy,
+		&i.QrToken,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const markNoShow = `-- name: MarkNoShow :exec
+UPDATE bookings SET status = 'no_show', no_show_at = $1::timestamptz, updated_at = $1 WHERE id = $2
+`
+
+type MarkNoShowParams struct {
+	Now time.Time
+	ID  uuid.UUID
+}
+
+func (q *Queries) MarkNoShow(ctx context.Context, arg MarkNoShowParams) error {
+	_, err := q.db.Exec(ctx, markNoShow, arg.Now, arg.ID)
+	return err
 }
 
 const reserveIdempotencyKey = `-- name: ReserveIdempotencyKey :execrows

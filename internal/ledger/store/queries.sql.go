@@ -221,6 +221,39 @@ func (q *Queries) LedgerTotals(ctx context.Context, partnerID uuid.UUID) (Ledger
 	return i, err
 }
 
+const listDueReleases = `-- name: ListDueReleases :many
+SELECT booking_id FROM booking_settlements
+WHERE released_at IS NULL AND release_due_at <= $1::timestamptz
+ORDER BY release_due_at, booking_id
+LIMIT $2
+`
+
+type ListDueReleasesParams struct {
+	Now time.Time
+	Lim int32
+}
+
+// Release job: settlements due and not released (booking_settlements_release_due_idx).
+func (q *Queries) ListDueReleases(ctx context.Context, arg ListDueReleasesParams) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listDueReleases, arg.Now, arg.Lim)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var booking_id uuid.UUID
+		if err := rows.Scan(&booking_id); err != nil {
+			return nil, err
+		}
+		items = append(items, booking_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const lockPartnerBalance = `-- name: LockPartnerBalance :one
 SELECT partner_id, pending, available, last_seq, created_at, updated_at FROM partner_balances WHERE partner_id = $1 FOR UPDATE
 `

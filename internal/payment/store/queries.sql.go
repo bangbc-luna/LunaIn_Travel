@@ -360,10 +360,11 @@ func (q *Queries) LockCheckoutBookingRows(ctx context.Context, checkoutID uuid.U
 }
 
 const lockCheckoutPayments = `-- name: LockCheckoutPayments :many
-SELECT id, checkout_id, provider, provider_order_code, amount, status, checkout_url, qr_code, expires_at, paid_at, provider_reference, raw, created_at, updated_at FROM payments WHERE checkout_id = $1 ORDER BY id FOR UPDATE
+SELECT id, checkout_id, provider, provider_order_code, amount, status, checkout_url, qr_code, expires_at, paid_at, provider_reference, raw, created_at, updated_at FROM payments WHERE checkout_id = $1 ORDER BY id FOR NO KEY UPDATE
 `
 
-// All payments of a checkout, locked in id order (after its bookings).
+// All payments of a checkout, locked in id order (after its bookings),
+// FOR NO KEY UPDATE (see LockPayment).
 func (q *Queries) LockCheckoutPayments(ctx context.Context, checkoutID uuid.UUID) ([]Payment, error) {
 	rows, err := q.db.Query(ctx, lockCheckoutPayments, checkoutID)
 	if err != nil {
@@ -412,10 +413,15 @@ func (q *Queries) LockCheckoutRow(ctx context.Context, id uuid.UUID) (uuid.UUID,
 }
 
 const lockPayment = `-- name: LockPayment :one
-SELECT id, checkout_id, provider, provider_order_code, amount, status, checkout_url, qr_code, expires_at, paid_at, provider_reference, raw, created_at, updated_at FROM payments WHERE id = $1 FOR UPDATE
+SELECT id, checkout_id, provider, provider_order_code, amount, status, checkout_url, qr_code, expires_at, paid_at, provider_reference, raw, created_at, updated_at FROM payments WHERE id = $1 FOR NO KEY UPDATE
 `
 
 // payments come after checkouts and bookings in the lock order (DB §1.1).
+// FOR NO KEY UPDATE, not FOR UPDATE: a webhook inserts its payment_events
+// row (FK -> payments: FOR KEY SHARE on the payment) BEFORE it locks the
+// checkout; a FOR UPDATE here (after the checkout) would wait for that
+// webhook while it waits for the checkout: a deadlock. NO KEY UPDATE is still
+// exclusive between lockers and writers of the payment row.
 func (q *Queries) LockPayment(ctx context.Context, id uuid.UUID) (Payment, error) {
 	row := q.db.QueryRow(ctx, lockPayment, id)
 	var i Payment

@@ -121,3 +121,38 @@ UPDATE checkouts SET status = @status, updated_at = @now WHERE id = @id;
 
 -- name: ExpireBooking :exec
 UPDATE bookings SET status = 'expired', updated_at = @now WHERE id = @id;
+
+-- Hold expiry job: bookings past their hold release (bookings_hold_release_idx).
+-- name: ListHoldsToRelease :many
+SELECT id, checkout_id FROM bookings
+WHERE status = 'pending_payment' AND hold_release_at <= @now::timestamptz
+ORDER BY hold_release_at, id
+LIMIT @lim;
+
+-- No-show job: confirmed attraction bookings whose service ended
+-- (bookings_service_end_idx).
+-- name: ListNoShowCandidates :many
+SELECT id FROM bookings
+WHERE status = 'confirmed' AND service_type = 'attraction_ticket' AND service_end_at < @now
+ORDER BY service_end_at, id
+LIMIT @lim;
+
+-- name: LockBooking :one
+SELECT * FROM bookings WHERE id = @id FOR UPDATE;
+
+-- Check-in: the partner's booking with this QR token, locked.
+-- name: LockPartnerBookingByQR :one
+SELECT * FROM bookings WHERE qr_token = @qr_token AND partner_id = @partner_id FOR UPDATE;
+
+-- Check-in by hand: the partner's booking with this code, locked.
+-- name: LockPartnerBookingByCode :one
+SELECT * FROM bookings WHERE code = @code AND partner_id = @partner_id FOR UPDATE;
+
+-- name: MarkNoShow :exec
+UPDATE bookings SET status = 'no_show', no_show_at = @now::timestamptz, updated_at = @now WHERE id = @id;
+
+-- Attraction check-in completes the booking at once.
+-- name: CompleteCheckIn :exec
+UPDATE bookings
+SET status = 'completed', checked_in_at = @now::timestamptz, completed_at = @now::timestamptz, updated_at = @now
+WHERE id = @id;

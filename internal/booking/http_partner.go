@@ -43,4 +43,24 @@ func (s *Service) PartnerRoutes(mux httpx.Router, iss *auth.Issuer, requireMembe
 		v, err := s.GetForPartner(r.Context(), partnerID, id)
 		writeView(w, r, http.StatusOK, v, err)
 	}))
+
+	mux.Handle("POST /v1/partner/check-ins", member(func(w http.ResponseWriter, r *http.Request, partnerID uuid.UUID) {
+		var in checkInInput
+		if err := httpx.DecodeJSON(r, &in); err != nil {
+			httpx.WriteError(w, r, err)
+			return
+		}
+		p, _ := auth.PrincipalFrom(r.Context())
+		var res CheckInResult
+		var err error
+		switch {
+		case in.QRToken != nil && in.Code == nil && *in.QRToken != "":
+			res, err = s.CheckIn(r.Context(), partnerID, p.UserID, *in.QRToken)
+		case in.Code != nil && in.QRToken == nil && *in.Code != "":
+			res, err = s.CheckInByCode(r.Context(), partnerID, p.UserID, *in.Code)
+		default:
+			err = ErrInvalidCheckIn
+		}
+		writeView(w, r, http.StatusOK, res, err)
+	}))
 }

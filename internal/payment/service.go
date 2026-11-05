@@ -354,6 +354,19 @@ func (s *Service) CancelPending(ctx context.Context, tx pgx.Tx, id uuid.UUID) er
 	return nil
 }
 
+// ExpirePending marks a locked pending payment expired (the hold expired;
+// its link is then cancelled at the provider after commit, see
+// CancelLinkBestEffort). Money arriving on it later is handled by the
+// webhook like any late payment.
+func (s *Service) ExpirePending(ctx context.Context, tx pgx.Tx, id uuid.UUID) error {
+	if err := store.New(tx).SetPaymentStatus(ctx, store.SetPaymentStatusParams{
+		Status: StatusExpired, Now: s.clock.Now(), ID: id,
+	}); err != nil {
+		return fmt.Errorf("set payment expired: %w", err)
+	}
+	return nil
+}
+
 // CancelLinkBestEffort cancels a payment link at the provider, outside any
 // tx; a failure is only logged (money arriving on it is refunded anyway).
 func (s *Service) CancelLinkBestEffort(ctx context.Context, orderCode int64) {

@@ -80,3 +80,10 @@ SELECT COUNT(*)::bigint FROM (
     WHERE partner_id = @partner_id
 ) e
 WHERE e.available_after <> e.running;
+
+-- Release job: settlements due and not released (booking_settlements_release_due_idx).
+-- name: ListDueReleases :many
+SELECT booking_id FROM booking_settlements
+WHERE released_at IS NULL AND release_due_at <= @now::timestamptz
+ORDER BY release_due_at, booking_id
+LIMIT @lim;

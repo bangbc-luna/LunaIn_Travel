@@ -159,22 +159,18 @@ func serve(log *slog.Logger) error {
 			User: cfg.SMTPUser, Password: cfg.SMTPPassword, From: cfg.MailFrom,
 		}
 	}
+	// The booking workers get their Service once it is built (it needs the
+	// job client for emails); the client is started only after that.
+	expireHolds, noShow, release := &booking.ExpireHoldsWorker{}, &booking.NoShowWorker{}, &booking.ReleaseWorker{}
 	workers := river.NewWorkers()
 	river.AddWorker(workers, &mailer.SendEmailWorker{Mailer: mail})
-	jobClient, err := jobs.NewClient(pool, workers, log)
+	river.AddWorker(workers, expireHolds)
+	river.AddWorker(workers, noShow)
+	river.AddWorker(workers, release)
+	jobClient, err := jobs.NewClient(pool, workers, log, booking.PeriodicJobs()...)
 	if err != nil {
 		return err
 	}
-	if err := jobClient.Start(context.Background()); err != nil {
-		return err
-	}
-	defer func() {
-		stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := jobClient.Stop(stopCtx); err != nil {
-			log.Error("stop job client", "err", err)
-		}
-	}()
 
 	var google identity.GoogleVerifier = rejectingGoogle{}
 	if cfg.GoogleClientID == "" {
@@ -220,6 +216,18 @@ func serve(log *slog.Logger) error {
 		Pool: pool, Clock: clock.Real{}, Listings: listingSvc, Catalog: catSvc, Settings: settingsSvc,
 		Identity: idSvc, Payments: paymentSvc, Ledger: ledgerSvc, Jobs: jobClient, Log: log,
 	})
+	expireHolds.Service, noShow.Service, release.Service = bookingSvc, bookingSvc, bookingSvc
+
+	if err := jobClient.Start(context.Background()); err != nil {
+		return err
+	}
+	defer func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := jobClient.Stop(stopCtx); err != nil {
+			log.Error("stop job client", "err", err)
+		}
+	}()
 
 	mux, _ := buildMux(muxDeps{
 		Pool: pool, Issuer: issuer, ClientIP: httpx.ClientIPFunc(cfg.TrustedProxyHops),

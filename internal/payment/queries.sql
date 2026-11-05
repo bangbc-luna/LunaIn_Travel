@@ -26,8 +26,13 @@ WHERE id = @id AND status = 'pending' AND checkout_url IS NULL;
 SELECT * FROM payments WHERE provider_order_code = @order_code;
 
 -- payments come after checkouts and bookings in the lock order (DB §1.1).
+-- FOR NO KEY UPDATE, not FOR UPDATE: a webhook inserts its payment_events
+-- row (FK -> payments: FOR KEY SHARE on the payment) BEFORE it locks the
+-- checkout; a FOR UPDATE here (after the checkout) would wait for that
+-- webhook while it waits for the checkout: a deadlock. NO KEY UPDATE is still
+-- exclusive between lockers and writers of the payment row.
 -- name: LockPayment :one
-SELECT * FROM payments WHERE id = @id FOR UPDATE;
+SELECT * FROM payments WHERE id = @id FOR NO KEY UPDATE;
 
 -- Lock helpers for rotating a payment (checkout -> bookings -> payment).
 -- name: LockCheckoutRow :one
@@ -72,9 +77,10 @@ VALUES (@id, @payment_id, @checkout_id, sqlc.narg(booking_id), sqlc.narg(provide
         @status, sqlc.narg(bank_bin), sqlc.narg(account_number), sqlc.narg(account_holder), @now, @now)
 RETURNING *;
 
--- All payments of a checkout, locked in id order (after its bookings).
+-- All payments of a checkout, locked in id order (after its bookings),
+-- FOR NO KEY UPDATE (see LockPayment).
 -- name: LockCheckoutPayments :many
-SELECT * FROM payments WHERE checkout_id = @checkout_id ORDER BY id FOR UPDATE;
+SELECT * FROM payments WHERE checkout_id = @checkout_id ORDER BY id FOR NO KEY UPDATE;
 
 -- name: SetPaymentStatus :exec
 UPDATE payments SET status = @status, updated_at = @now WHERE id = @id;

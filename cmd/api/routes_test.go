@@ -221,6 +221,7 @@ var partnerRoutes = []route{
 	{"GET /v1/partner/balance", "/v1/partner/balance"},
 	{"GET /v1/partner/bookings", "/v1/partner/bookings"},
 	{"GET /v1/partner/bookings/{id}", "/v1/partner/bookings/" + uuid.Nil.String()},
+	{"POST /v1/partner/check-ins", "/v1/partner/check-ins"},
 }
 
 // recordedUnder returns the recorded patterns whose path starts with prefix.

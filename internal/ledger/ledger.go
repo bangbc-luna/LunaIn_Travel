@@ -218,6 +218,17 @@ func (s *Service) Release(ctx context.Context, tx pgx.Tx, bookingID uuid.UUID) e
 		entry{kindRelease, bucketAvailable, st.NetPending})
 }
 
+// DueReleases lists (unlocked) up to limit bookings whose settlement is due
+// for release at now and not released yet, oldest due first. The caller then
+// locks each booking FOR UPDATE and calls Release.
+func (s *Service) DueReleases(ctx context.Context, now time.Time, limit int32) ([]uuid.UUID, error) {
+	ids, err := store.New(s.pool).ListDueReleases(ctx, store.ListDueReleasesParams{Now: now, Lim: limit})
+	if err != nil {
+		return nil, fmt.Errorf("list due releases: %w", err)
+	}
+	return ids, nil
+}
+
 // Balance returns the partner's cached balances; 0 and 0 before any entry.
 func (s *Service) Balance(ctx context.Context, partnerID uuid.UUID) (Balance, error) {
 	b, err := store.New(s.pool).GetPartnerBalance(ctx, partnerID)
