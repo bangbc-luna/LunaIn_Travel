@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/bangbc-luna/lunain-travel/internal/partner/store"
+	"github.com/bangbc-luna/lunain-travel/internal/platform/audit"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/db"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/validate"
 )
@@ -60,7 +61,9 @@ func bankFromRow(r store.PartnerBankAccount) BankAccount {
 
 // SetBankAccount makes in the partner's current payout account. In one
 // transaction it locks the partners row (before any partner_bank_accounts
-// row, DB §1.1), clears the old current account and inserts the new one.
+// row, DB §1.1), clears the old current account, inserts the new one (with
+// created_by = actorUserID) and records the change in the audit log
+// (partner.bank_account.set, before = the old current account or null).
 func (s *Service) SetBankAccount(ctx context.Context, partnerID, actorUserID uuid.UUID, in BankAccountInput) (BankAccount, error) {
 	in, err := in.normalize()
 	if err != nil {
@@ -77,18 +80,32 @@ func (s *Service) SetBankAccount(ctx context.Context, partnerID, actorUserID uui
 		if _, err := lockPartner(ctx, q, partnerID); err != nil {
 			return err
 		}
+		before, err := s.CurrentBankAccount(ctx, tx, partnerID)
+		if err != nil {
+			return err
+		}
 		if err := q.ClearCurrentBankAccount(ctx, store.ClearCurrentBankAccountParams{PartnerID: partnerID, Now: now}); err != nil {
 			return fmt.Errorf("clear current bank account: %w", err)
 		}
 		row, err := q.InsertBankAccount(ctx, store.InsertBankAccountParams{
 			ID: id, PartnerID: partnerID, BankBin: in.BankBIN, BankName: in.BankName,
-			AccountNumber: in.AccountNumber, AccountHolder: in.AccountHolder, Now: now,
+			AccountNumber: in.AccountNumber, AccountHolder: in.AccountHolder,
+			CreatedBy: actorUserID, Now: now,
 		})
 		if err != nil {
 			return fmt.Errorf("insert bank account: %w", err)
 		}
 		out = bankFromRow(row)
-		return nil
+		entry := audit.Entry{
+			ActorUserID: actorUserID, Action: "partner.bank_account.set",
+			TargetKind: auditTargetKind, TargetID: &partnerID, After: out,
+		}
+		if before != nil {
+			// A nil *BankAccount inside an interface would marshal as JSON
+			// null rather than leave the column NULL.
+			entry.Before = *before
+		}
+		return audit.Record(ctx, tx, now, entry)
 	})
 	if err != nil {
 		return BankAccount{}, err

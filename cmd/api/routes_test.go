@@ -24,6 +24,7 @@ import (
 	"github.com/bangbc-luna/lunain-travel/internal/listing"
 	"github.com/bangbc-luna/lunain-travel/internal/partner"
 	"github.com/bangbc-luna/lunain-travel/internal/payment"
+	"github.com/bangbc-luna/lunain-travel/internal/payout"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/auth"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/clock"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/db"
@@ -79,11 +80,14 @@ func newTestAppEnv(t *testing.T, appEnv string) *testApp {
 		Pool: pool, Clock: clk, Listings: listingSvc, Catalog: catSvc, Settings: settingsSvc,
 		Identity: idSvc, Payments: paymentSvc, Ledger: ledgerSvc,
 	})
+	payoutSvc := payout.NewService(payout.Deps{
+		Pool: pool, Clock: clk, Ledger: ledgerSvc, Partners: partnerSvc, Settings: settingsSvc, Files: fileSvc,
+	})
 	mux, patterns := buildMux(muxDeps{
 		Pool: pool, Issuer: issuer, ClientIP: httpx.ClientIPFunc(0),
 		Identity: idSvc, Settings: settingsSvc, Files: fileSvc,
 		Geo: geoSvc, Catalog: catSvc, Partner: partnerSvc, Listing: listingSvc,
-		Ledger: ledgerSvc, Payment: paymentSvc, Booking: bookingSvc, AppEnv: appEnv,
+		Ledger: ledgerSvc, Payment: paymentSvc, Booking: bookingSvc, Payout: payoutSvc, AppEnv: appEnv,
 	})
 	return &testApp{
 		handler: httpx.Chain(mux, httpx.RequestID, httpx.Recover), issuer: issuer,
@@ -226,6 +230,10 @@ var partnerRoutes = []route{
 	{"GET /v1/partner/bookings", "/v1/partner/bookings"},
 	{"GET /v1/partner/bookings/{id}", "/v1/partner/bookings/" + uuid.Nil.String()},
 	{"POST /v1/partner/check-ins", "/v1/partner/check-ins"},
+	{"POST /v1/partner/payouts", "/v1/partner/payouts"},
+	{"GET /v1/partner/payouts", "/v1/partner/payouts"},
+	{"GET /v1/partner/payouts/preview", "/v1/partner/payouts/preview"},
+	{"GET /v1/partner/payouts/{id}", "/v1/partner/payouts/" + uuid.Nil.String()},
 }
 
 // recordedUnder returns the recorded patterns whose path starts with prefix.

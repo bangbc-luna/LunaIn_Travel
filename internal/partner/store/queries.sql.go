@@ -207,8 +207,8 @@ func (q *Queries) GetPartnerForUpdate(ctx context.Context, id uuid.UUID) (Partne
 }
 
 const insertBankAccount = `-- name: InsertBankAccount :one
-INSERT INTO partner_bank_accounts (id, partner_id, bank_bin, bank_name, account_number, account_holder, is_current, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, true, $7, $7)
+INSERT INTO partner_bank_accounts (id, partner_id, bank_bin, bank_name, account_number, account_holder, is_current, created_by, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, true, $7::uuid, $8, $8)
 RETURNING id, partner_id, bank_bin, bank_name, account_number, account_holder, is_current, created_at, updated_at, created_by
 `
 
@@ -219,6 +219,7 @@ type InsertBankAccountParams struct {
 	BankName      string
 	AccountNumber string
 	AccountHolder string
+	CreatedBy     uuid.UUID
 	Now           time.Time
 }
 
@@ -230,6 +231,7 @@ func (q *Queries) InsertBankAccount(ctx context.Context, arg InsertBankAccountPa
 		arg.BankName,
 		arg.AccountNumber,
 		arg.AccountHolder,
+		arg.CreatedBy,
 		arg.Now,
 	)
 	var i PartnerBankAccount
@@ -442,6 +444,24 @@ func (q *Queries) MemberPartnerID(ctx context.Context, userID uuid.UUID) (uuid.U
 	var partner_id uuid.UUID
 	err := row.Scan(&partner_id)
 	return partner_id, err
+}
+
+const ownerEmail = `-- name: OwnerEmail :one
+SELECT u.email FROM partner_members m
+JOIN users u ON u.id = m.user_id
+WHERE m.partner_id = $1 AND m.role = 'owner'
+ORDER BY m.created_at, m.user_id
+LIMIT 1
+`
+
+// The join on identity's users is an accepted read-only cross-module join
+// (Ruling 12, DB §11): partner never writes or locks users. The earliest
+// owner wins, as in OwnersOf.
+func (q *Queries) OwnerEmail(ctx context.Context, partnerID uuid.UUID) (string, error) {
+	row := q.db.QueryRow(ctx, ownerEmail, partnerID)
+	var email string
+	err := row.Scan(&email)
+	return email, err
 }
 
 const ownersOf = `-- name: OwnersOf :many

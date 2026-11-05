@@ -7,9 +7,53 @@ package store
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 )
+
+const getPartnerPayout = `-- name: GetPartnerPayout :one
+SELECT id, partner_id, amount, status, bank_bin, bank_name, account_number, account_holder, bank_account_id, statement_seq_from, statement_seq_to, opening_available, closing_available, requested_by, requested_at, approved_by, approved_at, paid_by, paid_at, transfer_reference, proof_file_id, rejected_by, rejected_at, reject_reason, created_at, updated_at FROM payouts WHERE id = $1 AND partner_id = $2
+`
+
+type GetPartnerPayoutParams struct {
+	ID        uuid.UUID
+	PartnerID uuid.UUID
+}
+
+func (q *Queries) GetPartnerPayout(ctx context.Context, arg GetPartnerPayoutParams) (Payout, error) {
+	row := q.db.QueryRow(ctx, getPartnerPayout, arg.ID, arg.PartnerID)
+	var i Payout
+	err := row.Scan(
+		&i.ID,
+		&i.PartnerID,
+		&i.Amount,
+		&i.Status,
+		&i.BankBin,
+		&i.BankName,
+		&i.AccountNumber,
+		&i.AccountHolder,
+		&i.BankAccountID,
+		&i.StatementSeqFrom,
+		&i.StatementSeqTo,
+		&i.OpeningAvailable,
+		&i.ClosingAvailable,
+		&i.RequestedBy,
+		&i.RequestedAt,
+		&i.ApprovedBy,
+		&i.ApprovedAt,
+		&i.PaidBy,
+		&i.PaidAt,
+		&i.TransferReference,
+		&i.ProofFileID,
+		&i.RejectedBy,
+		&i.RejectedAt,
+		&i.RejectReason,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
 
 const getPayout = `-- name: GetPayout :one
 SELECT id, partner_id, amount, status, bank_bin, bank_name, account_number, account_holder, bank_account_id, statement_seq_from, statement_seq_to, opening_available, closing_available, requested_by, requested_at, approved_by, approved_at, paid_by, paid_at, transfer_reference, proof_file_id, rejected_by, rejected_at, reject_reason, created_at, updated_at FROM payouts WHERE id = $1
@@ -47,4 +91,171 @@ func (q *Queries) GetPayout(ctx context.Context, id uuid.UUID) (Payout, error) {
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const insertPayout = `-- name: InsertPayout :exec
+INSERT INTO payouts (
+    id, partner_id, amount, status, bank_bin, bank_name, account_number, account_holder,
+    bank_account_id, requested_by, requested_at, created_at, updated_at
+) VALUES (
+    $1, $2, $3, 'requested', $4, $5, $6, $7,
+    $8, $9, $10, $10, $10
+)
+`
+
+type InsertPayoutParams struct {
+	ID            uuid.UUID
+	PartnerID     uuid.UUID
+	Amount        int64
+	BankBin       string
+	BankName      string
+	AccountNumber string
+	AccountHolder string
+	BankAccountID uuid.UUID
+	RequestedBy   uuid.UUID
+	Now           time.Time
+}
+
+// The statement columns stay NULL until SetPayoutStatement, in the same tx
+// (the payout_hold entry needs this row first).
+func (q *Queries) InsertPayout(ctx context.Context, arg InsertPayoutParams) error {
+	_, err := q.db.Exec(ctx, insertPayout,
+		arg.ID,
+		arg.PartnerID,
+		arg.Amount,
+		arg.BankBin,
+		arg.BankName,
+		arg.AccountNumber,
+		arg.AccountHolder,
+		arg.BankAccountID,
+		arg.RequestedBy,
+		arg.Now,
+	)
+	return err
+}
+
+const lastStatementSeqTo = `-- name: LastStatementSeqTo :one
+SELECT COALESCE(MAX(statement_seq_to), 0)::bigint FROM payouts
+WHERE partner_id = $1 AND id <> $2
+`
+
+type LastStatementSeqToParams struct {
+	PartnerID uuid.UUID
+	ExcludeID uuid.UUID
+}
+
+// The last statement end of the partner's other payouts, whatever their
+// status; 0 before the first payout.
+func (q *Queries) LastStatementSeqTo(ctx context.Context, arg LastStatementSeqToParams) (int64, error) {
+	row := q.db.QueryRow(ctx, lastStatementSeqTo, arg.PartnerID, arg.ExcludeID)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
+const listPartnerPayouts = `-- name: ListPartnerPayouts :many
+SELECT id, partner_id, amount, status, bank_bin, bank_name, account_number, account_holder, bank_account_id, statement_seq_from, statement_seq_to, opening_available, closing_available, requested_by, requested_at, approved_by, approved_at, paid_by, paid_at, transfer_reference, proof_file_id, rejected_by, rejected_at, reject_reason, created_at, updated_at FROM payouts
+WHERE partner_id = $1
+  AND ($2::text IS NULL OR status = $2)
+  AND ($3::uuid IS NULL OR id < $3)
+ORDER BY id DESC
+LIMIT $4
+`
+
+type ListPartnerPayoutsParams struct {
+	PartnerID uuid.UUID
+	Status    *string
+	Cursor    *uuid.UUID
+	Lim       int32
+}
+
+func (q *Queries) ListPartnerPayouts(ctx context.Context, arg ListPartnerPayoutsParams) ([]Payout, error) {
+	rows, err := q.db.Query(ctx, listPartnerPayouts,
+		arg.PartnerID,
+		arg.Status,
+		arg.Cursor,
+		arg.Lim,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Payout
+	for rows.Next() {
+		var i Payout
+		if err := rows.Scan(
+			&i.ID,
+			&i.PartnerID,
+			&i.Amount,
+			&i.Status,
+			&i.BankBin,
+			&i.BankName,
+			&i.AccountNumber,
+			&i.AccountHolder,
+			&i.BankAccountID,
+			&i.StatementSeqFrom,
+			&i.StatementSeqTo,
+			&i.OpeningAvailable,
+			&i.ClosingAvailable,
+			&i.RequestedBy,
+			&i.RequestedAt,
+			&i.ApprovedBy,
+			&i.ApprovedAt,
+			&i.PaidBy,
+			&i.PaidAt,
+			&i.TransferReference,
+			&i.ProofFileID,
+			&i.RejectedBy,
+			&i.RejectedAt,
+			&i.RejectReason,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const openPayoutID = `-- name: OpenPayoutID :one
+SELECT id FROM payouts WHERE partner_id = $1 AND status IN ('requested','approved')
+`
+
+func (q *Queries) OpenPayoutID(ctx context.Context, partnerID uuid.UUID) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, openPayoutID, partnerID)
+	var id uuid.UUID
+	err := row.Scan(&id)
+	return id, err
+}
+
+const setPayoutStatement = `-- name: SetPayoutStatement :exec
+UPDATE payouts
+SET statement_seq_from = $1::bigint, statement_seq_to = $2::bigint,
+    opening_available = $3::bigint, closing_available = $4::bigint, updated_at = $5
+WHERE id = $6
+`
+
+type SetPayoutStatementParams struct {
+	SeqFrom int64
+	SeqTo   int64
+	Opening int64
+	Closing int64
+	Now     time.Time
+	ID      uuid.UUID
+}
+
+func (q *Queries) SetPayoutStatement(ctx context.Context, arg SetPayoutStatementParams) error {
+	_, err := q.db.Exec(ctx, setPayoutStatement,
+		arg.SeqFrom,
+		arg.SeqTo,
+		arg.Opening,
+		arg.Closing,
+		arg.Now,
+		arg.ID,
+	)
+	return err
 }

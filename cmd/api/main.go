@@ -25,6 +25,7 @@ import (
 	"github.com/bangbc-luna/lunain-travel/internal/listing"
 	"github.com/bangbc-luna/lunain-travel/internal/partner"
 	"github.com/bangbc-luna/lunain-travel/internal/payment"
+	"github.com/bangbc-luna/lunain-travel/internal/payout"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/auth"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/clock"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/config"
@@ -218,6 +219,10 @@ func serve(log *slog.Logger) error {
 		Identity: idSvc, Payments: paymentSvc, Ledger: ledgerSvc, Jobs: jobClient, Log: log,
 	})
 	expireHolds.Service, noShow.Service, release.Service = bookingSvc, bookingSvc, bookingSvc
+	payoutSvc := payout.NewService(payout.Deps{
+		Pool: pool, Clock: clock.Real{}, Ledger: ledgerSvc, Partners: partnerSvc, Settings: settingsSvc,
+		Files: fileSvc, Jobs: jobClient, Log: log,
+	})
 
 	if err := jobClient.Start(context.Background()); err != nil {
 		return err
@@ -234,7 +239,7 @@ func serve(log *slog.Logger) error {
 		Pool: pool, Issuer: issuer, ClientIP: httpx.ClientIPFunc(cfg.TrustedProxyHops),
 		Identity: idSvc, Settings: settingsSvc, Files: fileSvc,
 		Geo: geoSvc, Catalog: catSvc, Partner: partnerSvc, Listing: listingSvc,
-		Ledger: ledgerSvc, Payment: paymentSvc, Booking: bookingSvc, AppEnv: cfg.AppEnv,
+		Ledger: ledgerSvc, Payment: paymentSvc, Booking: bookingSvc, Payout: payoutSvc, AppEnv: cfg.AppEnv,
 	})
 
 	srv := &http.Server{

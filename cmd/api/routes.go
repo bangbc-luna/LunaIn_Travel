@@ -17,6 +17,7 @@ import (
 	"github.com/bangbc-luna/lunain-travel/internal/listing"
 	"github.com/bangbc-luna/lunain-travel/internal/partner"
 	"github.com/bangbc-luna/lunain-travel/internal/payment"
+	"github.com/bangbc-luna/lunain-travel/internal/payout"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/auth"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/httpx"
 	"github.com/bangbc-luna/lunain-travel/internal/settings"
@@ -37,6 +38,7 @@ type muxDeps struct {
 	Ledger   *ledger.Service
 	Payment  *payment.Service
 	Booking  *booking.Service
+	Payout   *payout.Service
 	// AppEnv gates the dev-only payment simulation route (never in prod).
 	AppEnv string
 }
@@ -61,6 +63,7 @@ func buildMux(d muxDeps) (*http.ServeMux, []string) {
 	d.Booking.CustomerRoutes(rr, d.Issuer)
 	d.Booking.PartnerRoutes(rr, d.Issuer, d.Partner.RequireMember())
 	d.Booking.AdminRoutes(rr, d.Issuer)
+	d.Payout.PartnerRoutes(rr, d.Issuer, d.Partner.RequireMember())
 	d.Payment.Routes(rr, payment.RouteDeps{Handler: d.Booking, ClientIP: d.ClientIP, AppEnv: d.AppEnv})
 	rr.HandleFunc("GET /healthz", healthz)
 	rr.HandleFunc("GET /readyz", readyz(d.Pool))
