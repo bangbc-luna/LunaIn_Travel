@@ -93,6 +93,8 @@ CREATE UNIQUE INDEX refunds_payment_transfer_idx ON refunds (payment_id, provide
     WHERE booking_id IS NULL;
 CREATE INDEX refunds_status_idx ON refunds (status);
 CREATE INDEX refunds_payment_idx ON refunds (payment_id);
+-- The webhook checks whether any booking of a checkout was refunded.
+CREATE INDEX refunds_checkout_idx ON refunds (checkout_id);
 
 -- Bank account a customer saved for refunds (spec §6.3).
 CREATE TABLE customer_refund_accounts (

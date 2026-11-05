@@ -11,17 +11,21 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/bangbc-luna/lunain-travel/internal/payment"
 )
 
-// rawReference is the Ruling 16 fallback reference of a webhook body:
-// "raw:" + hex sha256 of its "data" bytes as sent.
+// rawReference is the Ruling 16/17 fallback reference of a webhook body:
+// "raw:" + hex sha256 of the canonical signed string of its "data".
 func rawReference(t *testing.T, body []byte) string {
 	t.Helper()
 	var w struct {
 		Data json.RawMessage `json:"data"`
 	}
 	require.NoError(t, json.Unmarshal(body, &w))
-	sum := sha256.Sum256(w.Data)
+	canon, err := payment.CanonicalDataString(w.Data)
+	require.NoError(t, err)
+	sum := sha256.Sum256([]byte(canon))
 	return "raw:" + hex.EncodeToString(sum[:])
 }
 

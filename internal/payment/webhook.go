@@ -99,14 +99,31 @@ func DedupeKey(orderCode int64, reference string) string {
 }
 
 // TransferReference is the reference identifying a webhook's transfer: the
-// bank reference, or without one "raw:" + lowercase hex sha256 of the signed
-// "data" JSON exactly as received (Ruling 16): stable across redeliveries of
-// one transfer, distinct for different transfers on the same link.
+// bank reference, or without one TransferFingerprint (Ruling 16, refined by
+// Ruling 17).
 func TransferReference(wd WebhookData) string {
 	if wd.Reference != "" {
 		return wd.Reference
 	}
-	sum := sha256.Sum256(wd.Raw)
+	return TransferFingerprint(wd)
+}
+
+// TransferFingerprint is "raw:" + lowercase hex sha256 of the canonical
+// signed string of the webhook data (CanonicalDataString): stable across
+// redeliveries of one transfer whatever their JSON formatting, distinct for
+// different transfers on the same link.
+func TransferFingerprint(wd WebhookData) string {
+	canon := wd.Canonical
+	if canon == "" {
+		c, err := CanonicalDataString(wd.Raw)
+		if err != nil {
+			// Unreachable for verified data (it was canonicalised to check
+			// the signature); hash the bytes rather than fail.
+			c = string(wd.Raw)
+		}
+		canon = c
+	}
+	sum := sha256.Sum256([]byte(canon))
 	return "raw:" + hex.EncodeToString(sum[:])
 }
 

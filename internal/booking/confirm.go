@@ -253,29 +253,22 @@ func (c *confirmation) eligible(b store.Booking) (bool, error) {
 //
 // Ruling 15: money already settled for this checkout also makes it a
 // duplicate: a booking of the checkout was refunded (a booking is refunded at
-// most once) or cancelled, or the checkout was closed after money arrived
-// (a payment of it holds a transfer reference). A checkout closed by the
-// hold-expiry job alone (no money yet) still takes a late payment, so that
-// Review Focus 2 re-confirmation keeps working.
+// most once) or cancelled. A closed checkout by itself is not a duplicate
+// (Ruling 17): after hold expiry, a late corrective payment (following a
+// refunded underpayment or stray transfer) still re-confirms bookings that
+// are bookable (Review Focus 2).
 func (c *confirmation) canTakeMoney(ctx context.Context) (bool, error) {
 	if c.co.Status == checkoutPaid {
 		return false, nil
 	}
 	c.replaced = c.pay.Status == payment.StatusCancelled
-	moneyIn := false
 	for _, p := range c.pays {
 		if p.Status == payment.StatusPaid {
 			return false, nil
 		}
-		if p.ProviderReference != nil {
-			moneyIn = true
-		}
 		if p.ID != c.pay.ID && p.Status == payment.StatusPending {
 			c.replaced = true
 		}
-	}
-	if c.co.Status == checkoutClosed && moneyIn {
-		return false, nil
 	}
 	for _, b := range c.bookings {
 		if b.Status == StatusCancelled {

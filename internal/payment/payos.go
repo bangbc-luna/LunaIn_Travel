@@ -149,6 +149,10 @@ type WebhookData struct {
 	PaymentLinkID string
 	// Raw is the original "data" object.
 	Raw json.RawMessage
+	// Canonical is the signed canonical string of Raw
+	// (CanonicalDataString): identical for redeliveries of one transfer
+	// whatever their JSON formatting.
+	Canonical string
 }
 
 // Provider is a payment gateway.
@@ -321,6 +325,17 @@ func hmacSHA256Hex(key, data string) string {
 // serialised as compact JSON with object keys sorted; numbers and booleans
 // are written as-is.
 func signJSONObject(key string, raw []byte) (string, error) {
+	canon, err := CanonicalDataString(raw)
+	if err != nil {
+		return "", err
+	}
+	return hmacSHA256Hex(key, canon), nil
+}
+
+// CanonicalDataString is the exact string PayOS signs for a webhook "data"
+// object (see signJSONObject): sorted "k=v" pairs joined by "&". It does not
+// depend on the JSON's whitespace, key order or number spelling.
+func CanonicalDataString(raw []byte) (string, error) {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
 	var obj map[string]any
@@ -340,7 +355,7 @@ func signJSONObject(key string, raw []byte) (string, error) {
 		}
 		parts = append(parts, k+"="+v)
 	}
-	return hmacSHA256Hex(key, strings.Join(parts, "&")), nil
+	return strings.Join(parts, "&"), nil
 }
 
 func signValue(v any) (string, error) {
@@ -380,10 +395,11 @@ func verifyWebhook(checksumKey string, body []byte) (WebhookData, error) {
 	if len(w.Data) == 0 || string(w.Data) == "null" {
 		return WebhookData{}, errors.New("payos: webhook has no data")
 	}
-	want, err := signJSONObject(checksumKey, w.Data)
+	canon, err := CanonicalDataString(w.Data)
 	if err != nil {
 		return WebhookData{}, err
 	}
+	want := hmacSHA256Hex(checksumKey, canon)
 	got, err := hex.DecodeString(strings.ToLower(w.Signature))
 	wantRaw, _ := hex.DecodeString(want)
 	if err != nil || !hmac.Equal(got, wantRaw) {
@@ -403,7 +419,7 @@ func verifyWebhook(checksumKey string, body []byte) (WebhookData, error) {
 		return WebhookData{}, fmt.Errorf("payos: decode webhook data: %w", err)
 	}
 	out := WebhookData{
-		OrderCode: d.OrderCode, Amount: d.Amount, Reference: d.Reference, Raw: w.Data,
+		OrderCode: d.OrderCode, Amount: d.Amount, Reference: d.Reference, Raw: w.Data, Canonical: canon,
 		TransactionDateTime: d.TransactionDateTime, PaymentLinkID: d.PaymentLinkID,
 	}
 	if t, err := time.ParseInLocation(txTimeLayout, d.TransactionDateTime, vnZone); err == nil {
