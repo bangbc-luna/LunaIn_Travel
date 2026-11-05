@@ -6,10 +6,13 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
 )
+
+var sha256Hex = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 func TestMigrationChecksums(t *testing.T) {
 	const dir = "migrations"
@@ -27,6 +30,12 @@ func TestMigrationChecksums(t *testing.T) {
 		parts := strings.Fields(line)
 		if len(parts) != 2 {
 			t.Fatalf("dòng CHECKSUMS sai định dạng: %q", line)
+		}
+		if !sha256Hex.MatchString(parts[0]) {
+			t.Fatalf("dòng CHECKSUMS có hash không hợp lệ (cần 64 ký tự hex): %q", line)
+		}
+		if _, dup := listed[parts[1]]; dup {
+			t.Fatalf("CHECKSUMS có mục trùng cho %s", parts[1])
 		}
 		listed[parts[1]] = parts[0]
 	}
