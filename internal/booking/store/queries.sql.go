@@ -753,9 +753,12 @@ SELECT b.id, b.code, b.checkout_id, b.customer_id, b.partner_id, b.listing_id, b
        COALESCE(to_char(d.visit_date, 'YYYY-MM-DD'), '')::text AS visit_date,
        d.time_slot_id,
        COALESCE(to_char(d.slot_start, 'HH24:MI'), '')::text AS slot_start,
-       COALESCE(to_char(d.slot_end, 'HH24:MI'), '')::text AS slot_end
+       COALESCE(to_char(d.slot_end, 'HH24:MI'), '')::text AS slot_end,
+       r.trip_id,
+       r.seats
 FROM bookings b
 LEFT JOIN booking_attraction_details d ON d.booking_id = b.id
+LEFT JOIN booking_ride_details r ON r.booking_id = b.id
 WHERE b.checkout_id = $1
 ORDER BY b.id
 `
@@ -766,6 +769,8 @@ type ListCheckoutBookingsRow struct {
 	TimeSlotID *uuid.UUID
 	SlotStart  string
 	SlotEnd    string
+	TripID     *uuid.UUID
+	Seats      *int32
 }
 
 // Unlocked read of a checkout's bookings with what re-confirmation needs.
@@ -822,6 +827,8 @@ func (q *Queries) ListCheckoutBookings(ctx context.Context, checkoutID uuid.UUID
 			&i.TimeSlotID,
 			&i.SlotStart,
 			&i.SlotEnd,
+			&i.TripID,
+			&i.Seats,
 		); err != nil {
 			return nil, err
 		}

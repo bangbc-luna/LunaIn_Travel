@@ -107,9 +107,12 @@ SELECT sqlc.embed(b),
        COALESCE(to_char(d.visit_date, 'YYYY-MM-DD'), '')::text AS visit_date,
        d.time_slot_id,
        COALESCE(to_char(d.slot_start, 'HH24:MI'), '')::text AS slot_start,
-       COALESCE(to_char(d.slot_end, 'HH24:MI'), '')::text AS slot_end
+       COALESCE(to_char(d.slot_end, 'HH24:MI'), '')::text AS slot_end,
+       r.trip_id,
+       r.seats
 FROM bookings b
 LEFT JOIN booking_attraction_details d ON d.booking_id = b.id
+LEFT JOIN booking_ride_details r ON r.booking_id = b.id
 WHERE b.checkout_id = @checkout_id
 ORDER BY b.id;
 

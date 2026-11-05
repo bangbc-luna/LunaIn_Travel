@@ -54,6 +54,28 @@ func (s *Service) releaseRideSeats(ctx context.Context, tx pgx.Tx, b store.Booki
 	return s.listings.ReleaseSeats(ctx, tx, d.TripID, int(d.Seats))
 }
 
+// reserveRideSeats reserves again the seats of an expired ride booking that
+// a late payment re-confirms, in the caller's tx, which holds the trip lock
+// and has checked the seats are free (rideChecks): a refusal is an internal
+// error. A booking of another service type has no seats: nothing is done.
+func (s *Service) reserveRideSeats(ctx context.Context, tx pgx.Tx, b store.Booking, now time.Time) error {
+	if b.ServiceType != serviceTypeRide {
+		return nil
+	}
+	d, err := store.New(tx).GetRideDetails(ctx, b.ID)
+	if err != nil {
+		return fmt.Errorf("get ride details: %w", err)
+	}
+	ok, err := s.listings.ReserveSeats(ctx, tx, d.TripID, int(d.Seats), now)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("booking: %d seats of booking %s could not be reserved again on trip %s", d.Seats, b.ID, d.TripID)
+	}
+	return nil
+}
+
 // releaseOverdueOnTrips expires the pending_payment ride bookings on tripIDs
 // whose hold passed release (hold_release_at <= now) but that the hold
 // expiry job has not swept yet, except those of exceptCheckout, and returns
