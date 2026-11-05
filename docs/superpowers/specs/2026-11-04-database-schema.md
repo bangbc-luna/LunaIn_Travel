@@ -37,6 +37,8 @@ users → partners → listings
 - Dòng `users` khóa bằng `FOR NO KEY UPDATE`, để không chặn việc insert các bảng có FK trỏ về `users`.
 - Dòng `partners` cũng khóa bằng `FOR NO KEY UPDATE` (giống `users`), không dùng `FOR UPDATE`: mỗi lệnh insert vào bảng có FK trỏ về `partners` (`partner_members`, `partner_service_types`, `partner_bank_accounts`, sau này `listings`, `bookings`, ...) ngầm lấy `KEY SHARE` trên dòng đối tác, và `FOR UPDATE` sẽ chặn nó. `FOR NO KEY UPDATE` vẫn xung đột với `FOR SHARE` nên vẫn xếp hàng được với booking.
 - Khi tạo booking hoặc xác nhận lại do tiền về trễ, transaction phải lấy `FOR SHARE` trên dòng `partners` và `listings`. Nhờ vậy, một lệnh đình chỉ đối tác hoặc ẩn Listing commit cùng lúc sẽ được xếp hàng, không bị lọt booking.
+- **Lịch của đối tác và booking** (plan 4): khi đối tác thêm ngày nghỉ hoặc sửa khung giờ, transaction khóa dòng `listings` bằng `FOR NO KEY UPDATE` rồi mới đếm booking đang hiệu lực (`BookingGuard`). Đổi lịch (reschedule) không cần Listing còn bán được, nhưng vẫn lấy `FOR SHARE` trên dòng `listings` trước khi đọc khung giờ. Hai mức khóa này xung đột nhau, nên booking hoặc đã commit trước phép đếm, hoặc phải chờ rồi đọc lịch mới.
+- Dòng `payments` khóa bằng `FOR NO KEY UPDATE`, không dùng `FOR UPDATE`: mỗi lệnh insert vào `payment_events` ngầm lấy `KEY SHARE` trên payment qua FK, và `FOR UPDATE` sẽ chặn nó (đã gặp deadlock thật). Mọi transaction khóa payment đều đã khóa `checkouts` trước, nên chúng vẫn xếp hàng theo checkout.
 - **Hợp đồng `Status(lock)` trước `IsServiceTypeEnabled`**: `partner.IsServiceTypeEnabled` tự nó không khóa gì. Muốn an toàn với `Suspend` và `DisableServiceType` (cả hai đều khóa dòng `partners` `FOR NO KEY UPDATE`), phải gọi `partner.Status(ctx, tx, id, true)` (lấy `FOR SHARE`) **trước**, trong cùng transaction. Có test khóa hợp đồng này (`internal/partner/lock_test.go`).
 - Dòng sức chứa đứng **trước** booking. Hủy chuyến, job hết hạn và tạo booking mới đều khóa chuyến hoặc mẫu xe trước. Nếu chỉ biết id booking thì đọc id của chuyến hoặc mẫu xe mà không khóa, khóa chuyến hoặc mẫu xe, rồi mới khóa booking và kiểm tra lại trạng thái.
 - Dòng con của booking (`booking_settlements`, `refunds`, ...) chỉ được khóa sau khi đã khóa dòng `bookings`. Job giải phóng tiền cũng phải khóa booking trước.
@@ -97,7 +99,7 @@ Bảng chi tiết theo từng loại dịch vụ (`attraction_*`, `ride_*`, `cha
 
 | Bảng | Cột | Ghi chú |
 |---|---|---|
-| `customer_refund_accounts` 🔜 5 | `user_id` PK FK users, `bank_bin text`, `account_number text`, `account_holder text` | Tài khoản nhận hoàn khách lưu sẵn (spec §6.3) |
+| `customer_refund_accounts` ✅ plan 4 (migration `00013`) | `user_id` PK FK users, `bank_bin text` (`^[0-9]{6}$`), `account_number text` (`^[0-9]{6,19}$`), `account_holder text` (không rỗng) | Tài khoản nhận hoàn khách lưu sẵn (spec §6.3) |
 
 ---
 
@@ -255,9 +257,11 @@ Trước khi giữ ghế, transaction đã khóa chuyến **[Builder]**. Ngay l�
 | Cột | Kiểu | Ghi chú |
 |---|---|---|
 | `id` | uuid PK | |
-| `customer_id` | FK users | |
+| `code` | text UNIQUE | `CO` + 8 ký tự Crockford base32, có CHECK regex |
+| `customer_id` | FK users | `UNIQUE(id, customer_id)` làm đích cho FK kép từ `bookings` |
 | `total_amount` | bigint ≥ 0 | = tổng `gross_amount` của các booking trong checkout |
 | `status` | `open` \| `paid` \| `closed` | `closed` khi mọi booking của nó đã hết hạn hoặc bị từ chối mà chưa thanh toán |
+| `paid_payment_id` | uuid NULL | payment có tiền đã xác nhận checkout; hoàn tiền khi hủy booking đi theo payment này. FK `(paid_payment_id, id) → payments(id, checkout_id)` (cùng checkout). `CHECK ((status = 'paid') = (paid_payment_id IS NOT NULL))`. Cột thêm ở migration `00013` vì bảng `payments` có sau |
 
 **[Builder]** Checkout được tạo cùng lúc với booking cho mọi loại dịch vụ. Với Request Booking thì chỉ tạo payment khi đối tác đã chấp nhận.
 
@@ -286,7 +290,7 @@ Trước khi giữ ghế, transaction đã khóa chuyến **[Builder]**. Ngay l�
 
 | Loại | `service_start_at` | `service_end_at` | Chuyển trạng thái cuối |
 |---|---|---|---|
-| Attraction | ngày tham quan + giờ bắt đầu khung | 23:59:59 của ngày tham quan (giờ VN) | check-in → `completed` ngay. Qua `service_end_at` mà chưa check-in → `no_show` |
+| Attraction | ngày tham quan + giờ bắt đầu khung | ngày tham quan + giờ kết thúc khung (giờ VN) | check-in → `completed` ngay. Qua `service_end_at` mà chưa check-in → `no_show` |
 | Scheduled Ride | `departure_at` | `departure_at` + `duration_minutes` | qua `departure_at` + `ride_no_show_after_minutes` mà chưa check-in → `no_show`. Đã check-in → job chuyển `completed` khi qua `service_end_at` |
 | Private Charter | `pickup_at` | `return_at` nếu đi khứ hồi, nếu không thì `pickup_at` + thời gian chạy ước tính từ API bản đồ | đối tác bấm hoàn thành, hoặc job tự hoàn thành sau `service_end_at` + `charter_auto_complete_hours` |
 | Self-Drive Rental | `pickup_at` | `return_at` | đối tác bấm "đã nhận lại xe" → `completed` |
@@ -308,6 +312,13 @@ Cả ba trường hợp đều đánh dấu `payments.status = needs_review` đ�
 
 `status` gồm `requested`, `awaiting_payment`, `pending_payment`, `confirmed`, `checked_in`, `in_service`, `completed`, `no_show`, `cancelled`, `expired`, `rejected`. Thêm `CHECK` ràng buộc `booking_mode`: `requested`, `awaiting_payment` và `rejected` chỉ có ở Request Booking, còn `pending_payment` và `checked_in` chỉ có ở Instant Booking.
 
+Ràng buộc khác của `bookings` (migration `00012`):
+- `code` có CHECK regex `^LT` + 8 ký tự Crockford base32.
+- FK `(listing_id, partner_id) → listings(id, partner_id)` và FK `(checkout_id, customer_id) → checkouts(id, customer_id)`: checkout phải của cùng khách.
+- `UNIQUE(id, partner_id)`, `UNIQUE(id, listing_id)`, `UNIQUE(id, checkout_id)`: đích của các FK kép từ bảng con, `refunds` và sổ cái.
+- CHECK mốc thời gian theo trạng thái: `confirmed`…`no_show` ⇒ có `confirmed_at`; `completed` ⇒ `completed_at`; `no_show` ⇒ `no_show_at`; `pending_payment`/`awaiting_payment` ⇒ `hold_release_at`; `requested` ⇒ `response_due_at`; `rejected` ⇒ `rejected_at`. `hold_expires_at` và `hold_release_at` cùng NULL hoặc cùng có, và `hold_release_at ≥ hold_expires_at`. `cancelled_at` có đúng khi `status = cancelled`, đi cùng `cancel_kind`.
+- `cancellation_policy_snapshot` phải là mảng JSON (`jsonb_typeof = 'array'`).
+
 Index cho job nền (partial index để nhỏ và nhanh):
 - `(hold_release_at) WHERE status IN ('pending_payment','awaiting_payment')`: hết hạn giữ chỗ
 - `(response_due_at) WHERE status = 'requested'`: đối tác quá hạn phản hồi
@@ -319,13 +330,13 @@ Index cho job nền (partial index để nhỏ và nhanh):
 | Bảng | Cột chính | Ghi chú |
 |---|---|---|
 | `booking_items` | `id`, `booking_id`, `line_kind` (`ticket`\|`seat`\|`charter_base`\|`charter_distance`\|`surcharge`\|`rental_day`\|`delivery_fee`), `description`, `unit_price ≥ 0`, `quantity numeric(10,1) > 0`, `line_total` | `CHECK (line_total = round(unit_price * quantity))`. `round` của Postgres làm tròn nửa lên với số dương, khớp quy ước ở mục 1. Quãng đường đi vào `quantity` (12,3 km), khứ hồi tính 2 lần quãng đường. Phụ phí theo % thì `unit_price` là số tiền đã tính và `quantity` là 1. App kiểm tra tổng các dòng = `gross_amount` (có test) |
-| `booking_ticket_lines` | `booking_item_id` PK FK, `ticket_type_id` FK | loại vé của từng dòng |
-| `booking_attraction_details` | `booking_id` PK, `visit_date date`, `time_slot_id`, `slot_start time`, `slot_end time` | chụp lại giờ của khung |
+| `booking_ticket_lines` | `booking_item_id` PK, `booking_id`, `listing_id`, `ticket_type_id` | loại vé của từng dòng. FK kép `(booking_item_id, booking_id) → booking_items(id, booking_id)`, `(booking_id, listing_id) → bookings(id, listing_id)`, `(ticket_type_id, listing_id) → attraction_ticket_types(id, listing_id)` |
+| `booking_attraction_details` | `booking_id` PK, `listing_id`, `visit_date date`, `time_slot_id`, `slot_start time`, `slot_end time` | chụp lại giờ của khung, `slot_end > slot_start`. FK kép `(booking_id, listing_id) → bookings`, `(time_slot_id, listing_id) → attraction_time_slots`. Index `(listing_id, visit_date)` và `(time_slot_id, visit_date)` cho `BookingGuard` |
 | `booking_ride_details` | `booking_id` PK, `listing_id`, `trip_id`, `seats int > 0`, `direction` (`outbound`\|`return`) | FK `(trip_id, listing_id) → ride_trips(id, listing_id)`, index `(trip_id)` |
 | `booking_charter_details` | `booking_id` PK, `vehicle_class_id`, `pickup_at`, `pickup_address`, `pickup_lat/lng`, `dropoff_address`, `dropoff_lat/lng`, `distance_km numeric(7,1)`, `is_round_trip`, `return_at NULL`, `quote jsonb` | `quote` chụp lại toàn bộ cách tính giá |
 | `booking_rental_details` | `booking_id` PK, `listing_id`, `vehicle_model_id`, `pickup_at`, `return_at`, `period tstzrange GENERATED ALWAYS AS (tstzrange(pickup_at, return_at, '[)')) STORED`, `days int > 0`, `pickup_point_id NULL`, `delivery_address NULL`, `holds_vehicle bool`, `hold_until timestamptz NULL` | xem ghi chú bên dưới |
-| `booking_status_history` | `id`, `booking_id`, `from_status`, `to_status`, `actor_kind` (`customer`\|`partner`\|`admin`\|`system`), `actor_user_id NULL`, `reason`, `created_at` | index `(booking_id, created_at)` |
-| `booking_reschedules` | `id`, `booking_id` **UNIQUE**, `from_visit_date`, `from_slot_id`, `to_visit_date`, `to_slot_id`, `created_by`, `created_at` | **[Builder]** dùng `UNIQUE` để DB tự chặn đổi lịch quá 1 lần. Không cần cột `reschedule_count` |
+| `booking_status_history` | `id`, `booking_id`, `from_status`, `to_status`, `actor_kind` (`customer`\|`partner`\|`admin`\|`system`), `actor_user_id NULL`, `reason`, `created_at` | index `(booking_id, created_at)`. `CHECK (actor_kind = 'system' OR actor_user_id IS NOT NULL)` |
+| `booking_reschedules` | `id`, `booking_id` **UNIQUE**, `listing_id`, `from_visit_date`, `from_slot_id`, `to_visit_date`, `to_slot_id`, `created_by`, `created_at` | **[Builder]** dùng `UNIQUE` để DB tự chặn đổi lịch quá 1 lần. Không cần cột `reschedule_count`. Cả hai khung giờ phải thuộc Listing của booking (FK kép qua `listing_id`) |
 | `idempotency_keys` | PK `(user_id, key)`, `endpoint`, `request_hash bytea`, `response_status`, `response_body jsonb`, `created_at` | spec §7. Job dọn các dòng quá 24 giờ |
 
 **Giữ xe thuê** **[Builder]**: `holds_vehicle` bằng `true` khi đơn ở `requested`, `awaiting_payment`, `confirmed` hoặc `in_service`. Cột này được cập nhật trong **cùng transaction** với lần đổi trạng thái. Lý do: index GiST cần một cột nằm ngay trên chính bảng này:
@@ -342,10 +353,10 @@ Kết hợp với việc khóa dòng `rental_vehicle_models` (spec §7), phép �
 
 | Bảng | Cột chính | Ràng buộc |
 |---|---|---|
-| `payments` | `id`, `checkout_id` FK, `provider` (`payos`), `provider_order_code bigint UNIQUE`, `amount > 0`, `status` (`pending`\|`paid`\|`expired`\|`cancelled`\|`needs_review`), `checkout_url`, `qr_code`, `expires_at`, `paid_at`, `provider_reference`, `raw jsonb` | unique index `(checkout_id) WHERE status = 'pending'`: mỗi checkout chỉ có một link đang chờ. `needs_review` dùng khi số tiền không khớp (spec §8) |
+| `payments` | `id`, `checkout_id` FK, `provider` (`payos`), `provider_order_code bigint UNIQUE`, `amount > 0`, `status` (`pending`\|`paid`\|`expired`\|`cancelled`\|`needs_review`), `checkout_url`, `qr_code`, `expires_at`, `paid_at`, `provider_reference`, `raw jsonb` | unique index `(checkout_id) WHERE status = 'pending'`: mỗi checkout chỉ có một link đang chờ. `needs_review` dùng khi số tiền không khớp (spec §8). `provider_order_code` lấy từ sequence bắt đầu từ 100000, tối đa 2^53 − 1. `CHECK (status <> 'paid' OR paid_at IS NOT NULL)`. `UNIQUE(id, checkout_id)` làm đích cho FK kép từ `refunds` và `checkouts.paid_payment_id` |
 | `payment_events` | `id`, `payment_id NULL`, `provider`, `dedupe_key text UNIQUE`, `signature_valid bool`, `payload jsonb`, `received_at`, `processed_at NULL`, `result text` | webhook gọi lặp thì bị chặn ở `dedupe_key` |
-| `refunds` | `id`, `payment_id` FK **NOT NULL**, `booking_id` FK **NULL**, `amount > 0`, `reason` (`customer_cancel`\|`admin_cancel`\|`late_payment`\|`payment_mismatch`\|`duplicate_payment`), `status` (`awaiting_bank_info`\|`pending`\|`completed`), `bank_bin`, `account_number`, `account_holder`, `transfer_reference`, `proof_file_id`, `completed_by`, `completed_at` | `CHECK (status <> 'completed' OR transfer_reference IS NOT NULL)`. Unique `(booking_id) WHERE booking_id IS NOT NULL`: mỗi booking tối đa một khoản hoàn, nên webhook và job đối soát không thể cùng tạo hai lần. Khoản hoàn không gắn booking (thanh toán thừa, trùng hoặc lệch tiền) thì unique `(payment_id) WHERE booking_id IS NULL`. Index `(status)` |
-| `payment_reconciliations` | `id`, `run_date date UNIQUE`, `status` (`ok`\|`mismatch`), `mismatches jsonb` | đối soát hằng ngày (spec §8) |
+| `refunds` | `id`, `payment_id` **NOT NULL**, `checkout_id` **NOT NULL**, `booking_id` **NULL**, `provider_reference` NULL (mã giao dịch chuyển vào mà khoản hoàn trả lại), `amount > 0`, `reason` (`customer_cancel`\|`admin_cancel`\|`late_payment`\|`payment_mismatch`\|`duplicate_payment`), `status` (`awaiting_bank_info`\|`pending`\|`completed`), `bank_bin`, `account_number`, `account_holder`, `transfer_reference`, `proof_file_id`, `completed_by`, `completed_at` | FK kép `(payment_id, checkout_id) → payments(id, checkout_id)` và `(booking_id, checkout_id) → bookings(id, checkout_id)`: payment và booking phải cùng checkout. `CHECK (booking_id IS NOT NULL OR provider_reference IS NOT NULL)`. `CHECK (status <> 'completed' OR transfer_reference IS NOT NULL)`. Ngoài `awaiting_bank_info` thì phải đủ thông tin ngân hàng; `completed_at` có đúng khi `completed` và đi cùng `completed_by`. Unique `(booking_id) WHERE booking_id IS NOT NULL`: mỗi booking tối đa một khoản hoàn, nên webhook và job đối soát không thể cùng tạo hai lần. Khoản hoàn không gắn booking (thanh toán thừa, trùng hoặc lệch tiền) thì unique `(payment_id, provider_reference) WHERE booking_id IS NULL`: mỗi lần chuyển tiền vào có tối đa một khoản hoàn (trả trùng là lần chuyển thứ hai trên cùng payment). Index `(status)`, `(payment_id)`, `(checkout_id)` |
+| `payment_reconciliations` 🔜 5 | `id`, `run_date date UNIQUE`, `status` (`ok`\|`mismatch`), `mismatches jsonb` | đối soát hằng ngày (spec §8). Chưa có trong migration `00013` |
 
 ---
 
@@ -368,17 +379,18 @@ Kết hợp với việc khóa dòng `rental_vehicle_models` (spec §7), phép �
 | `reason`, `created_by NULL`, `created_at` | | |
 
 Ràng buộc:
-- `CHECK`: các kind theo booking thì `booking_id NOT NULL`; các kind payout thì `payout_id NOT NULL`; `adjustment` thì `reason` và `created_by NOT NULL`.
+- `CHECK`: các kind theo booking thì `booking_id NOT NULL` (và `payout_id` NULL); các kind payout thì `payout_id NOT NULL` (và `booking_id` NULL); `adjustment` thì `reason` và `created_by NOT NULL`. FK `(booking_id, partner_id) → bookings(id, partner_id)`. FK từ `payout_id` tới `payouts` sẽ thêm ở plan 5.
+- `CHECK` bucket và dấu (plan 4): `booking_earning`, `refund_debit` và `commission_waiver` chỉ ghi vào `pending`; `booking_earning > 0`, `refund_debit < 0`, `commission_waiver > 0`. `release` không giới hạn dấu. Dấu của các kind payout để plan 5 quyết.
 - Unique index `(booking_id, kind, bucket) WHERE kind IN ('booking_earning','refund_debit','commission_waiver','release')`: mỗi booking ghi mỗi loại bút toán đúng một lần, giải phóng tiền đúng một lần. Bút toán `adjustment` không nằm trong index này, nên một booking có thể được điều chỉnh nhiều lần.
 - Unique index `(payout_id, kind) WHERE kind IN ('payout_hold','payout_reversal')`: một yêu cầu rút không thể giữ hoặc hoàn tiền hai lần.
 - Sao kê và đối soát đi theo `seq`, không theo `created_at`. Thời gian `created_at` lấy từ clock trước khi commit, nên một bút toán commit trễ có thể mang mốc giờ nằm trong một kỳ đã chốt. `seq` được cấp khi đang giữ khóa nên không bao giờ lọt.
-- **[Builder]** Một trigger `BEFORE UPDATE OR DELETE` luôn raise exception, để DB chặn việc sửa sổ cái.
+- **[Builder]** Một trigger `BEFORE UPDATE OR DELETE` luôn raise exception, để DB chặn việc sửa sổ cái. Thêm một trigger `BEFORE TRUNCATE` dùng chung hàm đó.
 
 ### `booking_settlements` **[Builder]**: theo dõi tiền của từng booking
-`booking_id` PK, `partner_id`, `net_pending bigint` (phần còn nằm ở `pending`), `release_due_at timestamptz NULL`, `released_at NULL`. Index `(release_due_at) WHERE released_at IS NULL`. Job giải phóng tiền quét theo index này.
+`booking_id` PK, `partner_id`, `net_pending bigint` (phần còn nằm ở `pending`), `release_due_at timestamptz NULL`, `released_at NULL`. Index `(release_due_at) WHERE released_at IS NULL`. Job giải phóng tiền quét theo index này. FK `(booking_id, partner_id) → bookings`. `CHECK (released_at IS NULL OR net_pending = 0)`.
 
 ### `platform_commission_entries`: doanh thu sàn
-`id`, `booking_id`, `service_type`, `kind` (`commission` \| `waiver`), `amount` có dấu, `created_at`, `UNIQUE(booking_id, kind)`.
+`id`, `booking_id`, `service_type`, `kind` (`commission` \| `waiver`), `amount` có dấu, `created_at`, `UNIQUE(booking_id, kind)`. `CHECK ((kind = 'commission' AND amount > 0) OR (kind = 'waiver' AND amount < 0))`. Hoa hồng bằng 0 (tỷ lệ 0 bps) thì không ghi dòng `commission`, và khi miễn hoa hồng cũng không ghi dòng `waiver`, đúng quy tắc "khoản bằng 0 thì không ghi".
 
 ### `payouts`
 | Cột | Ghi chú |
