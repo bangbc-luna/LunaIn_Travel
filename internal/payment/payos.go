@@ -81,13 +81,38 @@ func DescriptionForCheckout(checkoutCode string) (string, error) {
 // ErrInvalidSignature is returned when a webhook signature does not match.
 var ErrInvalidSignature = errors.New("payment: invalid webhook signature")
 
-// Payment-link states reported by PayOS (Status.State).
+// Payment-link states reported by PayOS (Status.State). The full set, from
+// the official payos-lib-node PaymentLinkStatus type:
+// PENDING | CANCELLED | UNDERPAID | PAID | EXPIRED | PROCESSING | FAILED.
+// Any other value is passed through as is; callers decide by AmountPaid.
 const (
-	StatePending   = "PENDING"
-	StatePaid      = "PAID"
-	StateCancelled = "CANCELLED"
-	StateExpired   = "EXPIRED"
+	StatePending    = "PENDING"
+	StatePaid       = "PAID"
+	StateUnderpaid  = "UNDERPAID"
+	StateProcessing = "PROCESSING"
+	StateCancelled  = "CANCELLED"
+	StateExpired    = "EXPIRED"
+	StateFailed     = "FAILED"
 )
+
+// orderNotFoundDesc is the PayOS error text for an unknown payment link
+// ("Mã thanh toán không tồn tại", listed in the API reference error list).
+// The docs give no numeric code for it; "101" is the code PayOS integrations
+// commonly report and the one the Fake uses.
+const (
+	orderNotFoundDesc = "Mã thanh toán không tồn tại"
+	orderNotFoundCode = "101"
+)
+
+// IsOrderNotFound reports whether err is the provider saying the order code
+// has no payment link.
+func IsOrderNotFound(err error) bool {
+	var pe *ProviderError
+	if !errors.As(err, &pe) {
+		return false
+	}
+	return pe.Code == orderNotFoundCode || strings.Contains(pe.Desc, orderNotFoundDesc)
+}
 
 // LinkRequest describes a payment link to create. Return and cancel URLs
 // come from configuration.
@@ -118,6 +143,10 @@ type WebhookData struct {
 	Reference string
 	// TransactionAt is zero if the provider sent an unparseable timestamp.
 	TransactionAt time.Time
+	// TransactionDateTime is the raw timestamp string.
+	TransactionDateTime string
+	// PaymentLinkID is the provider's id of the payment link.
+	PaymentLinkID string
 	// Raw is the original "data" object.
 	Raw json.RawMessage
 }
@@ -368,11 +397,15 @@ func verifyWebhook(checksumKey string, body []byte) (WebhookData, error) {
 		Amount              int64  `json:"amount"`
 		Reference           string `json:"reference"`
 		TransactionDateTime string `json:"transactionDateTime"`
+		PaymentLinkID       string `json:"paymentLinkId"`
 	}
 	if err := json.Unmarshal(w.Data, &d); err != nil {
 		return WebhookData{}, fmt.Errorf("payos: decode webhook data: %w", err)
 	}
-	out := WebhookData{OrderCode: d.OrderCode, Amount: d.Amount, Reference: d.Reference, Raw: w.Data}
+	out := WebhookData{
+		OrderCode: d.OrderCode, Amount: d.Amount, Reference: d.Reference, Raw: w.Data,
+		TransactionDateTime: d.TransactionDateTime, PaymentLinkID: d.PaymentLinkID,
+	}
 	if t, err := time.ParseInLocation(txTimeLayout, d.TransactionDateTime, vnZone); err == nil {
 		out.TransactionAt = t
 	}

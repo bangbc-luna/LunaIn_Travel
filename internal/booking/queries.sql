@@ -118,3 +118,6 @@ UPDATE bookings SET status = 'confirmed', confirmed_at = @now::timestamptz, upda
 
 -- name: SetCheckoutStatus :exec
 UPDATE checkouts SET status = @status, updated_at = @now WHERE id = @id;
+
+-- name: ExpireBooking :exec
+UPDATE bookings SET status = 'expired', updated_at = @now WHERE id = @id;

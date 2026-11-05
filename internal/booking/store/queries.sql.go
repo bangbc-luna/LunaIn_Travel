@@ -26,6 +26,20 @@ func (q *Queries) ConfirmBooking(ctx context.Context, arg ConfirmBookingParams) 
 	return err
 }
 
+const expireBooking = `-- name: ExpireBooking :exec
+UPDATE bookings SET status = 'expired', updated_at = $1 WHERE id = $2
+`
+
+type ExpireBookingParams struct {
+	Now time.Time
+	ID  uuid.UUID
+}
+
+func (q *Queries) ExpireBooking(ctx context.Context, arg ExpireBookingParams) error {
+	_, err := q.db.Exec(ctx, expireBooking, arg.Now, arg.ID)
+	return err
+}
+
 const getAttractionDetail = `-- name: GetAttractionDetail :one
 SELECT to_char(visit_date, 'YYYY-MM-DD')::text AS visit_date, time_slot_id,
        to_char(slot_start, 'HH24:MI')::text AS slot_start, to_char(slot_end, 'HH24:MI')::text AS slot_end

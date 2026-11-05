@@ -71,3 +71,7 @@ INSERT INTO refunds (id, payment_id, checkout_id, booking_id, provider_reference
 VALUES (@id, @payment_id, @checkout_id, sqlc.narg(booking_id), sqlc.narg(provider_reference), @amount, @reason,
         @status, sqlc.narg(bank_bin), sqlc.narg(account_number), sqlc.narg(account_holder), @now, @now)
 RETURNING *;
+
+-- All payments of a checkout, locked in id order (after its bookings).
+-- name: LockCheckoutPayments :many
+SELECT * FROM payments WHERE checkout_id = @checkout_id ORDER BY id FOR UPDATE;

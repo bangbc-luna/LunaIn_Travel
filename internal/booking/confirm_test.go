@@ -237,19 +237,26 @@ func TestWebhook_UnknownOrder200(t *testing.T) {
 	require.Equal(t, 0, e.count(t, `SELECT count(*) FROM ledger_entries`))
 }
 
+// Ruling 9: the provider's status lags behind its webhook. The first
+// delivery stores nothing and asks for a retry (503); the retry confirms.
 func TestWebhook_ProviderSaysNotPaid(t *testing.T) {
 	e := newEnv(t)
 	v := e.create(t, "k")
 	oc := e.orderCode(t, v.ID)
 	body := e.Fake.MarkPaid(oc, gross)
-	e.Fake.SetState(oc, payment.StatePending)
+	e.Fake.LagNextStatus()
+
+	requireCode(t, e.webhook(t, body), http.StatusServiceUnavailable, "payment_not_confirmed")
+	require.Equal(t, "pending_payment", e.bookingStatus(t, v.ID))
+	require.Equal(t, "pending", e.paymentStatus(t, oc))
+	require.Equal(t, 0, e.count(t, `SELECT count(*) FROM payment_events`), "no dedupe row may block the retry")
+	require.Equal(t, 0, e.count(t, `SELECT count(*) FROM ledger_entries`))
 
 	rec := e.webhook(t, body)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	require.Equal(t, "pending_payment", e.bookingStatus(t, v.ID))
-	require.Equal(t, "pending", e.paymentStatus(t, oc))
-	require.Equal(t, 1, e.count(t, `SELECT count(*) FROM payment_events WHERE result = 'not_paid'`))
-	require.Equal(t, 0, e.count(t, `SELECT count(*) FROM ledger_entries`))
+	require.Equal(t, "confirmed", e.bookingStatus(t, v.ID))
+	require.Equal(t, 1, e.count(t, `SELECT count(*) FROM payment_events WHERE result = 'confirmed'`))
+	e.requireBalance(t, 342_000, 0)
 }
 
 func TestPaid_Underpaid(t *testing.T) {
@@ -257,6 +264,10 @@ func TestPaid_Underpaid(t *testing.T) {
 	v := e.create(t, "k")
 	oc := e.orderCode(t, v.ID)
 	e.pay(t, oc, 300_000)
+	st, err := e.Fake.GetStatus(context.Background(), oc)
+	require.NoError(t, err)
+	require.Equal(t, payment.Status{State: payment.StateUnderpaid, AmountPaid: 300_000}, st,
+		"the provider itself reports UNDERPAID")
 
 	require.Equal(t, "pending_payment", e.bookingStatus(t, v.ID))
 	require.Equal(t, "needs_review", e.paymentStatus(t, oc))

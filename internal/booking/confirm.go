@@ -1,6 +1,7 @@
 package booking
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -24,11 +25,15 @@ import (
 const (
 	StatusExpired = "expired"
 
-	checkoutPaid = "paid"
-	actorSystem  = "system"
+	checkoutPaid   = "paid"
+	checkoutClosed = "closed"
+	actorSystem    = "system"
 	// reasonLateReconfirm is the history reason of a late payment that
 	// re-confirms an expired booking.
 	reasonLateReconfirm = "thanh toán trễ, xác nhận lại"
+	// reasonLateExpire: a pending booking whose hold was already past
+	// release when the money arrived, and that can no longer be served.
+	reasonLateExpire = "thanh toán trễ, không còn đặt được"
 )
 
 // HandlePaid results (payment_events.result).
@@ -40,11 +45,15 @@ const (
 	ResultOverpaid          = "overpaid"
 	ResultDuplicateRefunded = "duplicate_refunded"
 	ResultAlreadyProcessed  = "already_processed"
+	// ResultAcceptedReplaced: money on a replaced (cancelled) order code was
+	// accepted and the replacement payment cancelled (Ruling 10).
+	ResultAcceptedReplaced = "accepted_replaced_link"
 )
 
-// errStateChanged: a booking expired between the unlocked read and the lock,
-// so its re-confirmation was not checked (that must happen before the
-// checkout is locked). The webhook answers 500 and the provider retries.
+// errStateChanged: a booking became late (expired, or its hold passed
+// release) between the unlocked read and the lock, so its re-confirmation was
+// not checked (that must happen before the checkout is locked). The webhook
+// answers 500 and the provider retries.
 var errStateChanged = errors.New("booking: booking state changed while confirming payment, retry")
 
 var _ payment.PaymentHandler = (*Service)(nil)
@@ -54,92 +63,111 @@ var _ payment.PaymentHandler = (*Service)(nil)
 // incoming transfer (the webhook dedupes on order code + reference first).
 //
 // Lock order (DB §1.1): the checkout and its bookings are read unlocked;
-// for every booking that is (or is about to be) expired, the re-confirmation
-// checks run first — listing.BookableListing per listing in id order
-// (partners, listings FOR SHARE), then SlotsForDate — and only then the
-// checkout, its bookings (id order) and the payment are locked FOR UPDATE
-// and the state is decided from the locked rows:
+// for every booking that is late — expired, or pending_payment with its hold
+// already past release (the expiry job lags) — the re-confirmation checks run
+// first: listing.BookableListing per listing in id order (partners, listings
+// FOR SHARE), then SlotsForDate and service_start_at > now. Only then the
+// checkout, its bookings (id order) and its payments (id order) are locked
+// FOR UPDATE and the state is decided from the locked rows:
 //
 //   - The payment already received a transfer with this reference: nothing.
-//   - It already received another transfer, or it was cancelled (its order
-//     code was replaced): duplicate payment, refunded in full
-//     (duplicate_payment, payment-level); no booking changes.
+//   - The checkout cannot take this money — the payment already has another
+//     transfer, another payment of the checkout received money, the checkout
+//     is paid, a booking is past payment, or the payment was replaced
+//     (cancelled) and some booking is no longer bookable: duplicate payment,
+//     refunded in full (duplicate_payment, payment-level).
 //   - Less than the payment amount: needs_review, refunded in full
-//     (payment_mismatch, payment-level); the booking is not confirmed.
-//   - Otherwise every pending_payment booking is confirmed, and every expired
-//     booking that is still bookable (listing bookable, slot still offered on
-//     the visit date, service not started) is re-confirmed; both post
-//     ledger.PostBookingConfirmed. An expired booking that is no longer
-//     bookable stays expired and is refunded in full (late_payment, per
-//     booking) without any ledger entry. More than the amount: the excess is
-//     refunded (payment_mismatch, payment-level) and the payment is
-//     needs_review.
+//     (payment_mismatch, payment-level); nothing is confirmed.
+//   - Otherwise, if the payment had been replaced (Ruling 10), it is accepted
+//     and the replacement pending payment is cancelled (its link too, after
+//     commit). Every booking still bookable is confirmed (pending_payment) or
+//     re-confirmed (expired); a late booking that is no longer bookable is (or
+//     stays) expired and refunded in full (late_payment, per booking) without
+//     any ledger entry. More than the amount: the excess is refunded
+//     (payment_mismatch, payment-level) and the payment is needs_review.
 //
-// Refunds start awaiting_bank_info, or pending when the customer saved a
-// refund account. The customer is emailed (outbox) about each confirmation
-// and refund.
-func (s *Service) HandlePaid(ctx context.Context, tx pgx.Tx, ev payment.PaidEvent) (string, error) {
+// Ledger postings are made after all booking updates, sorted by partner_id
+// (then booking id) so that a future multi-partner checkout always locks
+// partner_balances in ascending order. Refunds start awaiting_bank_info, or
+// pending when the customer saved a refund account. The customer is emailed
+// (outbox) about each confirmation and refund.
+func (s *Service) HandlePaid(ctx context.Context, tx pgx.Tx, ev payment.PaidEvent) (payment.PaidOutcome, error) {
 	q := store.New(tx)
 	now := s.clock.Now()
 
 	rows, err := q.ListCheckoutBookings(ctx, ev.CheckoutID)
 	if err != nil {
-		return "", fmt.Errorf("list checkout bookings: %w", err)
+		return payment.PaidOutcome{}, fmt.Errorf("list checkout bookings: %w", err)
 	}
 	if len(rows) == 0 {
-		return "", fmt.Errorf("booking: checkout %s has no bookings", ev.CheckoutID)
+		return payment.PaidOutcome{}, fmt.Errorf("booking: checkout %s has no bookings", ev.CheckoutID)
 	}
 	rebookable, err := s.reconfirmChecks(ctx, tx, rows, now)
 	if err != nil {
-		return "", err
+		return payment.PaidOutcome{}, err
 	}
 
 	co, err := q.LockCheckout(ctx, ev.CheckoutID)
 	if err != nil {
-		return "", fmt.Errorf("lock checkout: %w", err)
+		return payment.PaidOutcome{}, fmt.Errorf("lock checkout: %w", err)
 	}
 	bookings, err := q.LockCheckoutBookings(ctx, ev.CheckoutID)
 	if err != nil {
-		return "", fmt.Errorf("lock checkout bookings: %w", err)
+		return payment.PaidOutcome{}, fmt.Errorf("lock checkout bookings: %w", err)
 	}
-	pay, err := s.payments.LockPayment(ctx, tx, ev.PaymentID)
+	pays, err := s.payments.LockCheckoutPayments(ctx, tx, ev.CheckoutID)
 	if err != nil {
-		return "", err
+		return payment.PaidOutcome{}, err
+	}
+	i := slices.IndexFunc(pays, func(p payment.Payment) bool { return p.ID == ev.PaymentID })
+	if i < 0 {
+		return payment.PaidOutcome{}, payment.ErrPaymentNotFound
 	}
 
-	c := &confirmation{s: s, q: q, tx: tx, ev: ev, co: co, pay: pay, bookings: bookings, now: now}
-	if pay.ProviderReference != nil && *pay.ProviderReference == ev.Reference {
-		return ResultAlreadyProcessed, nil
+	c := &confirmation{
+		s: s, q: q, tx: tx, ev: ev, co: co, pay: pays[i], pays: pays,
+		bookings: bookings, rebookable: rebookable, now: now,
 	}
-	if pay.ProviderReference != nil || !c.firstMoneyPossible() {
+	if ref := c.pay.ProviderReference; ref != nil && *ref == ev.Reference {
+		return payment.PaidOutcome{Result: ResultAlreadyProcessed}, nil
+	}
+	canTake, err := c.canTakeMoney()
+	if err != nil {
+		return payment.PaidOutcome{}, err
+	}
+	if !canTake {
 		return c.duplicate(ctx)
 	}
-	if ev.AmountPaid < pay.Amount {
+	if ev.AmountPaid < c.pay.Amount {
 		return c.underpaid(ctx)
 	}
-	return c.confirm(ctx, rebookable)
+	return c.confirm(ctx)
 }
 
-// reconfirmChecks evaluates, before any checkout lock, whether each booking
-// that is expired (or whose hold is already past release, so the expiry job
-// may expire it any moment) could still be re-confirmed. Bookings that do
-// not need the check are absent from the map.
+// lateBooking: expired, or pending_payment with the hold already past
+// release at now.
+func lateBooking(b store.Booking, now time.Time) bool {
+	return b.Status == StatusExpired ||
+		(b.Status == StatusPendingPayment && b.HoldReleaseAt != nil && !b.HoldReleaseAt.After(now))
+}
+
+// reconfirmChecks evaluates, before any checkout lock, whether each late
+// booking could still be (re-)confirmed. Bookings that are not late are
+// absent from the map.
 func (s *Service) reconfirmChecks(ctx context.Context, tx pgx.Tx, rows []store.ListCheckoutBookingsRow, now time.Time) (map[uuid.UUID]bool, error) {
 	out := map[uuid.UUID]bool{}
 	var listingIDs []uuid.UUID
 	var check []store.ListCheckoutBookingsRow
 	for _, r := range rows {
-		b := r.Booking
-		late := b.Status == StatusPendingPayment && b.HoldReleaseAt != nil && !b.HoldReleaseAt.After(now)
-		if b.Status != StatusExpired && !late {
+		if !lateBooking(r.Booking, now) {
 			continue
 		}
 		check = append(check, r)
-		if !slices.Contains(listingIDs, b.ListingID) {
-			listingIDs = append(listingIDs, b.ListingID)
+		if !slices.Contains(listingIDs, r.Booking.ListingID) {
+			listingIDs = append(listingIDs, r.Booking.ListingID)
 		}
 	}
-	slices.SortFunc(listingIDs, func(a, b uuid.UUID) int { return strings.Compare(a.String(), b.String()) })
+	slices.SortFunc(listingIDs, func(a, b uuid.UUID) int { return bytes.Compare(a[:], b[:]) })
 	bookable := map[uuid.UUID]bool{}
 	for _, id := range listingIDs {
 		_, err := s.listings.BookableListing(ctx, tx, id)
@@ -185,99 +213,156 @@ func (s *Service) slotStillOffered(ctx context.Context, tx pgx.Tx, r store.ListC
 
 // confirmation is one HandlePaid call after the locks were taken.
 type confirmation struct {
-	s        *Service
-	q        *store.Queries
-	tx       pgx.Tx
-	ev       payment.PaidEvent
-	co       store.Checkout
-	pay      payment.Payment
-	bookings []store.Booking
-	now      time.Time
+	s          *Service
+	q          *store.Queries
+	tx         pgx.Tx
+	ev         payment.PaidEvent
+	co         store.Checkout
+	pay        payment.Payment
+	pays       []payment.Payment
+	bookings   []store.Booking
+	rebookable map[uuid.UUID]bool
+	now        time.Time
+	out        payment.PaidOutcome
 }
 
-// firstMoneyPossible: the payment is still the one this checkout waits for
-// and nothing of the checkout was paid by another payment.
-func (c *confirmation) firstMoneyPossible() bool {
-	if c.pay.Status != payment.StatusPending && c.pay.Status != payment.StatusExpired {
-		return false
+// eligible reports whether a locked booking can be (re-)confirmed now. A
+// late booking that was not checked before the locks is errStateChanged.
+func (c *confirmation) eligible(b store.Booking) (bool, error) {
+	ok, checked := c.rebookable[b.ID]
+	switch {
+	case checked:
+		return ok, nil
+	case lateBooking(b, c.now):
+		return false, errStateChanged
+	default:
+		return b.Status == StatusPendingPayment, nil
 	}
-	if c.co.Status == checkoutPaid {
-		return false
+}
+
+// canTakeMoney: this payment may be the first money of the checkout. A
+// replaced (cancelled) payment additionally needs every booking still
+// bookable (Ruling 10); otherwise late bookings are refunded one by one.
+func (c *confirmation) canTakeMoney() (bool, error) {
+	if c.pay.ProviderReference != nil || c.co.Status == checkoutPaid {
+		return false, nil
+	}
+	switch c.pay.Status {
+	case payment.StatusPending, payment.StatusExpired, payment.StatusCancelled:
+	default:
+		return false, nil
+	}
+	for _, p := range c.pays {
+		if p.ProviderReference != nil {
+			return false, nil // another payment of the checkout received money
+		}
 	}
 	for _, b := range c.bookings {
 		if b.Status != StatusPendingPayment && b.Status != StatusExpired {
-			return false
+			return false, nil
+		}
+		ok, err := c.eligible(b)
+		if err != nil {
+			return false, err
+		}
+		if !ok && c.pay.Status == payment.StatusCancelled {
+			return false, nil
 		}
 	}
-	return true
+	return true, nil
 }
 
-// duplicate refunds a transfer that arrived on a payment which already has
-// money (or was replaced): nothing else changes.
-func (c *confirmation) duplicate(ctx context.Context) (string, error) {
+// duplicate refunds a transfer the checkout cannot take: nothing else
+// changes.
+func (c *confirmation) duplicate(ctx context.Context) (payment.PaidOutcome, error) {
 	if c.pay.ProviderReference == nil {
-		// A cancelled (replaced) payment receives its first money.
+		// A payment that cannot take its first money (e.g. a replaced one).
 		if err := c.s.payments.RecordReceived(ctx, c.tx, c.pay.ID, payment.StatusNeedsReview,
 			c.ev.Reference, c.ev.PaidAt, c.ev.Raw); err != nil {
-			return "", err
+			return c.out, err
 		}
 	}
 	if err := c.paymentRefund(ctx, c.ev.AmountPaid, payment.RefundDuplicatePayment); err != nil {
-		return "", err
+		return c.out, err
 	}
-	return ResultDuplicateRefunded, nil
+	c.out.Result = ResultDuplicateRefunded
+	return c.out, nil
 }
 
 // underpaid: less than the amount due. Nothing is confirmed, the transfer
 // goes back in full and the payment needs a human look.
-func (c *confirmation) underpaid(ctx context.Context) (string, error) {
+func (c *confirmation) underpaid(ctx context.Context) (payment.PaidOutcome, error) {
 	if err := c.s.payments.RecordReceived(ctx, c.tx, c.pay.ID, payment.StatusNeedsReview,
 		c.ev.Reference, c.ev.PaidAt, c.ev.Raw); err != nil {
-		return "", err
+		return c.out, err
 	}
 	if err := c.paymentRefund(ctx, c.ev.AmountPaid, payment.RefundPaymentMismatch); err != nil {
-		return "", err
+		return c.out, err
 	}
-	return ResultUnderpaid, nil
+	c.out.Result = ResultUnderpaid
+	return c.out, nil
 }
 
 // confirm handles a payment of at least the amount due.
-func (c *confirmation) confirm(ctx context.Context, rebookable map[uuid.UUID]bool) (string, error) {
+func (c *confirmation) confirm(ctx context.Context) (payment.PaidOutcome, error) {
 	var results []string
-	confirmed := false
-	for _, b := range c.bookings {
-		switch b.Status {
-		case StatusPendingPayment:
-			if err := c.confirmBooking(ctx, b, nil); err != nil {
-				return "", err
-			}
-			confirmed = true
-			results = appendOnce(results, ResultConfirmed)
-		case StatusExpired:
-			ok, checked := rebookable[b.ID]
-			if !checked {
-				return "", errStateChanged
-			}
-			if ok {
-				reason := reasonLateReconfirm
-				if err := c.confirmBooking(ctx, b, &reason); err != nil {
-					return "", err
-				}
-				confirmed = true
-				results = appendOnce(results, ResultReconfirmed)
+	if c.pay.Status == payment.StatusCancelled {
+		// Ruling 10: the replaced payment is accepted, its replacement goes.
+		for _, p := range c.pays {
+			if p.Status != payment.StatusPending {
 				continue
+			}
+			if err := c.s.payments.CancelPending(ctx, c.tx, p.ID); err != nil {
+				return c.out, err
+			}
+			c.out.CancelOrderCodes = append(c.out.CancelOrderCodes, p.OrderCode)
+		}
+		results = append(results, ResultAcceptedReplaced)
+	}
+
+	var toPost []store.Booking
+	for _, b := range c.bookings {
+		ok, err := c.eligible(b)
+		if err != nil {
+			return c.out, err
+		}
+		switch {
+		case ok && b.Status == StatusPendingPayment:
+			if err := c.confirmBooking(ctx, b, nil); err != nil {
+				return c.out, err
+			}
+			toPost = append(toPost, b)
+			results = appendOnce(results, ResultConfirmed)
+		case ok:
+			reason := reasonLateReconfirm
+			if err := c.confirmBooking(ctx, b, &reason); err != nil {
+				return c.out, err
+			}
+			toPost = append(toPost, b)
+			results = appendOnce(results, ResultReconfirmed)
+		default:
+			if b.Status == StatusPendingPayment {
+				if err := c.expireBooking(ctx, b); err != nil {
+					return c.out, err
+				}
 			}
 			id := b.ID
 			if err := c.refund(ctx, b.GrossAmount, payment.RefundLatePayment, &id, nil, b.ContactEmail); err != nil {
-				return "", err
+				return c.out, err
 			}
 			results = appendOnce(results, ResultLateRefunded)
 		}
 	}
-	if confirmed {
-		if err := c.q.SetCheckoutStatus(ctx, store.SetCheckoutStatusParams{Status: checkoutPaid, Now: c.now, ID: c.co.ID}); err != nil {
-			return "", fmt.Errorf("set checkout paid: %w", err)
-		}
+	if err := c.postLedger(ctx, toPost); err != nil {
+		return c.out, err
+	}
+
+	checkoutStatus := checkoutClosed
+	if len(toPost) > 0 {
+		checkoutStatus = checkoutPaid
+	}
+	if err := c.q.SetCheckoutStatus(ctx, store.SetCheckoutStatusParams{Status: checkoutStatus, Now: c.now, ID: c.co.ID}); err != nil {
+		return c.out, fmt.Errorf("set checkout %s: %w", checkoutStatus, err)
 	}
 	status := payment.StatusPaid
 	excess := c.ev.AmountPaid - c.pay.Amount
@@ -285,40 +370,73 @@ func (c *confirmation) confirm(ctx context.Context, rebookable map[uuid.UUID]boo
 		status = payment.StatusNeedsReview
 	}
 	if err := c.s.payments.RecordReceived(ctx, c.tx, c.pay.ID, status, c.ev.Reference, c.ev.PaidAt, c.ev.Raw); err != nil {
-		return "", err
+		return c.out, err
 	}
 	if excess > 0 {
 		if err := c.paymentRefund(ctx, excess, payment.RefundPaymentMismatch); err != nil {
-			return "", err
+			return c.out, err
 		}
 		results = append(results, ResultOverpaid)
 	}
-	return strings.Join(results, "+"), nil
+	c.out.Result = strings.Join(results, "+")
+	return c.out, nil
 }
 
-// confirmBooking moves a locked booking to confirmed (from pending_payment,
-// or from expired with lateReason), writes its history, posts it to the
-// ledger and emails the customer.
-func (c *confirmation) confirmBooking(ctx context.Context, b store.Booking, lateReason *string) error {
-	if err := c.q.ConfirmBooking(ctx, store.ConfirmBookingParams{Now: c.now, ID: b.ID}); err != nil {
-		return fmt.Errorf("confirm booking: %w", err)
+// postLedger posts the confirmed bookings sorted by partner_id, then
+// booking id: partner_balances rows are then always locked in ascending
+// order, even for a checkout spanning several partners.
+func (c *confirmation) postLedger(ctx context.Context, bs []store.Booking) error {
+	slices.SortFunc(bs, func(a, b store.Booking) int {
+		if n := bytes.Compare(a.PartnerID[:], b.PartnerID[:]); n != 0 {
+			return n
+		}
+		return bytes.Compare(a.ID[:], b.ID[:])
+	})
+	for _, b := range bs {
+		if err := c.s.ledger.PostBookingConfirmed(ctx, c.tx, ledger.BookingMoney{
+			BookingID: b.ID, PartnerID: b.PartnerID, ServiceType: b.ServiceType,
+			Gross: b.GrossAmount, Commission: b.CommissionAmount,
+		}); err != nil {
+			return fmt.Errorf("post booking confirmed: %w", err)
+		}
 	}
+	return nil
+}
+
+func (c *confirmation) history(ctx context.Context, b store.Booking, to string, reason *string) error {
 	histID, err := uuid.NewV7()
 	if err != nil {
 		return err
 	}
 	from := b.Status
 	if err := c.q.InsertStatusHistory(ctx, store.InsertStatusHistoryParams{
-		ID: histID, BookingID: b.ID, FromStatus: &from, ToStatus: StatusConfirmed,
-		ActorKind: actorSystem, Reason: lateReason, Now: c.now,
+		ID: histID, BookingID: b.ID, FromStatus: &from, ToStatus: to,
+		ActorKind: actorSystem, Reason: reason, Now: c.now,
 	}); err != nil {
 		return fmt.Errorf("insert status history: %w", err)
 	}
-	if err := c.s.ledger.PostBookingConfirmed(ctx, c.tx, ledger.BookingMoney{
-		BookingID: b.ID, PartnerID: b.PartnerID, ServiceType: b.ServiceType,
-		Gross: b.GrossAmount, Commission: b.CommissionAmount,
-	}); err != nil {
-		return fmt.Errorf("post booking confirmed: %w", err)
+	return nil
+}
+
+// expireBooking expires a pending booking whose hold passed release and
+// that can no longer be confirmed (Ruling 11).
+func (c *confirmation) expireBooking(ctx context.Context, b store.Booking) error {
+	if err := c.q.ExpireBooking(ctx, store.ExpireBookingParams{Now: c.now, ID: b.ID}); err != nil {
+		return fmt.Errorf("expire booking: %w", err)
+	}
+	reason := reasonLateExpire
+	return c.history(ctx, b, StatusExpired, &reason)
+}
+
+// confirmBooking moves a locked booking to confirmed (from pending_payment,
+// or from expired with lateReason), writes its history and emails the
+// customer. The ledger posting follows in postLedger.
+func (c *confirmation) confirmBooking(ctx context.Context, b store.Booking, lateReason *string) error {
+	if err := c.q.ConfirmBooking(ctx, store.ConfirmBookingParams{Now: c.now, ID: b.ID}); err != nil {
+		return fmt.Errorf("confirm booking: %w", err)
+	}
+	if err := c.history(ctx, b, StatusConfirmed, lateReason); err != nil {
+		return err
 	}
 	return c.s.enqueueEmail(ctx, c.tx, mailer.Message{
 		To:      b.ContactEmail,
@@ -347,7 +465,7 @@ func (c *confirmation) refund(ctx context.Context, amount int64, reason string, 
 	}
 	text := "Xin chào,\n\n" +
 		"LunaIn đã nhận được khoản chuyển " + formatVND(c.ev.AmountPaid) + " cho mã thanh toán " +
-		strconv.FormatInt(c.ev.OrderCode, 10) + ". " + refundExplanation(reason) + "\n" +
+		strconv.FormatInt(c.ev.OrderCode, 10) + ". " + refundExplanation(reason, c.co.Status == checkoutPaid) + "\n" +
 		"Số tiền sẽ được hoàn lại: " + formatVND(amount) + ".\n"
 	if r.Status == payment.RefundAwaitingBankInfo {
 		text += "Vui lòng cập nhật tài khoản ngân hàng nhận hoàn tiền trong tài khoản LunaIn của bạn.\n"
@@ -359,12 +477,17 @@ func (c *confirmation) refund(ctx context.Context, amount int64, reason string, 
 	})
 }
 
-func refundExplanation(reason string) string {
+// refundExplanation: alreadyPaid is whether the checkout was already paid
+// before this transfer (only then is a duplicate truly "paid before").
+func refundExplanation(reason string, alreadyPaid bool) string {
 	switch reason {
 	case payment.RefundLatePayment:
 		return "Tiền về sau khi hết thời gian giữ chỗ và chỗ không còn đặt được, nên đơn không thể xác nhận."
 	case payment.RefundDuplicatePayment:
-		return "Đơn này đã được thanh toán trước đó, khoản chuyển này bị trùng."
+		if alreadyPaid {
+			return "Đơn này đã được thanh toán trước đó, khoản chuyển này bị trùng."
+		}
+		return "Khoản chuyển này sẽ được hoàn lại; vui lòng liên hệ hỗ trợ để hoàn tất đơn."
 	default:
 		return "Số tiền chuyển không khớp với số tiền cần thanh toán."
 	}

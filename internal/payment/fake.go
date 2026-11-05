@@ -32,12 +32,17 @@ type Fake struct {
 	// loseResponses > 0: CreateLink creates the link but returns an error,
 	// as if its response had been lost on the way back.
 	loseResponses int
+	// lagStatus > 0: GetStatus reports PENDING with nothing paid (the
+	// provider's status lags behind its webhook).
+	lagStatus int
+	// statusErrs are returned by the next GetStatus calls, in order.
+	statusErrs []error
 }
 
 // Fake provider error codes (PayOS-like).
 const (
 	fakeCodeOrderExists   = "231"
-	fakeCodeOrderNotFound = "101"
+	fakeCodeOrderNotFound = orderNotFoundCode
 )
 
 var _ Provider = (*Fake)(nil)
@@ -61,6 +66,21 @@ func (f *Fake) LoseNextCreateResponse() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.loseResponses++
+}
+
+// LagNextStatus makes the next GetStatus report PENDING with nothing paid,
+// whatever the real state.
+func (f *Fake) LagNextStatus() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lagStatus++
+}
+
+// FailNextStatus makes the next GetStatus return err.
+func (f *Fake) FailNextStatus(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.statusErrs = append(f.statusErrs, err)
 }
 
 // SetState overrides the provider-side state of a known order.
@@ -116,10 +136,19 @@ func (f *Fake) Request(orderCode int64) (LinkRequest, bool) {
 func (f *Fake) GetStatus(_ context.Context, orderCode int64) (Status, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if len(f.statusErrs) > 0 {
+		err := f.statusErrs[0]
+		f.statusErrs = f.statusErrs[1:]
+		return Status{}, err
+	}
 	l, ok := f.links[orderCode]
 	if !ok {
 		return Status{}, fmt.Errorf("fake payos: order %d: %w", orderCode,
-			&ProviderError{Code: fakeCodeOrderNotFound, Desc: "Không tìm thấy đơn thanh toán"})
+			&ProviderError{Code: fakeCodeOrderNotFound, Desc: orderNotFoundDesc})
+	}
+	if f.lagStatus > 0 {
+		f.lagStatus--
+		return Status{State: StatePending}, nil
 	}
 	return Status{State: l.state, AmountPaid: l.paid}, nil
 }
@@ -147,7 +176,9 @@ func (f *Fake) MarkPaid(orderCode, amount int64) []byte {
 }
 
 // MarkPaidRef is MarkPaid with the bank reference of the transfer; another
-// reference on the same order code is another transfer.
+// reference on the same order code is another transfer. Like PayOS,
+// amountPaid accumulates over transfers and the link is UNDERPAID while it is
+// below the link amount, PAID once it is reached.
 func (f *Fake) MarkPaidRef(orderCode, amount int64, reference string) []byte {
 	f.mu.Lock()
 	l, ok := f.links[orderCode]
@@ -155,7 +186,11 @@ func (f *Fake) MarkPaidRef(orderCode, amount int64, reference string) []byte {
 		l = &fakeLink{amount: amount}
 		f.links[orderCode] = l
 	}
-	l.state, l.paid = StatePaid, amount
+	l.paid += amount
+	l.state = StatePaid
+	if l.paid < l.amount {
+		l.state = StateUnderpaid
+	}
 	f.mu.Unlock()
 
 	now := f.Now

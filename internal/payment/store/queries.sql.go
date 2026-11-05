@@ -337,6 +337,46 @@ func (q *Queries) LockCheckoutBookingRows(ctx context.Context, checkoutID uuid.U
 	return items, nil
 }
 
+const lockCheckoutPayments = `-- name: LockCheckoutPayments :many
+SELECT id, checkout_id, provider, provider_order_code, amount, status, checkout_url, qr_code, expires_at, paid_at, provider_reference, raw, created_at, updated_at FROM payments WHERE checkout_id = $1 ORDER BY id FOR UPDATE
+`
+
+// All payments of a checkout, locked in id order (after its bookings).
+func (q *Queries) LockCheckoutPayments(ctx context.Context, checkoutID uuid.UUID) ([]Payment, error) {
+	rows, err := q.db.Query(ctx, lockCheckoutPayments, checkoutID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Payment
+	for rows.Next() {
+		var i Payment
+		if err := rows.Scan(
+			&i.ID,
+			&i.CheckoutID,
+			&i.Provider,
+			&i.ProviderOrderCode,
+			&i.Amount,
+			&i.Status,
+			&i.CheckoutUrl,
+			&i.QrCode,
+			&i.ExpiresAt,
+			&i.PaidAt,
+			&i.ProviderReference,
+			&i.Raw,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const lockCheckoutRow = `-- name: LockCheckoutRow :one
 SELECT id FROM checkouts WHERE id = $1 FOR UPDATE
 `

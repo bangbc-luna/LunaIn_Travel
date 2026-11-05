@@ -110,7 +110,9 @@ func (s *Service) ReservePayment(ctx context.Context, tx pgx.Tx, checkoutID uuid
 // code is checked with GetStatus (Ruling 8):
 //   - PAID: ErrPaymentProcessing; the webhook confirms the booking.
 //   - PENDING: the link is cancelled at the provider first.
-//   - CANCELLED, EXPIRED or unknown to the provider: nothing to cancel.
+//   - CANCELLED, EXPIRED or not found at the provider: nothing to cancel.
+//   - UNDERPAID, PROCESSING or any amount paid: ErrPaymentProcessing too.
+//   - Any other state or provider error: ErrProviderUnavailable, no rotation.
 //
 // Then, in one short tx (checkout -> bookings -> payment), the payment is
 // marked cancelled and a fresh pending payment with a new order code and the
@@ -179,22 +181,26 @@ func (s *Service) ActivateLink(ctx context.Context, paymentID uuid.UUID) (Paymen
 func (s *Service) replaceLostLink(ctx context.Context, p Payment, createErr error) (Payment, error) {
 	unavailable := func(err error) error { return fmt.Errorf("%w: %v", ErrProviderUnavailable, err) }
 	st, err := s.provider.GetStatus(ctx, p.OrderCode)
-	var pe *ProviderError
 	switch {
-	case err == nil && st.State == StatePaid:
+	case IsOrderNotFound(err):
+		// Unknown to the provider: the link was never created.
+	case err != nil:
+		// Unreachable, or another provider error: we cannot tell whether
+		// the link exists, so nothing is rotated.
+		return p, unavailable(errors.Join(createErr, err))
+	case st.State == StatePaid || st.State == StateUnderpaid || st.State == StateProcessing || st.AmountPaid > 0:
+		// Money arrived (or is arriving): the webhook handles it.
 		return p, ErrPaymentProcessing
-	case err == nil && st.State == StatePending:
+	case st.State == StatePending:
 		if err := s.provider.CancelLink(ctx, p.OrderCode); err != nil {
 			s.log.Warn("payment: cancel lost link failed", "payment_id", p.ID, "order_code", p.OrderCode, "err", err)
 			return p, unavailable(err)
 		}
-	case err == nil:
-		// CANCELLED, EXPIRED: the order code can no longer be paid.
-	case errors.As(err, &pe):
-		// Unknown to the provider: the link was never created.
+	case st.State == StateCancelled || st.State == StateExpired:
+		// The order code can no longer be paid.
 	default:
-		// The provider is unreachable: we cannot tell whether the link exists.
-		return p, unavailable(createErr)
+		// FAILED or a state we do not know: do not rotate.
+		return p, unavailable(fmt.Errorf("%w; provider state %s", createErr, st.State))
 	}
 
 	var fresh Payment
@@ -322,4 +328,36 @@ func (s *Service) RecordReceived(ctx context.Context, tx pgx.Tx, id uuid.UUID, s
 		return fmt.Errorf("record payment received: %w", err)
 	}
 	return nil
+}
+
+// LockCheckoutPayments locks every payment of a checkout FOR UPDATE in id
+// order, in the caller's tx (which already holds the checkout and its
+// bookings).
+func (s *Service) LockCheckoutPayments(ctx context.Context, tx pgx.Tx, checkoutID uuid.UUID) ([]Payment, error) {
+	rows, err := store.New(tx).LockCheckoutPayments(ctx, checkoutID)
+	if err != nil {
+		return nil, fmt.Errorf("lock checkout payments: %w", err)
+	}
+	out := make([]Payment, len(rows))
+	for i, r := range rows {
+		out[i] = fromRow(r)
+	}
+	return out, nil
+}
+
+// CancelPending marks a locked pending payment cancelled (its link is then
+// cancelled at the provider after commit, see CancelLinkBestEffort).
+func (s *Service) CancelPending(ctx context.Context, tx pgx.Tx, id uuid.UUID) error {
+	if err := store.New(tx).CancelPayment(ctx, store.CancelPaymentParams{Now: s.clock.Now(), ID: id}); err != nil {
+		return fmt.Errorf("cancel payment: %w", err)
+	}
+	return nil
+}
+
+// CancelLinkBestEffort cancels a payment link at the provider, outside any
+// tx; a failure is only logged (money arriving on it is refunded anyway).
+func (s *Service) CancelLinkBestEffort(ctx context.Context, orderCode int64) {
+	if err := s.provider.CancelLink(ctx, orderCode); err != nil {
+		s.log.Warn("payment: cancel link failed", "order_code", orderCode, "err", err)
+	}
 }
