@@ -29,6 +29,26 @@ func (q *Queries) AddSettlementNetPending(ctx context.Context, arg AddSettlement
 	return err
 }
 
+const availableAfterMismatches = `-- name: AvailableAfterMismatches :one
+SELECT COUNT(*)::bigint FROM (
+    SELECT available_after,
+           SUM(CASE WHEN bucket = 'available' THEN amount ELSE 0 END)
+               OVER (ORDER BY seq ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)::bigint AS running
+    FROM ledger_entries
+    WHERE partner_id = $1
+) e
+WHERE e.available_after <> e.running
+`
+
+// Entries whose available_after differs from the running sum of the
+// available bucket up to and including their seq.
+func (q *Queries) AvailableAfterMismatches(ctx context.Context, partnerID uuid.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, availableAfterMismatches, partnerID)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const ensurePartnerBalance = `-- name: EnsurePartnerBalance :exec
 INSERT INTO partner_balances (partner_id, created_at, updated_at)
 VALUES ($1, $2, $2)
@@ -62,6 +82,19 @@ func (q *Queries) GetPartnerBalance(ctx context.Context, partnerID uuid.UUID) (P
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const getPlatformCommission = `-- name: GetPlatformCommission :one
+SELECT amount FROM platform_commission_entries
+WHERE booking_id = $1 AND kind = 'commission'
+`
+
+// The platform commission taken on a booking (no row: 0% rate).
+func (q *Queries) GetPlatformCommission(ctx context.Context, bookingID uuid.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, getPlatformCommission, bookingID)
+	var amount int64
+	err := row.Scan(&amount)
+	return amount, err
 }
 
 const insertLedgerEntry = `-- name: InsertLedgerEntry :exec

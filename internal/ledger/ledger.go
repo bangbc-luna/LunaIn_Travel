@@ -3,9 +3,11 @@
 // commission book (DB §8).
 //
 // Every posting method runs inside the caller's transaction. The caller
-// already holds its booking-level locks; this package locks
+// MUST already hold the booking row FOR UPDATE; this package locks
 // booking_settlements (a booking child row) next and partner_balances LAST,
-// following the global lock order (DB §1.1).
+// following the global lock order (DB §1.1). A posting that would repeat one
+// already made for the booking fails with ErrAlreadyPosted; the caller's tx
+// is then aborted and must be rolled back.
 package ledger
 
 import (
@@ -16,6 +18,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/bangbc-luna/lunain-travel/internal/ledger/store"
@@ -42,8 +45,13 @@ var (
 	ErrSettlementNotFound = errors.New("ledger: booking settlement not found")
 	// ErrAlreadyReleased: the booking's money already left pending.
 	ErrAlreadyReleased = errors.New("ledger: booking settlement already released")
-	// ErrInvalidAmount: a negative amount, or a commission above gross.
+	// ErrInvalidAmount: a negative amount, a commission above gross, or a
+	// waiver that is not the booking's commission.
 	ErrInvalidAmount = errors.New("ledger: invalid amount")
+	// ErrAlreadyPosted: this posting was already made for the booking
+	// (unique violation on the settlement, the per-booking entry kind or the
+	// platform commission kind). The tx is aborted.
+	ErrAlreadyPosted = errors.New("ledger: already posted for this booking")
 )
 
 // Service posts ledger entries and reads partner balances.
@@ -78,6 +86,9 @@ type entry struct {
 // PostBookingConfirmed records a confirmed booking: booking_earning
 // +(Gross − Commission) in pending, the platform commission (skipped when 0)
 // and the booking's settlement with net_pending = Gross − Commission.
+//
+// The caller MUST hold the bookings row FOR UPDATE. A second confirmation of
+// the same booking is ErrAlreadyPosted.
 func (s *Service) PostBookingConfirmed(ctx context.Context, tx pgx.Tx, b BookingMoney) error {
 	if b.Gross < 0 || b.Commission < 0 || b.Commission > b.Gross {
 		return fmt.Errorf("%w: gross %d, commission %d", ErrInvalidAmount, b.Gross, b.Commission)
@@ -91,7 +102,7 @@ func (s *Service) PostBookingConfirmed(ctx context.Context, tx pgx.Tx, b Booking
 	if err := q.InsertSettlement(ctx, store.InsertSettlementParams{
 		BookingID: b.BookingID, PartnerID: b.PartnerID, NetPending: net, Now: now,
 	}); err != nil {
-		return fmt.Errorf("insert booking settlement: %w", err)
+		return fmt.Errorf("insert booking settlement: %w", mapDuplicate(err))
 	}
 	if err := s.postPlatform(ctx, q, b.BookingID, b.ServiceType, platformCommission, b.Commission, now); err != nil {
 		return err
@@ -101,6 +112,9 @@ func (s *Service) PostBookingConfirmed(ctx context.Context, tx pgx.Tx, b Booking
 
 // PostRefund records a refund to the customer: refund_debit −refund in
 // pending, taken from the booking's net_pending. A zero refund writes nothing.
+//
+// The caller MUST hold the bookings row FOR UPDATE. A booking is refunded at
+// most once: a second non-zero refund is ErrAlreadyPosted.
 func (s *Service) PostRefund(ctx context.Context, tx pgx.Tx, bookingID, partnerID uuid.UUID, refund int64) error {
 	if refund < 0 {
 		return fmt.Errorf("%w: refund %d", ErrInvalidAmount, refund)
@@ -123,7 +137,12 @@ func (s *Service) PostRefund(ctx context.Context, tx pgx.Tx, bookingID, partnerI
 
 // PostCommissionWaiver gives the commission back to the partner (force
 // majeure): commission_waiver +commission in pending and a platform waiver of
-// −commission. A zero commission writes nothing.
+// −commission. commission must equal the platform commission recorded for the
+// booking at confirmation (0 when none was), else ErrInvalidAmount. A zero
+// commission writes nothing.
+//
+// The caller MUST hold the bookings row FOR UPDATE. A second waiver is
+// ErrAlreadyPosted.
 func (s *Service) PostCommissionWaiver(ctx context.Context, tx pgx.Tx, bookingID, partnerID uuid.UUID, serviceType string, commission int64) error {
 	if commission < 0 {
 		return fmt.Errorf("%w: commission %d", ErrInvalidAmount, commission)
@@ -131,6 +150,16 @@ func (s *Service) PostCommissionWaiver(ctx context.Context, tx pgx.Tx, bookingID
 	q := store.New(tx)
 	if _, err := s.lockOpenSettlement(ctx, q, bookingID, partnerID); err != nil {
 		return err
+	}
+	taken, err := q.GetPlatformCommission(ctx, bookingID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		taken, err = 0, nil
+	}
+	if err != nil {
+		return fmt.Errorf("get platform commission: %w", err)
+	}
+	if commission != taken {
+		return fmt.Errorf("%w: waiver %d, commission taken %d", ErrInvalidAmount, commission, taken)
 	}
 	if commission == 0 {
 		return nil
@@ -147,11 +176,17 @@ func (s *Service) PostCommissionWaiver(ctx context.Context, tx pgx.Tx, bookingID
 	return s.post(ctx, q, partnerID, bookingID, now, entry{kindCommissionWaiver, bucketPending, commission})
 }
 
-// ScheduleRelease sets the booking's release_due_at unless it is already set.
+// ScheduleRelease sets the booking's release_due_at unless it is already set
+// or the settlement is already released (both no-ops). The caller MUST hold
+// the bookings row FOR UPDATE.
 func (s *Service) ScheduleRelease(ctx context.Context, tx pgx.Tx, bookingID uuid.UUID, dueAt time.Time) error {
 	q := store.New(tx)
-	if _, err := s.lockSettlement(ctx, q, bookingID); err != nil {
+	st, err := s.lockSettlement(ctx, q, bookingID)
+	if err != nil {
 		return err
+	}
+	if st.ReleasedAt != nil {
+		return nil
 	}
 	if err := q.SetSettlementReleaseDue(ctx, store.SetSettlementReleaseDueParams{
 		ReleaseDueAt: dueAt, Now: s.clock.Now(), BookingID: bookingID,
@@ -163,7 +198,8 @@ func (s *Service) ScheduleRelease(ctx context.Context, tx pgx.Tx, bookingID uuid
 
 // Release moves the booking's net_pending from pending to available (two
 // release entries; none when it is 0) and closes the settlement. Releasing an
-// already released booking does nothing.
+// already released booking does nothing. The caller MUST hold the bookings
+// row FOR UPDATE.
 func (s *Service) Release(ctx context.Context, tx pgx.Tx, bookingID uuid.UUID) error {
 	q := store.New(tx)
 	st, err := s.lockSettlement(ctx, q, bookingID)
@@ -195,8 +231,10 @@ func (s *Service) Balance(ctx context.Context, partnerID uuid.UUID) (Balance, er
 }
 
 // Verify checks the partner_balances cache against the entries: the sum of
-// each bucket, seq contiguous from 1 up to last_seq, and the last entry's
-// available_after. Any mismatch is an error. All reads share one snapshot.
+// each bucket, seq contiguous from 1 up to last_seq, every entry's
+// available_after (the running sum of the available bucket in seq order) and
+// the last one against the cache. Any mismatch is an error. All reads share
+// one snapshot.
 func (s *Service) Verify(ctx context.Context, partnerID uuid.UUID) error {
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
@@ -225,6 +263,13 @@ func (s *Service) Verify(ctx context.Context, partnerID uuid.UUID) error {
 			partnerID, cache.LastSeq, tot.Entries, tot.MaxSeq)
 	}
 	if tot.Entries > 0 {
+		bad, err := q.AvailableAfterMismatches(ctx, partnerID)
+		if err != nil {
+			return fmt.Errorf("available_after mismatches: %w", err)
+		}
+		if bad != 0 {
+			return fmt.Errorf("ledger: partner %s has %d entries with a wrong available_after", partnerID, bad)
+		}
 		last, err := q.LastAvailableAfter(ctx, partnerID)
 		if err != nil {
 			return fmt.Errorf("last available_after: %w", err)
@@ -278,7 +323,7 @@ func (s *Service) postPlatform(ctx context.Context, q *store.Queries, bookingID 
 	if err := q.InsertPlatformCommission(ctx, store.InsertPlatformCommissionParams{
 		ID: id, BookingID: bookingID, ServiceType: serviceType, Kind: kind, Amount: amount, Now: now,
 	}); err != nil {
-		return fmt.Errorf("insert platform %s: %w", kind, err)
+		return fmt.Errorf("insert platform %s: %w", kind, mapDuplicate(err))
 	}
 	return nil
 }
@@ -324,7 +369,7 @@ func (s *Service) post(ctx context.Context, q *store.Queries, partnerID, booking
 			ID: id, PartnerID: partnerID, Seq: seq, AvailableAfter: available,
 			BookingID: &bookingID, Kind: e.kind, Bucket: e.bucket, Amount: e.amount, Now: now,
 		}); err != nil {
-			return fmt.Errorf("insert ledger entry %s/%s: %w", e.kind, e.bucket, err)
+			return fmt.Errorf("insert ledger entry %s/%s: %w", e.kind, e.bucket, mapDuplicate(err))
 		}
 	}
 	if err := q.UpdatePartnerBalance(ctx, store.UpdatePartnerBalanceParams{
@@ -333,4 +378,22 @@ func (s *Service) post(ctx context.Context, q *store.Queries, partnerID, booking
 		return fmt.Errorf("update partner balance: %w", err)
 	}
 	return nil
+}
+
+// duplicatePostConstraints are the unique constraints that reject a posting
+// repeated for the same booking.
+var duplicatePostConstraints = map[string]bool{
+	"booking_settlements_pkey":                        true,
+	"ledger_entries_booking_kind_bucket_idx":          true,
+	"platform_commission_entries_booking_id_kind_key": true,
+}
+
+// mapDuplicate turns a unique violation of a per-booking posting constraint
+// into ErrAlreadyPosted, keeping the driver error in the chain.
+func mapDuplicate(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" && duplicatePostConstraints[pgErr.ConstraintName] {
+		return fmt.Errorf("%w: %w", ErrAlreadyPosted, err)
+	}
+	return err
 }

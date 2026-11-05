@@ -63,3 +63,20 @@ SELECT available_after FROM ledger_entries
 WHERE partner_id = @partner_id
 ORDER BY seq DESC
 LIMIT 1;
+
+-- The platform commission taken on a booking (no row: 0% rate).
+-- name: GetPlatformCommission :one
+SELECT amount FROM platform_commission_entries
+WHERE booking_id = @booking_id AND kind = 'commission';
+
+-- Entries whose available_after differs from the running sum of the
+-- available bucket up to and including their seq.
+-- name: AvailableAfterMismatches :one
+SELECT COUNT(*)::bigint FROM (
+    SELECT available_after,
+           SUM(CASE WHEN bucket = 'available' THEN amount ELSE 0 END)
+               OVER (ORDER BY seq ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)::bigint AS running
+    FROM ledger_entries
+    WHERE partner_id = @partner_id
+) e
+WHERE e.available_after <> e.running;
