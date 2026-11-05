@@ -118,6 +118,15 @@ _Avoid_: Wallet, account balance
 Yêu cầu đối tác rút phần số dư khả dụng; Super Admin duyệt và chuyển khoản.
 _Avoid_: Withdrawal (trong code dùng Payout), settlement
 
+**Statement** (Sao kê):
+Danh sách bút toán ngăn `available` giữa hai Payout (theo `seq`), kèm số dư đầu kỳ và cuối kỳ.
+
+**Adjustment** (Điều chỉnh):
+Bút toán tay của Super Admin vào số dư khả dụng của đối tác, bắt buộc có lý do.
+
+**Reconciliation** (Đối soát):
+Job hằng ngày so payments với PayOS và so số dư cache với sổ cái.
+
 ## Kiểm duyệt
 
 **Listing Review** (Duyệt sản phẩm):

@@ -57,6 +57,7 @@ func buildMux(d muxDeps) (*http.ServeMux, []string) {
 	d.Listing.AdminRoutes(rr, d.Issuer)
 	d.Listing.PublicRoutes(rr)
 	d.Ledger.PartnerRoutes(rr, d.Issuer, d.Partner.RequireMember())
+	d.Ledger.AdminRoutes(rr, d.Issuer, d.Partner)
 	d.Booking.CustomerRoutes(rr, d.Issuer)
 	d.Booking.PartnerRoutes(rr, d.Issuer, d.Partner.RequireMember())
 	d.Booking.AdminRoutes(rr, d.Issuer)

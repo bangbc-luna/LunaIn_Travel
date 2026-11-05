@@ -110,6 +110,12 @@ func (f *fixture) newListing(t *testing.T, partner uuid.UUID) uuid.UUID {
 // returns the money the ledger is told about.
 func (f *fixture) newBooking(t *testing.T, gross, commission int64) ledger.BookingMoney {
 	t.Helper()
+	return f.newBookingOf(t, f.partner, f.listing, gross, commission)
+}
+
+// newBookingOf is newBooking for any partner and one of its listings.
+func (f *fixture) newBookingOf(t *testing.T, partner, listing uuid.UUID, gross, commission int64) ledger.BookingMoney {
+	t.Helper()
 	id := newID(t)
 	bps := 0
 	if gross > 0 {
@@ -125,8 +131,8 @@ func (f *fixture) newBooking(t *testing.T, gross, commission int64) ledger.Booki
 		'2026-12-01 02:00:00Z', '2026-12-01 16:59:59Z', '2026-12-01 02:00:00Z',
 		$7, $8, $9, '[]',
 		'Nguyễn Văn A', '0900000000', 'a@customer.test', now(), $10
-	)`, id, randCode(t, "LT"), f.checkout, f.customer, f.partner, f.listing, gross, bps, commission, randToken(t))
-	return ledger.BookingMoney{BookingID: id, PartnerID: f.partner, ServiceType: attraction, Gross: gross, Commission: commission}
+	)`, id, randCode(t, "LT"), f.checkout, f.customer, partner, listing, gross, bps, commission, randToken(t))
+	return ledger.BookingMoney{BookingID: id, PartnerID: partner, ServiceType: attraction, Gross: gross, Commission: commission}
 }
 
 // inTx runs fn in a committed transaction and fails the test on error.

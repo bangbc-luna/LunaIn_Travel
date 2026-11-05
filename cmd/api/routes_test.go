@@ -185,6 +185,8 @@ var adminRoutes = []route{
 	{"DELETE /v1/admin/partners/{id}/service-types/{code}", "/v1/admin/partners/" + uuid.Nil.String() + "/service-types/attraction_ticket"},
 	{"POST /v1/admin/partners/{id}/suspend", "/v1/admin/partners/" + uuid.Nil.String() + "/suspend"},
 	{"POST /v1/admin/partners/{id}/unsuspend", "/v1/admin/partners/" + uuid.Nil.String() + "/unsuspend"},
+	{"GET /v1/admin/partners/{id}/ledger", "/v1/admin/partners/" + uuid.Nil.String() + "/ledger"},
+	{"POST /v1/admin/partners/{id}/adjustments", "/v1/admin/partners/" + uuid.Nil.String() + "/adjustments"},
 	{"GET /v1/admin/listings", "/v1/admin/listings"},
 	{"GET /v1/admin/listings/{id}", "/v1/admin/listings/" + uuid.Nil.String()},
 	{"POST /v1/admin/listings/{id}/approve", "/v1/admin/listings/" + uuid.Nil.String() + "/approve"},
