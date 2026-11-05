@@ -230,3 +230,27 @@ func TestRemindAwaitingBankInfo_Cadence(t *testing.T) {
 	require.Equal(t, 5, e.count(t, `SELECT bank_info_reminder_count FROM refunds WHERE id = $1`, r.ID))
 	require.Equal(t, 0, e.count(t, `SELECT bank_info_reminder_count FROM refunds WHERE id = $1`, other.ID))
 }
+
+// The daily job does not start at exactly the same second every day: a run
+// a few seconds (or minutes) earlier than 3 days after the previous reminder
+// still sends the next one, instead of pushing it to day 4. A run one day
+// early still sends nothing.
+func TestRemindAwaitingBankInfo_ToleratesJobJitter(t *testing.T) {
+	e := newOpsEnv(t)
+	ctx := context.Background()
+	e.cancelledRefund(t, "a", false)
+	day := 24 * time.Hour
+	run := func(at time.Duration) int {
+		t.Helper()
+		e.Clock.T = opsNow.Add(at)
+		n, err := e.Payments.RemindAwaitingBankInfo(ctx)
+		require.NoError(t, err)
+		return n
+	}
+	require.Equal(t, 0, run(2*day))
+	require.Equal(t, 1, run(3*day+7*time.Second), "first reminder, the job started late")
+	require.Equal(t, 0, run(4*day))
+	require.Equal(t, 1, run(6*day+2*time.Second), "3 days minus 5s after the previous reminder")
+	require.Equal(t, 1, run(9*day-10*time.Minute), "3 days minus ~10 minutes")
+	require.Equal(t, 0, run(11*day), "one day early")
+}

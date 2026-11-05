@@ -45,7 +45,6 @@ const (
 	ResultUnderpaid         = "underpaid"
 	ResultOverpaid          = "overpaid"
 	ResultDuplicateRefunded = "duplicate_refunded"
-	ResultAlreadyProcessed  = "already_processed"
 	// ResultAcceptedReplaced: money on a replaced (cancelled) order code was
 	// accepted and the replacement payment cancelled (Ruling 10).
 	ResultAcceptedReplaced = "accepted_replaced_link"
@@ -134,7 +133,7 @@ func (s *Service) HandlePaid(ctx context.Context, tx pgx.Tx, ev payment.PaidEven
 		bookings: bookings, rebookable: rebookable, now: now,
 	}
 	if ref := c.pay.ProviderReference; ref != nil && *ref == ev.Reference {
-		return payment.PaidOutcome{Result: ResultAlreadyProcessed}, nil
+		return payment.PaidOutcome{Result: payment.ResultAlreadyProcessed}, nil
 	}
 	canTake, err := c.canTakeMoney(ctx)
 	if err != nil {

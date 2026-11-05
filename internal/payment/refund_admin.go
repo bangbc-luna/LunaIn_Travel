@@ -30,7 +30,11 @@ const (
 
 	// Bank info reminders (user decision): every 3 days at most, at most 5
 	// times, at most remindBatch refunds per run.
-	remindEvery  = 72 * time.Hour
+	remindEvery = 72 * time.Hour
+	// remindSlack: the daily job does not start at the same second every
+	// day; a run up to this much earlier than remindEvery after the
+	// previous reminder still sends the next one (instead of on day 4).
+	remindSlack  = time.Hour
 	maxReminders = 5
 	remindBatch  = 200
 )
@@ -205,14 +209,15 @@ func (s *Service) CompleteRefund(ctx context.Context, actor, id uuid.UUID, in Co
 
 // RemindAwaitingBankInfo emails the customer of every refund still
 // awaiting_bank_info, created at least 3 days ago and last reminded at least
-// 3 days ago (or never), reminded fewer than 5 times; at most 200 refunds
+// 3 days ago (or never), reminded fewer than 5 times — "3 days" tolerating a
+// job start up to remindSlack early; at most 200 refunds
 // per run (oldest first). Each refund is handled in its own tx: locked, the
 // conditions checked again, the email queued, its reminder count and time
 // updated. A failing refund is logged and skipped (the next run retries).
 // It returns how many reminders were queued.
 func (s *Service) RemindAwaitingBankInfo(ctx context.Context) (int, error) {
 	now := s.clock.Now()
-	cutoff := now.Add(-remindEvery)
+	cutoff := now.Add(-remindEvery + remindSlack)
 	ids, err := store.New(s.pool).ListRefundsToRemind(ctx, store.ListRefundsToRemindParams{
 		Cutoff: cutoff, MaxCount: maxReminders, Lim: remindBatch,
 	})

@@ -31,6 +31,9 @@ const (
 	ResultAwaitingStatus = "awaiting_status"
 	// ResultNoAmount: a signed webhook without a positive amount.
 	ResultNoAmount = "no_amount"
+	// ResultAlreadyProcessed: a PaymentHandler result, the payment already
+	// received this transfer; the event then carries no amount.
+	ResultAlreadyProcessed = "already_processed"
 )
 
 // StatusLagLimit is how long a transfer whose signed webhook the provider's
@@ -218,15 +221,29 @@ func (s *Service) ProcessWebhook(ctx context.Context, body []byte, h PaymentHand
 		PaymentID: p.ID, CheckoutID: p.CheckoutID, OrderCode: wd.OrderCode, AmountPaid: wd.Amount,
 		NeedsReview: needsReview, Reference: reference, PaidAt: paidAt, Raw: wd.Raw,
 	}
+	_, _, err = s.applyTransfer(ctx, key, p, ev, body, h)
+	return err
+}
+
+// applyTransfer is step 5 of ProcessWebhook, the only way money enters: in
+// one tx it inserts the payment_events row of key (payload, amount =
+// ev.AmountPaid) and, unless a concurrent delivery of the same transfer
+// committed it first (applied false, nothing else done), runs h.HandlePaid
+// and stores its result (an already_processed row keeps no amount). After
+// commit, the links the handler replaced are cancelled at the provider (best
+// effort).
+func (s *Service) applyTransfer(ctx context.Context, key string, p Payment, ev PaidEvent, payload []byte, h PaymentHandler) (PaidOutcome, bool, error) {
 	var out PaidOutcome
-	err = db.InTx(ctx, s.pool, func(tx pgx.Tx) error {
+	applied := false
+	err := db.InTx(ctx, s.pool, func(tx pgx.Tx) error {
 		tq := store.New(tx)
 		id, err := uuid.NewV7()
 		if err != nil {
 			return err
 		}
+		amount := ev.AmountPaid
 		n, err := tq.InsertPaymentEvent(ctx, store.InsertPaymentEventParams{
-			ID: id, PaymentID: &p.ID, DedupeKey: key, Payload: body, Now: now,
+			ID: id, PaymentID: &p.ID, DedupeKey: key, Payload: payload, Now: s.clock.Now(), Amount: &amount,
 		})
 		if err != nil {
 			return fmt.Errorf("insert payment event: %w", err)
@@ -241,15 +258,16 @@ func (s *Service) ProcessWebhook(ctx context.Context, body []byte, h PaymentHand
 		if err := tq.FinishPaymentEvent(ctx, store.FinishPaymentEventParams{Now: s.clock.Now(), Result: out.Result, DedupeKey: key}); err != nil {
 			return fmt.Errorf("finish payment event: %w", err)
 		}
+		applied = true
 		return nil
 	})
 	if err != nil {
-		return err
+		return PaidOutcome{}, false, err
 	}
 	for _, oc := range out.CancelOrderCodes {
 		s.CancelLinkBestEffort(context.WithoutCancel(ctx), oc)
 	}
-	return nil
+	return out, applied, nil
 }
 
 // awaitStatus tracks a transfer the provider's status does not show yet. The

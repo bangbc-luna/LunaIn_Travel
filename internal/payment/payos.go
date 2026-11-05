@@ -134,6 +134,19 @@ type Link struct {
 type Status struct {
 	State      string
 	AmountPaid int64
+	// Transactions are the transfers the provider lists on the link,
+	// informational only: the PayOS docs show "transactions" without
+	// documenting its fields, so nothing ties a Reference here to the
+	// webhook's data.reference (see ReconcilePayments).
+	Transactions []StatusTransaction
+}
+
+// StatusTransaction is one transfer listed by GetStatus. At is zero when the
+// provider sent no parseable time.
+type StatusTransaction struct {
+	Reference string    `json:"reference"`
+	Amount    int64     `json:"amount"`
+	At        time.Time `json:"at"`
 }
 
 // WebhookData is the verified content of a payment webhook.
@@ -293,13 +306,39 @@ func (p *PayOS) GetStatus(ctx context.Context, orderCode int64) (Status, error) 
 		return Status{}, err
 	}
 	var d struct {
-		Status     string `json:"status"`
-		AmountPaid int64  `json:"amountPaid"`
+		Status       string          `json:"status"`
+		AmountPaid   int64           `json:"amountPaid"`
+		Transactions json.RawMessage `json:"transactions"`
 	}
 	if err := json.Unmarshal(data, &d); err != nil {
 		return Status{}, fmt.Errorf("payos: decode status data: %w", err)
 	}
-	return Status{State: d.Status, AmountPaid: d.AmountPaid}, nil
+	return Status{State: d.Status, AmountPaid: d.AmountPaid, Transactions: decodeStatusTransactions(d.Transactions)}, nil
+}
+
+// decodeStatusTransactions reads the "transactions" of a payment link. The
+// docs (https://payos.vn/docs/api/, "Lấy thông tin link thanh toán") show it
+// as an empty object and document no field, so it is read leniently with the
+// field names of the webhook data (reference, amount, transactionDateTime):
+// anything but an array of objects gives no transactions, never an error
+// (the status and amount paid must not be lost to it).
+func decodeStatusTransactions(raw json.RawMessage) []StatusTransaction {
+	var items []struct {
+		Reference           string `json:"reference"`
+		Amount              int64  `json:"amount"`
+		TransactionDateTime string `json:"transactionDateTime"`
+	}
+	if len(raw) == 0 || json.Unmarshal(raw, &items) != nil || len(items) == 0 {
+		return nil
+	}
+	out := make([]StatusTransaction, len(items))
+	for i, it := range items {
+		out[i] = StatusTransaction{Reference: it.Reference, Amount: it.Amount}
+		if t, err := time.ParseInLocation(txTimeLayout, it.TransactionDateTime, vnZone); err == nil {
+			out[i].At = t
+		}
+	}
+	return out
 }
 
 // CancelLink cancels a link (POST /v2/payment-requests/{id}/cancel).

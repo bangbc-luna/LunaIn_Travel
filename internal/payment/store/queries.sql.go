@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const cancelPayment = `-- name: CancelPayment :exec
@@ -92,7 +93,9 @@ func (q *Queries) CompleteRefund(ctx context.Context, arg CompleteRefundParams) 
 }
 
 const finishPaymentEvent = `-- name: FinishPaymentEvent :exec
-UPDATE payment_events SET processed_at = $1::timestamptz, result = $2::text, updated_at = $1
+UPDATE payment_events
+SET processed_at = $1::timestamptz, result = $2::text,
+    amount = CASE WHEN $2::text = 'already_processed' THEN NULL ELSE amount END, updated_at = $1
 WHERE dedupe_key = $3
 `
 
@@ -102,6 +105,7 @@ type FinishPaymentEventParams struct {
 	DedupeKey string
 }
 
+// An already_processed transfer brought no new money: its amount is cleared.
 func (q *Queries) FinishPaymentEvent(ctx context.Context, arg FinishPaymentEventParams) error {
 	_, err := q.db.Exec(ctx, finishPaymentEvent, arg.Now, arg.Result, arg.DedupeKey)
 	return err
@@ -191,6 +195,17 @@ func (q *Queries) GetPaymentEventReceivedAt(ctx context.Context, dedupeKey strin
 	return received_at, err
 }
 
+const getPaymentEventResult = `-- name: GetPaymentEventResult :one
+SELECT result FROM payment_events WHERE dedupe_key = $1
+`
+
+func (q *Queries) GetPaymentEventResult(ctx context.Context, dedupeKey string) (*string, error) {
+	row := q.db.QueryRow(ctx, getPaymentEventResult, dedupeKey)
+	var result *string
+	err := row.Scan(&result)
+	return result, err
+}
+
 const getPaymentWithCheckoutCode = `-- name: GetPaymentWithCheckoutCode :one
 SELECT p.id, p.checkout_id, p.provider, p.provider_order_code, p.amount, p.status, p.checkout_url, p.qr_code, p.expires_at, p.paid_at, p.provider_reference, p.raw, p.created_at, p.updated_at, p.review_seen_at, p.review_seen_by, p.review_resolved_at, p.review_resolved_by, p.review_note, c.code AS checkout_code
 FROM payments p
@@ -262,6 +277,28 @@ func (q *Queries) GetPendingPaymentByCheckout(ctx context.Context, checkoutID uu
 	return i, err
 }
 
+const getReconciliation = `-- name: GetReconciliation :one
+SELECT id, run_date, status, checked_payments, mismatches, started_at, finished_at, run_by, created_at, updated_at FROM payment_reconciliations WHERE run_date = $1
+`
+
+func (q *Queries) GetReconciliation(ctx context.Context, runDate pgtype.Date) (PaymentReconciliation, error) {
+	row := q.db.QueryRow(ctx, getReconciliation, runDate)
+	var i PaymentReconciliation
+	err := row.Scan(
+		&i.ID,
+		&i.RunDate,
+		&i.Status,
+		&i.CheckedPayments,
+		&i.Mismatches,
+		&i.StartedAt,
+		&i.FinishedAt,
+		&i.RunBy,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getRefund = `-- name: GetRefund :one
 SELECT id, payment_id, checkout_id, booking_id, provider_reference, amount, reason, status, bank_bin, account_number, account_holder, transfer_reference, proof_file_id, completed_by, completed_at, created_at, updated_at, bank_info_reminder_count, bank_info_reminded_at FROM refunds WHERE id = $1
 `
@@ -313,9 +350,9 @@ func (q *Queries) GetRefundAccount(ctx context.Context, userID uuid.UUID) (Custo
 
 const insertPaymentEvent = `-- name: InsertPaymentEvent :execrows
 INSERT INTO payment_events (id, payment_id, provider, dedupe_key, signature_valid, payload, received_at,
-                            processed_at, result, created_at, updated_at)
+                            processed_at, result, amount, created_at, updated_at)
 VALUES ($1, $2, 'payos', $3, true, $4, $5,
-        $6, $7, $5, $5)
+        $6, $7, $8, $5, $5)
 ON CONFLICT (dedupe_key) DO NOTHING
 `
 
@@ -327,6 +364,7 @@ type InsertPaymentEventParams struct {
 	Now         time.Time
 	ProcessedAt *time.Time
 	Result      *string
+	Amount      *int64
 }
 
 // A repeated delivery inserts nothing (0 rows). A concurrent insert of the
@@ -340,6 +378,7 @@ func (q *Queries) InsertPaymentEvent(ctx context.Context, arg InsertPaymentEvent
 		arg.Now,
 		arg.ProcessedAt,
 		arg.Result,
+		arg.Amount,
 	)
 	if err != nil {
 		return 0, err
@@ -726,6 +765,104 @@ func (q *Queries) ListPaymentRefunds(ctx context.Context, paymentID uuid.UUID) (
 	return items, nil
 }
 
+const listPaymentsToReconcile = `-- name: ListPaymentsToReconcile :many
+SELECT id, checkout_id, provider, provider_order_code, amount, status, checkout_url, qr_code, expires_at, paid_at, provider_reference, raw, created_at, updated_at, review_seen_at, review_seen_by, review_resolved_at, review_resolved_by, review_note FROM payments
+WHERE created_at >= $1 OR (status = 'needs_review' AND review_resolved_at IS NULL)
+ORDER BY id
+LIMIT $2
+`
+
+type ListPaymentsToReconcileParams struct {
+	Since time.Time
+	Lim   int32
+}
+
+// Payments created at or after @since, plus every unresolved needs_review
+// payment.
+func (q *Queries) ListPaymentsToReconcile(ctx context.Context, arg ListPaymentsToReconcileParams) ([]Payment, error) {
+	rows, err := q.db.Query(ctx, listPaymentsToReconcile, arg.Since, arg.Lim)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Payment
+	for rows.Next() {
+		var i Payment
+		if err := rows.Scan(
+			&i.ID,
+			&i.CheckoutID,
+			&i.Provider,
+			&i.ProviderOrderCode,
+			&i.Amount,
+			&i.Status,
+			&i.CheckoutUrl,
+			&i.QrCode,
+			&i.ExpiresAt,
+			&i.PaidAt,
+			&i.ProviderReference,
+			&i.Raw,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.ReviewSeenAt,
+			&i.ReviewSeenBy,
+			&i.ReviewResolvedAt,
+			&i.ReviewResolvedBy,
+			&i.ReviewNote,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listReconciliations = `-- name: ListReconciliations :many
+SELECT id, run_date, status, checked_payments, mismatches, started_at, finished_at, run_by, created_at, updated_at FROM payment_reconciliations
+WHERE ($1::date IS NULL OR run_date < $1::date)
+ORDER BY run_date DESC
+LIMIT $2
+`
+
+type ListReconciliationsParams struct {
+	Before pgtype.Date
+	Lim    int32
+}
+
+// Newest first; @before (exclusive) when given.
+func (q *Queries) ListReconciliations(ctx context.Context, arg ListReconciliationsParams) ([]PaymentReconciliation, error) {
+	rows, err := q.db.Query(ctx, listReconciliations, arg.Before, arg.Lim)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []PaymentReconciliation
+	for rows.Next() {
+		var i PaymentReconciliation
+		if err := rows.Scan(
+			&i.ID,
+			&i.RunDate,
+			&i.Status,
+			&i.CheckedPayments,
+			&i.Mismatches,
+			&i.StartedAt,
+			&i.FinishedAt,
+			&i.RunBy,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listRefundsToRemind = `-- name: ListRefundsToRemind :many
 SELECT id FROM refunds
 WHERE status = 'awaiting_bank_info'
@@ -757,6 +894,48 @@ func (q *Queries) ListRefundsToRemind(ctx context.Context, arg ListRefundsToRemi
 			return nil, err
 		}
 		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listStaleAwaitingEvents = `-- name: ListStaleAwaitingEvents :many
+SELECT e.dedupe_key, e.payment_id, e.payload FROM payment_events e
+WHERE e.result = 'awaiting_status'
+  AND e.received_at <= $1
+  AND NOT EXISTS (SELECT 1 FROM payment_events m WHERE m.dedupe_key = left(e.dedupe_key, -length(':awaiting')))
+ORDER BY e.received_at, e.id
+LIMIT $2
+`
+
+type ListStaleAwaitingEventsParams struct {
+	Cutoff time.Time
+	Lim    int32
+}
+
+type ListStaleAwaitingEventsRow struct {
+	DedupeKey string
+	PaymentID *uuid.UUID
+	Payload   []byte
+}
+
+// awaiting_status tracking rows received at or before @cutoff whose transfer
+// has no main row (the dedupe key without the ":awaiting" suffix) yet.
+func (q *Queries) ListStaleAwaitingEvents(ctx context.Context, arg ListStaleAwaitingEventsParams) ([]ListStaleAwaitingEventsRow, error) {
+	rows, err := q.db.Query(ctx, listStaleAwaitingEvents, arg.Cutoff, arg.Lim)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListStaleAwaitingEventsRow
+	for rows.Next() {
+		var i ListStaleAwaitingEventsRow
+		if err := rows.Scan(&i.DedupeKey, &i.PaymentID, &i.Payload); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -988,6 +1167,27 @@ func (q *Queries) PaymentEventExists(ctx context.Context, dedupeKey string) (boo
 	return exists, err
 }
 
+const paymentRecorded = `-- name: PaymentRecorded :one
+SELECT COALESCE(sum(amount), 0)::bigint AS recorded,
+       COALESCE(max(received_at) FILTER (WHERE amount IS NOT NULL), 'epoch'::timestamptz)::timestamptz AS last_received_at
+FROM payment_events
+WHERE payment_id = $1 AND dedupe_key NOT LIKE '%:awaiting'
+`
+
+type PaymentRecordedRow struct {
+	Recorded       int64
+	LastReceivedAt time.Time
+}
+
+// Money recorded on a payment (awaiting rows carry no amount) and when the
+// last transfer with an amount was received (epoch when none).
+func (q *Queries) PaymentRecorded(ctx context.Context, paymentID *uuid.UUID) (PaymentRecordedRow, error) {
+	row := q.db.QueryRow(ctx, paymentRecorded, paymentID)
+	var i PaymentRecordedRow
+	err := row.Scan(&i.Recorded, &i.LastReceivedAt)
+	return i, err
+}
+
 const recordPaymentReceived = `-- name: RecordPaymentReceived :exec
 UPDATE payments
 SET status = $1, paid_at = $2::timestamptz, provider_reference = $3::text,
@@ -1172,6 +1372,58 @@ func (q *Queries) SetReviewSeen(ctx context.Context, arg SetReviewSeenParams) (P
 		&i.ReviewResolvedAt,
 		&i.ReviewResolvedBy,
 		&i.ReviewNote,
+	)
+	return i, err
+}
+
+const upsertReconciliation = `-- name: UpsertReconciliation :one
+INSERT INTO payment_reconciliations (id, run_date, status, checked_payments, mismatches, started_at, finished_at,
+                                     run_by, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
+        $9, $9)
+ON CONFLICT (run_date) DO UPDATE
+SET status = EXCLUDED.status, checked_payments = EXCLUDED.checked_payments, mismatches = EXCLUDED.mismatches,
+    started_at = EXCLUDED.started_at, finished_at = EXCLUDED.finished_at, run_by = EXCLUDED.run_by,
+    updated_at = EXCLUDED.updated_at
+RETURNING id, run_date, status, checked_payments, mismatches, started_at, finished_at, run_by, created_at, updated_at
+`
+
+type UpsertReconciliationParams struct {
+	ID              uuid.UUID
+	RunDate         pgtype.Date
+	Status          string
+	CheckedPayments int32
+	Mismatches      []byte
+	StartedAt       time.Time
+	FinishedAt      time.Time
+	RunBy           *uuid.UUID
+	Now             time.Time
+}
+
+func (q *Queries) UpsertReconciliation(ctx context.Context, arg UpsertReconciliationParams) (PaymentReconciliation, error) {
+	row := q.db.QueryRow(ctx, upsertReconciliation,
+		arg.ID,
+		arg.RunDate,
+		arg.Status,
+		arg.CheckedPayments,
+		arg.Mismatches,
+		arg.StartedAt,
+		arg.FinishedAt,
+		arg.RunBy,
+		arg.Now,
+	)
+	var i PaymentReconciliation
+	err := row.Scan(
+		&i.ID,
+		&i.RunDate,
+		&i.Status,
+		&i.CheckedPayments,
+		&i.Mismatches,
+		&i.StartedAt,
+		&i.FinishedAt,
+		&i.RunBy,
+		&i.CreatedAt,
+		&i.UpdatedAt,
 	)
 	return i, err
 }

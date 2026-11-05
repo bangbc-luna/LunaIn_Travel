@@ -34,6 +34,7 @@ import (
 	"github.com/bangbc-luna/lunain-travel/internal/platform/jobs"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/mailer"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/storage"
+	"github.com/bangbc-luna/lunain-travel/internal/reconcile"
 	"github.com/bangbc-luna/lunain-travel/internal/settings"
 )
 
@@ -160,15 +161,20 @@ func serve(log *slog.Logger) error {
 			User: cfg.SMTPUser, Password: cfg.SMTPPassword, From: cfg.MailFrom,
 		}
 	}
-	// The booking workers get their Service once it is built (it needs the
-	// job client for emails); the client is started only after that.
+	// The booking and reconcile workers get their Service once it is built
+	// (it needs the job client for emails); the client is started only after
+	// that.
 	expireHolds, noShow, release := &booking.ExpireHoldsWorker{}, &booking.NoShowWorker{}, &booking.ReleaseWorker{}
+	reconcileDaily, remindRefunds := &reconcile.DailyWorker{}, &reconcile.RemindRefundsWorker{}
 	workers := river.NewWorkers()
 	river.AddWorker(workers, &mailer.SendEmailWorker{Mailer: mail})
 	river.AddWorker(workers, expireHolds)
 	river.AddWorker(workers, noShow)
 	river.AddWorker(workers, release)
-	jobClient, err := jobs.NewClient(pool, workers, log, booking.PeriodicJobs()...)
+	river.AddWorker(workers, reconcileDaily)
+	river.AddWorker(workers, remindRefunds)
+	periodic := append(booking.PeriodicJobs(), reconcile.PeriodicJobs()...)
+	jobClient, err := jobs.NewClient(pool, workers, log, periodic...)
 	if err != nil {
 		return err
 	}
@@ -224,6 +230,11 @@ func serve(log *slog.Logger) error {
 		Pool: pool, Clock: clock.Real{}, Ledger: ledgerSvc, Partners: partnerSvc, Settings: settingsSvc,
 		Files: fileSvc, Jobs: jobClient, Log: log,
 	})
+	reconcileSvc := reconcile.NewService(reconcile.Deps{
+		Pool: pool, Clock: clock.Real{}, Payments: paymentSvc, Ledger: ledgerSvc, Handler: bookingSvc,
+		Identity: idSvc, Jobs: jobClient, Log: log,
+	})
+	reconcileDaily.Service, remindRefunds.Payments = reconcileSvc, paymentSvc
 
 	if err := jobClient.Start(context.Background()); err != nil {
 		return err
@@ -240,7 +251,8 @@ func serve(log *slog.Logger) error {
 		Pool: pool, Issuer: issuer, ClientIP: httpx.ClientIPFunc(cfg.TrustedProxyHops),
 		Identity: idSvc, Settings: settingsSvc, Files: fileSvc,
 		Geo: geoSvc, Catalog: catSvc, Partner: partnerSvc, Listing: listingSvc,
-		Ledger: ledgerSvc, Payment: paymentSvc, Booking: bookingSvc, Payout: payoutSvc, AppEnv: cfg.AppEnv,
+		Ledger: ledgerSvc, Payment: paymentSvc, Booking: bookingSvc, Payout: payoutSvc, Reconcile: reconcileSvc,
+		AppEnv: cfg.AppEnv,
 	})
 
 	srv := &http.Server{

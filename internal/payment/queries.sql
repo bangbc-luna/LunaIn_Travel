@@ -64,13 +64,16 @@ SELECT EXISTS (SELECT 1 FROM payment_events WHERE dedupe_key = @dedupe_key);
 -- same key waits for the first tx and then inserts nothing if it committed.
 -- name: InsertPaymentEvent :execrows
 INSERT INTO payment_events (id, payment_id, provider, dedupe_key, signature_valid, payload, received_at,
-                            processed_at, result, created_at, updated_at)
+                            processed_at, result, amount, created_at, updated_at)
 VALUES (@id, sqlc.narg(payment_id), 'payos', @dedupe_key, true, @payload, @now,
-        sqlc.narg(processed_at), sqlc.narg(result), @now, @now)
+        sqlc.narg(processed_at), sqlc.narg(result), sqlc.narg(amount), @now, @now)
 ON CONFLICT (dedupe_key) DO NOTHING;
 
+-- An already_processed transfer brought no new money: its amount is cleared.
 -- name: FinishPaymentEvent :exec
-UPDATE payment_events SET processed_at = @now::timestamptz, result = @result::text, updated_at = @now
+UPDATE payment_events
+SET processed_at = @now::timestamptz, result = @result::text,
+    amount = CASE WHEN @result::text = 'already_processed' THEN NULL ELSE amount END, updated_at = @now
 WHERE dedupe_key = @dedupe_key;
 
 -- name: GetRefundAccount :one
@@ -202,3 +205,53 @@ SET review_seen_at = COALESCE(review_seen_at, @now::timestamptz), review_seen_by
     updated_at = @now::timestamptz
 WHERE id = @id
 RETURNING *;
+
+-- awaiting_status tracking rows received at or before @cutoff whose transfer
+-- has no main row (the dedupe key without the ":awaiting" suffix) yet.
+-- name: ListStaleAwaitingEvents :many
+SELECT e.dedupe_key, e.payment_id, e.payload FROM payment_events e
+WHERE e.result = 'awaiting_status'
+  AND e.received_at <= @cutoff
+  AND NOT EXISTS (SELECT 1 FROM payment_events m WHERE m.dedupe_key = left(e.dedupe_key, -length(':awaiting')))
+ORDER BY e.received_at, e.id
+LIMIT @lim;
+
+-- name: GetPaymentEventResult :one
+SELECT result FROM payment_events WHERE dedupe_key = @dedupe_key;
+
+-- Payments created at or after @since, plus every unresolved needs_review
+-- payment.
+-- name: ListPaymentsToReconcile :many
+SELECT * FROM payments
+WHERE created_at >= @since OR (status = 'needs_review' AND review_resolved_at IS NULL)
+ORDER BY id
+LIMIT @lim;
+
+-- Money recorded on a payment (awaiting rows carry no amount) and when the
+-- last transfer with an amount was received (epoch when none).
+-- name: PaymentRecorded :one
+SELECT COALESCE(sum(amount), 0)::bigint AS recorded,
+       COALESCE(max(received_at) FILTER (WHERE amount IS NOT NULL), 'epoch'::timestamptz)::timestamptz AS last_received_at
+FROM payment_events
+WHERE payment_id = @payment_id AND dedupe_key NOT LIKE '%:awaiting';
+
+-- name: UpsertReconciliation :one
+INSERT INTO payment_reconciliations (id, run_date, status, checked_payments, mismatches, started_at, finished_at,
+                                     run_by, created_at, updated_at)
+VALUES (@id, @run_date, @status, @checked_payments, @mismatches, @started_at, @finished_at, sqlc.narg(run_by),
+        @now, @now)
+ON CONFLICT (run_date) DO UPDATE
+SET status = EXCLUDED.status, checked_payments = EXCLUDED.checked_payments, mismatches = EXCLUDED.mismatches,
+    started_at = EXCLUDED.started_at, finished_at = EXCLUDED.finished_at, run_by = EXCLUDED.run_by,
+    updated_at = EXCLUDED.updated_at
+RETURNING *;
+
+-- Newest first; @before (exclusive) when given.
+-- name: ListReconciliations :many
+SELECT * FROM payment_reconciliations
+WHERE (sqlc.narg(before)::date IS NULL OR run_date < sqlc.narg(before)::date)
+ORDER BY run_date DESC
+LIMIT @lim;
+
+-- name: GetReconciliation :one
+SELECT * FROM payment_reconciliations WHERE run_date = @run_date;

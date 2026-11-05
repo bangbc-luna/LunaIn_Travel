@@ -295,3 +295,59 @@ func TestFake_MarkPaidProducesVerifiableWebhook(t *testing.T) {
 		t.Error("cancel of paid link should fail")
 	}
 }
+
+// docsStatusSample is the 200 sample of GET /v2/payment-requests/{id}
+// published at https://payos.vn/docs/api/ ("Lấy thông tin link thanh toán"),
+// read 2026-11-05: "transactions" is shown as an empty object and the docs
+// list no fields for it.
+const docsStatusSample = `{"code":"00","desc":"success","data":{"id":"124c33293c934a85be5b7f8761a27a07",` +
+	`"orderCode":123,"amount":10000,"amountPaid":0,"amountRemaining":10000,"status":"PENDING",` +
+	`"createdAt":"2024-01-15T10:30:00.000Z","transactions":{}},` +
+	`"signature":"bec38349957f1a6c22ded683d06477ac5dfe047cf5f23c70dc8e048759ef5678"}`
+
+func TestGetStatus_DecodesTransactions(t *testing.T) {
+	// The documented sample: no transactions, and no decoding error.
+	p := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(docsStatusSample))
+	})
+	st, err := p.GetStatus(context.Background(), 123)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.State != payment.StatePending || st.AmountPaid != 0 || len(st.Transactions) != 0 {
+		t.Fatalf("docs sample: status = %+v", st)
+	}
+
+	// An array of transfers, with the field names of the webhook data.
+	p = newClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"code":"00","desc":"success","data":{"orderCode":123,"amount":10000,` +
+			`"amountPaid":10000,"status":"PAID","transactions":[` +
+			`{"reference":"TF230204212323","amount":3000,"transactionDateTime":"2023-02-04 18:25:00","accountNumber":"12345678"},` +
+			`{"reference":"","amount":7000,"transactionDateTime":"bad"}]}}`))
+	})
+	st, err = p.GetStatus(context.Background(), 123)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []payment.StatusTransaction{
+		{Reference: "TF230204212323", Amount: 3000, At: time.Date(2023, 2, 4, 18, 25, 0, 0, time.FixedZone("ICT", 7*3600))},
+		{Reference: "", Amount: 7000},
+	}
+	if st.State != payment.StatePaid || st.AmountPaid != 10000 || len(st.Transactions) != len(want) {
+		t.Fatalf("status = %+v", st)
+	}
+	for i, w := range want {
+		g := st.Transactions[i]
+		if g.Reference != w.Reference || g.Amount != w.Amount || !g.At.Equal(w.At) {
+			t.Errorf("transaction %d = %+v, want %+v", i, g, w)
+		}
+	}
+
+	// An undocumented shape of "transactions" never hides the status.
+	p = newClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"code":"00","desc":"success","data":{"status":"PAID","amountPaid":5,"transactions":"x"}}`))
+	})
+	if st, err = p.GetStatus(context.Background(), 1); err != nil || st.AmountPaid != 5 || len(st.Transactions) != 0 {
+		t.Fatalf("odd transactions: %+v %v", st, err)
+	}
+}

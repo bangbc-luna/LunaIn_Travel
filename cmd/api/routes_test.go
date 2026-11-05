@@ -31,6 +31,7 @@ import (
 	"github.com/bangbc-luna/lunain-travel/internal/platform/httpx"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/storage"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/testutil"
+	"github.com/bangbc-luna/lunain-travel/internal/reconcile"
 	"github.com/bangbc-luna/lunain-travel/internal/settings"
 )
 
@@ -83,11 +84,15 @@ func newTestAppEnv(t *testing.T, appEnv string) *testApp {
 	payoutSvc := payout.NewService(payout.Deps{
 		Pool: pool, Clock: clk, Ledger: ledgerSvc, Partners: partnerSvc, Settings: settingsSvc, Files: fileSvc,
 	})
+	reconcileSvc := reconcile.NewService(reconcile.Deps{
+		Pool: pool, Clock: clk, Payments: paymentSvc, Ledger: ledgerSvc, Handler: bookingSvc, Identity: idSvc,
+	})
 	mux, patterns := buildMux(muxDeps{
 		Pool: pool, Issuer: issuer, ClientIP: httpx.ClientIPFunc(0),
 		Identity: idSvc, Settings: settingsSvc, Files: fileSvc,
 		Geo: geoSvc, Catalog: catSvc, Partner: partnerSvc, Listing: listingSvc,
-		Ledger: ledgerSvc, Payment: paymentSvc, Booking: bookingSvc, Payout: payoutSvc, AppEnv: appEnv,
+		Ledger: ledgerSvc, Payment: paymentSvc, Booking: bookingSvc, Payout: payoutSvc, Reconcile: reconcileSvc,
+		AppEnv: appEnv,
 	})
 	return &testApp{
 		handler: httpx.Chain(mux, httpx.RequestID, httpx.Recover), issuer: issuer,
@@ -212,6 +217,9 @@ var adminRoutes = []route{
 	{"GET /v1/admin/payments/{id}", "/v1/admin/payments/" + uuid.Nil.String()},
 	{"POST /v1/admin/payments/{id}/seen", "/v1/admin/payments/" + uuid.Nil.String() + "/seen"},
 	{"POST /v1/admin/payments/{id}/resolve", "/v1/admin/payments/" + uuid.Nil.String() + "/resolve"},
+	{"GET /v1/admin/reconciliations", "/v1/admin/reconciliations"},
+	{"GET /v1/admin/reconciliations/{run_date}", "/v1/admin/reconciliations/2026-11-04"},
+	{"POST /v1/admin/reconciliations/run", "/v1/admin/reconciliations/run"},
 }
 
 // partnerRoutes lists every /v1/partner/* route, like adminRoutes.

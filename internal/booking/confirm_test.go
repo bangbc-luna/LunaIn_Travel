@@ -271,8 +271,8 @@ func TestPaid_Underpaid(t *testing.T) {
 	e.pay(t, oc, 300_000)
 	st, err := e.Fake.GetStatus(context.Background(), oc)
 	require.NoError(t, err)
-	require.Equal(t, payment.Status{State: payment.StateUnderpaid, AmountPaid: 300_000}, st,
-		"the provider itself reports UNDERPAID")
+	require.Equal(t, payment.Status{State: payment.StateUnderpaid, AmountPaid: 300_000},
+		payment.Status{State: st.State, AmountPaid: st.AmountPaid}, "the provider itself reports UNDERPAID")
 
 	require.Equal(t, "pending_payment", e.bookingStatus(t, v.ID))
 	require.Equal(t, "needs_review", e.paymentStatus(t, oc))
