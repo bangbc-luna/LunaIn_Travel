@@ -24,6 +24,10 @@ const (
 
 	StatusNoShow = "no_show"
 
+	checkoutOpen = "open"
+	// cancelLinkTimeout bounds each provider call cancelling an expired link.
+	cancelLinkTimeout = 10 * time.Second
+
 	// reasonHoldExpired: history reason of the hold expiry job.
 	reasonHoldExpired = "hết thời gian giữ chỗ"
 	actorPartner      = "partner"
@@ -129,10 +133,19 @@ func (s *Service) ExpireHolds(ctx context.Context) (int, error) {
 		}
 		total += n
 		for _, oc := range codes {
-			s.payments.CancelLinkBestEffort(ctx, oc)
+			s.cancelLink(ctx, oc)
 		}
 	}
 	return total, nil
+}
+
+// cancelLink cancels an expired payment's link at the provider after commit,
+// best effort: detached from the job's cancellation (the expiry already
+// committed) but bounded by cancelLinkTimeout.
+func (s *Service) cancelLink(ctx context.Context, orderCode int64) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cancelLinkTimeout)
+	defer cancel()
+	s.payments.CancelLinkBestEffort(ctx, orderCode)
 }
 
 // expireCheckout is one checkout of ExpireHolds; it returns the number of
@@ -182,7 +195,7 @@ func (s *Service) expireCheckout(ctx context.Context, tx pgx.Tx, checkoutID uuid
 		}
 		codes = append(codes, p.OrderCode)
 	}
-	if co.Status != checkoutClosed {
+	if co.Status == checkoutOpen {
 		if err := q.SetCheckoutStatus(ctx, store.SetCheckoutStatusParams{Status: checkoutClosed, Now: now, ID: co.ID}); err != nil {
 			return 0, nil, fmt.Errorf("close checkout: %w", err)
 		}
@@ -235,26 +248,33 @@ func (s *Service) MarkNoShows(ctx context.Context) (int, error) {
 }
 
 // ReleaseDue releases the settlements due at now (release_due_at <= now,
-// not released yet): each booking is locked FOR UPDATE, then ledger.Release
-// moves its net pending to available. It returns how many it handled.
+// not released yet), listed unlocked: each booking is locked FOR UPDATE, the
+// settlement re-checked as still due (ledger.ReleaseIfDue; skipped otherwise)
+// and its net pending moved to available. It returns how many it released.
 func (s *Service) ReleaseDue(ctx context.Context) (int, error) {
-	ids, err := s.ledger.DueReleases(ctx, s.clock.Now(), jobBatchSize)
+	now := s.clock.Now()
+	ids, err := s.ledger.DueReleases(ctx, now, jobBatchSize)
 	if err != nil {
 		return 0, err
 	}
 	total := 0
 	for _, id := range ids {
+		var released bool
 		err := db.InTx(ctx, s.pool, func(tx pgx.Tx) error {
 			if _, err := store.New(tx).LockBooking(ctx, id); err != nil {
 				return fmt.Errorf("lock booking: %w", err)
 			}
-			return s.ledger.Release(ctx, tx, id)
+			var err error
+			released, err = s.ledger.ReleaseIfDue(ctx, tx, id, now)
+			return err
 		})
 		if err != nil {
 			s.log.Error("booking: release failed", "booking_id", id, "err", err)
 			continue
 		}
-		total++
+		if released {
+			total++
+		}
 	}
 	return total, nil
 }

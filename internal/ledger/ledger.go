@@ -218,6 +218,21 @@ func (s *Service) Release(ctx context.Context, tx pgx.Tx, bookingID uuid.UUID) e
 		entry{kindRelease, bucketAvailable, st.NetPending})
 }
 
+// ReleaseIfDue is Release, but only when the settlement is still due at now
+// (release_due_at set and <= now, not released) once locked; otherwise it
+// does nothing and reports false. The release job uses it after listing due
+// settlements unlocked. The caller MUST hold the bookings row FOR UPDATE.
+func (s *Service) ReleaseIfDue(ctx context.Context, tx pgx.Tx, bookingID uuid.UUID, now time.Time) (bool, error) {
+	st, err := s.lockSettlement(ctx, store.New(tx), bookingID)
+	if err != nil {
+		return false, err
+	}
+	if st.ReleasedAt != nil || st.ReleaseDueAt == nil || st.ReleaseDueAt.After(now) {
+		return false, nil
+	}
+	return true, s.Release(ctx, tx, bookingID)
+}
+
 // DueReleases lists (unlocked) up to limit bookings whose settlement is due
 // for release at now and not released yet, oldest due first. The caller then
 // locks each booking FOR UPDATE and calls Release.

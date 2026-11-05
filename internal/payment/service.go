@@ -302,7 +302,8 @@ func (s *Service) GetByOrderCode(ctx context.Context, orderCode int64) (Payment,
 	return fromRow(r), nil
 }
 
-// LockPayment locks a payment FOR UPDATE in the caller's tx; the caller
+// LockPayment locks a payment FOR NO KEY UPDATE (see queries.sql) in the
+// caller's tx; the caller
 // already holds its checkout and bookings (payments come after them).
 func (s *Service) LockPayment(ctx context.Context, tx pgx.Tx, id uuid.UUID) (Payment, error) {
 	r, err := store.New(tx).LockPayment(ctx, id)
@@ -330,7 +331,7 @@ func (s *Service) RecordReceived(ctx context.Context, tx pgx.Tx, id uuid.UUID, s
 	return nil
 }
 
-// LockCheckoutPayments locks every payment of a checkout FOR UPDATE in id
+// LockCheckoutPayments locks every payment of a checkout FOR NO KEY UPDATE in id
 // order, in the caller's tx (which already holds the checkout and its
 // bookings).
 func (s *Service) LockCheckoutPayments(ctx context.Context, tx pgx.Tx, checkoutID uuid.UUID) ([]Payment, error) {

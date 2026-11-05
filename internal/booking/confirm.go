@@ -68,8 +68,8 @@ var _ payment.PaymentHandler = (*Service)(nil)
 // already past release (the expiry job lags) — the re-confirmation checks run
 // first: listing.BookableListing per listing in id order (partners, listings
 // FOR SHARE), then SlotsForDate and service_start_at > now. Only then the
-// checkout, its bookings (id order) and its payments (id order) are locked
-// FOR UPDATE and the state is decided from the locked rows:
+// checkout and its bookings (id order) are locked FOR UPDATE, its payments
+// (id order) FOR NO KEY UPDATE, and the state is decided from the locked rows:
 //
 //   - The payment already received a transfer with this reference: nothing.
 //   - The checkout cannot take this money — it is paid (or one of its

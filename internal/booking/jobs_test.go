@@ -8,11 +8,13 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bangbc-luna/lunain-travel/internal/booking"
 	"github.com/bangbc-luna/lunain-travel/internal/payment"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/clock"
+	"github.com/bangbc-luna/lunain-travel/internal/platform/db"
 )
 
 // serviceEnd is when the fixture booking's 08:00-17:00 slot ends.
@@ -227,6 +229,48 @@ func TestRelease_MovesToAvailable(t *testing.T) {
 	require.Equal(t, 1, e.count(t, `SELECT count(*) FROM booking_settlements
 		WHERE booking_id = $1 AND released_at IS NOT NULL AND net_pending = 0`, v.ID))
 	require.Equal(t, "completed", e.bookingStatus(t, v.ID))
+}
+
+// The release is re-checked under the booking lock: a settlement that is not
+// due at now (e.g. moved between the unlocked list and the lock) is skipped.
+func TestReleaseIfDue_SkipsNotDue(t *testing.T) {
+	e := newEnv(t)
+	v := e.create(t, "k")
+	e.pay(t, e.orderCode(t, v.ID), gross)
+	noShowAt := serviceEnd.Add(time.Minute)
+	e.Clock.T = noShowAt
+	require.Equal(t, 1, e.markNoShows(t))
+
+	release := func() bool {
+		var released bool
+		require.NoError(t, db.InTx(context.Background(), e.Pool, func(tx pgx.Tx) error {
+			if _, err := tx.Exec(context.Background(), `SELECT 1 FROM bookings WHERE id = $1 FOR UPDATE`, v.ID); err != nil {
+				return err
+			}
+			var err error
+			released, err = e.Ledger.ReleaseIfDue(context.Background(), tx, v.ID, e.Clock.Now())
+			return err
+		}))
+		return released
+	}
+	require.False(t, release(), "due in 24h")
+	e.requireBalance(t, 342_000, 0)
+	e.Clock.T = noShowAt.Add(24 * time.Hour)
+	require.True(t, release())
+	e.requireBalance(t, 0, 342_000)
+	require.False(t, release(), "already released")
+	e.requireBalance(t, 0, 342_000)
+}
+
+// Hold expiry never overwrites a checkout that is not open (e.g. paid).
+func TestExpireHolds_ClosesOnlyOpenCheckout(t *testing.T) {
+	e := newEnv(t)
+	v := e.create(t, "k")
+	e.exec(t, `UPDATE checkouts SET status = 'paid' WHERE id = (SELECT checkout_id FROM bookings WHERE id = $1)`, v.ID)
+	e.Clock.T = v.HoldExpiresAt.Add(6 * time.Minute)
+	require.Equal(t, 1, e.expireHolds(t))
+	require.Equal(t, "expired", e.bookingStatus(t, v.ID))
+	require.Equal(t, "paid", e.checkoutStatus(t, v.ID))
 }
 
 // Workers are thin wrappers over the processing functions.
