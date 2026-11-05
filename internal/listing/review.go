@@ -132,11 +132,14 @@ func (s *Service) requireComplete(ctx context.Context, tx pgx.Tx, cur store.List
 	if cur.Description == nil || strings.TrimSpace(*cur.Description) == "" {
 		missing = append(missing, "mô tả")
 	}
-	if cur.ProvinceCode == nil || cur.WardCode == nil {
-		missing = append(missing, "tỉnh/thành và phường/xã")
-	}
-	if cur.Address == nil || strings.TrimSpace(*cur.Address) == "" {
-		missing = append(missing, "địa chỉ")
+	// A ride's places are its route, not the listing's own location.
+	if cur.ServiceType != rideServiceType {
+		if cur.ProvinceCode == nil || cur.WardCode == nil {
+			missing = append(missing, "tỉnh/thành và phường/xã")
+		}
+		if cur.Address == nil || strings.TrimSpace(*cur.Address) == "" {
+			missing = append(missing, "địa chỉ")
+		}
 	}
 	q := store.New(tx)
 	n, err := q.CountListingImages(ctx, cur.ID)
@@ -161,6 +164,19 @@ func (s *Service) requireComplete(ctx context.Context, tx pgx.Tx, cur store.List
 		}
 		if slots == 0 {
 			missing = append(missing, "ít nhất 1 khung giờ đang hoạt động")
+		}
+	case rideServiceType:
+		if _, err := q.GetRideRoute(ctx, cur.ID); errors.Is(err, pgx.ErrNoRows) {
+			missing = append(missing, "tuyến (điểm đi, điểm đến)")
+		} else if err != nil {
+			return fmt.Errorf("get ride route: %w", err)
+		}
+		n, err := q.CountActiveRideSchedules(ctx, store.CountActiveRideSchedulesParams{ListingID: cur.ID, Today: vnDate(s.clock.Now())})
+		if err != nil {
+			return fmt.Errorf("count ride schedules: %w", err)
+		}
+		if n == 0 {
+			missing = append(missing, "ít nhất 1 lịch chạy đang hoạt động")
 		}
 	default:
 		// No detail model: never "complete".
@@ -359,12 +375,13 @@ type AdminListingDetail struct {
 	Images             []Image            `json:"images"`
 	CancellationPolicy []CancellationTier `json:"cancellation_policy"`
 	Attraction         *AttractionDetail  `json:"attraction"`
+	Ride               *RideDetail        `json:"ride"`
 	AuditLog           []AuditEntry       `json:"audit_log"`
 }
 
 // AdminGet returns a listing with its images, cancellation policy, the
 // per-service-type detail and the latest 20 listing_audit_log rows (newest
-// first). Inactive ticket types and slots are included.
+// first). Inactive ticket types, slots and ride schedules are included.
 func (s *Service) AdminGet(ctx context.Context, id uuid.UUID) (AdminListingDetail, error) {
 	q := store.New(s.pool)
 	r, err := q.GetListing(ctx, id)
@@ -388,6 +405,12 @@ func (s *Service) AdminGet(ctx context.Context, id uuid.UUID) (AdminListingDetai
 			return out, err
 		}
 		out.Attraction = &d
+	case rideServiceType:
+		d, err := s.rideDetail(ctx, s.pool, id, true)
+		if err != nil {
+			return out, err
+		}
+		out.Ride = &d
 	default:
 		return AdminListingDetail{}, ErrServiceTypeNotSupported
 	}

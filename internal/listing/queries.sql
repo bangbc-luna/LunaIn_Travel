@@ -270,3 +270,98 @@ SELECT EXISTS (SELECT 1 FROM visible_listings WHERE id = @id);
 
 -- name: GetRideTrip :one
 SELECT * FROM ride_trips WHERE id = @id;
+
+-- Scheduled ride: route, schedules and trip generation.
+-- name: GetRideRoute :one
+SELECT * FROM ride_routes WHERE listing_id = @listing_id;
+
+-- name: UpsertRideRoute :one
+INSERT INTO ride_routes (listing_id, origin_province_code, origin_ward_code, origin_name, origin_address,
+    dest_province_code, dest_ward_code, dest_name, dest_address, duration_minutes, vehicle_description,
+    created_at, updated_at)
+VALUES (@listing_id, @origin_province_code, @origin_ward_code, @origin_name, @origin_address,
+    @dest_province_code, @dest_ward_code, @dest_name, @dest_address, @duration_minutes, @vehicle_description,
+    @now, @now)
+ON CONFLICT (listing_id) DO UPDATE
+SET origin_province_code = EXCLUDED.origin_province_code, origin_ward_code = EXCLUDED.origin_ward_code,
+    origin_name = EXCLUDED.origin_name, origin_address = EXCLUDED.origin_address,
+    dest_province_code = EXCLUDED.dest_province_code, dest_ward_code = EXCLUDED.dest_ward_code,
+    dest_name = EXCLUDED.dest_name, dest_address = EXCLUDED.dest_address,
+    duration_minutes = EXCLUDED.duration_minutes, vehicle_description = EXCLUDED.vehicle_description,
+    updated_at = EXCLUDED.updated_at
+RETURNING *;
+
+-- name: HasBookedFutureTrips :one
+SELECT EXISTS (SELECT 1 FROM ride_trips
+               WHERE listing_id = @listing_id AND departure_at > @now AND seats_reserved > 0);
+
+-- name: InsertRideSchedule :one
+INSERT INTO ride_schedules (id, listing_id, departure_time, weekdays, seat_capacity, price_per_seat,
+    valid_from, valid_to, active, created_at, updated_at)
+VALUES (@id, @listing_id, @departure_time, @weekdays, @seat_capacity, @price_per_seat,
+    @valid_from, sqlc.narg(valid_to), true, @now, @now)
+RETURNING *;
+
+-- name: LockRideSchedule :one
+SELECT * FROM ride_schedules WHERE id = @id AND listing_id = @listing_id FOR UPDATE;
+
+-- name: LockRideScheduleByID :one
+SELECT * FROM ride_schedules WHERE id = @id FOR UPDATE;
+
+-- name: ListRideSchedules :many
+SELECT * FROM ride_schedules
+WHERE listing_id = @listing_id AND (@include_inactive::bool OR active)
+ORDER BY departure_time, valid_from, id;
+
+-- name: UpdateRideSchedule :one
+UPDATE ride_schedules
+SET seat_capacity = @seat_capacity, price_per_seat = @price_per_seat, valid_to = sqlc.narg(valid_to),
+    active = @active, generated_until = sqlc.narg(generated_until), updated_at = @now
+WHERE id = @id
+RETURNING *;
+
+-- name: SetScheduleGeneratedUntil :exec
+UPDATE ride_schedules SET generated_until = @generated_until, updated_at = @now WHERE id = @id;
+
+-- name: CountActiveRideSchedules :one
+SELECT count(*) FROM ride_schedules
+WHERE listing_id = @listing_id AND active AND (valid_to IS NULL OR valid_to >= @today::date);
+
+-- Schedules the generation job still has to extend: active, not expired and
+-- not yet generated up to min(valid_to, horizon).
+-- name: ListSchedulesToGenerate :many
+SELECT id FROM ride_schedules
+WHERE active
+  AND (valid_to IS NULL OR valid_to >= @today::date)
+  AND (generated_until IS NULL OR generated_until < LEAST(COALESCE(valid_to, @horizon::date), @horizon::date))
+ORDER BY id;
+
+-- Inserts the schedule's trips; a trip the schedule itself cancelled at the
+-- same departure is reopened. Any other existing trip (one-off, running, or
+-- cancelled by the partner or an admin) is left as it is.
+-- name: InsertScheduleTrips :execrows
+INSERT INTO ride_trips (id, listing_id, schedule_id, departure_at, seat_capacity, price_per_seat, created_at, updated_at)
+-- The two unnest calls in the select list run in lockstep (equal lengths).
+SELECT unnest(@ids::uuid[]), @listing_id::uuid, @schedule_id::uuid, unnest(@departures::timestamptz[]),
+       @seat_capacity::int, @price_per_seat::bigint, @now::timestamptz, @now::timestamptz
+ON CONFLICT (listing_id, departure_at) DO UPDATE
+SET status = 'scheduled', schedule_id = EXCLUDED.schedule_id, seat_capacity = EXCLUDED.seat_capacity,
+    price_per_seat = EXCLUDED.price_per_seat, cancelled_reason = NULL, cancelled_at = NULL,
+    cancelled_by = NULL, cancel_source = NULL, updated_at = EXCLUDED.updated_at
+WHERE ride_trips.status = 'cancelled' AND ride_trips.cancel_source = 'schedule';
+
+-- Future, unbooked, still scheduled trips of a schedule take its new
+-- capacity and price; trips with reserved seats keep theirs.
+-- name: UpdateOpenScheduleTrips :execrows
+UPDATE ride_trips
+SET seat_capacity = @seat_capacity::int, price_per_seat = @price_per_seat::bigint, updated_at = @now::timestamptz
+WHERE schedule_id = @schedule_id::uuid AND departure_at > @now::timestamptz AND status = 'scheduled' AND seats_reserved = 0;
+
+-- Cancels the future, unbooked, still scheduled trips of a schedule that
+-- depart at or after @from_at.
+-- name: CancelOpenScheduleTrips :execrows
+UPDATE ride_trips
+SET status = 'cancelled', cancelled_reason = @reason::text, cancelled_at = @now::timestamptz,
+    cancelled_by = sqlc.narg(actor)::uuid, cancel_source = 'schedule', updated_at = @now::timestamptz
+WHERE schedule_id = @schedule_id::uuid AND departure_at > @now::timestamptz AND departure_at >= @from_at::timestamptz
+  AND status = 'scheduled' AND seats_reserved = 0;

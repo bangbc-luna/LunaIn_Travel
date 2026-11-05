@@ -161,12 +161,13 @@ func serve(log *slog.Logger) error {
 			User: cfg.SMTPUser, Password: cfg.SMTPPassword, From: cfg.MailFrom,
 		}
 	}
-	// The booking and reconcile workers get their Service once it is built
-	// (it needs the job client for emails); the client is started only after
-	// that.
+	// The booking, reconcile and trip generation workers get their Service
+	// once it is built (some need the job client for emails); the client is
+	// started only after that.
 	expireHolds, noShow, release := &booking.ExpireHoldsWorker{}, &booking.NoShowWorker{}, &booking.ReleaseWorker{}
 	purgeIdem := &booking.PurgeIdempotencyWorker{}
 	reconcileDaily, remindRefunds := &reconcile.DailyWorker{}, &reconcile.RemindRefundsWorker{}
+	generateTrips := &listing.GenerateTripsWorker{}
 	workers := river.NewWorkers()
 	river.AddWorker(workers, &mailer.SendEmailWorker{Mailer: mail})
 	river.AddWorker(workers, expireHolds)
@@ -175,7 +176,9 @@ func serve(log *slog.Logger) error {
 	river.AddWorker(workers, purgeIdem)
 	river.AddWorker(workers, reconcileDaily)
 	river.AddWorker(workers, remindRefunds)
+	river.AddWorker(workers, generateTrips)
 	periodic := append(booking.PeriodicJobs(), reconcile.PeriodicJobs()...)
+	periodic = append(periodic, listing.PeriodicJobs()...)
 	jobClient, err := jobs.NewClient(pool, workers, log, periodic...)
 	if err != nil {
 		return err
@@ -216,8 +219,9 @@ func serve(log *slog.Logger) error {
 
 	listingSvc := listing.NewService(listing.Deps{
 		Pool: pool, Clock: clock.Real{}, Partners: partnerSvc, Catalog: catSvc, Geo: geoSvc, Files: fileSvc,
-		BookingGuard: booking.Guard{},
+		BookingGuard: booking.Guard{}, Log: log,
 	})
+	generateTrips.Service = listingSvc
 
 	settingsSvc := settings.NewService(pool, clock.Real{})
 	paymentSvc := payment.NewService(pool, clock.Real{}, paymentProvider(cfg), log)

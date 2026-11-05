@@ -173,6 +173,7 @@ func (s *Service) PartnerRoutes(mux httpx.Router, iss *auth.Issuer, requireMembe
 	}))
 
 	s.attractionRoutes(mux, withID)
+	s.rideRoutes(mux, withID)
 }
 
 // attractionRoutes registers the attraction detail routes: info, ticket
