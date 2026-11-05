@@ -162,7 +162,7 @@ func PeriodicJobs() []*river.PeriodicJob {
 	purge := river.NewPeriodicJob(river.PeriodicInterval(time.Hour),
 		func() (river.JobArgs, *river.InsertOpts) { return PurgeIdempotencyArgs{}, opts },
 		&river.PeriodicJobOpts{RunOnStart: false})
-	return []*river.PeriodicJob{job(ExpireHoldsArgs{}), job(ExpireRequestsArgs{}), job(NoShowArgs{}), job(CompleteRidesArgs{}), job(ReleaseArgs{}), purge}
+	return []*river.PeriodicJob{job(ExpireHoldsArgs{}), job(ExpireRequestsArgs{}), job(NoShowArgs{}), job(CompleteRidesArgs{}), job(FinishRentalsArgs{}), job(ReleaseArgs{}), purge}
 }
 
 // ExpireHolds expires the unpaid bookings (pending_payment, or an accepted

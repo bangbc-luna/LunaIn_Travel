@@ -166,6 +166,7 @@ func serve(log *slog.Logger) error {
 	// started only after that.
 	expireHolds, noShow, release := &booking.ExpireHoldsWorker{}, &booking.NoShowWorker{}, &booking.ReleaseWorker{}
 	completeRides, expireRequests := &booking.CompleteRidesWorker{}, &booking.ExpireRequestsWorker{}
+	finishRentals := &booking.FinishRentalsWorker{}
 	purgeIdem := &booking.PurgeIdempotencyWorker{}
 	reconcileDaily, remindRefunds := &reconcile.DailyWorker{}, &reconcile.RemindRefundsWorker{}
 	generateTrips := &listing.GenerateTripsWorker{}
@@ -175,6 +176,7 @@ func serve(log *slog.Logger) error {
 	river.AddWorker(workers, expireRequests)
 	river.AddWorker(workers, noShow)
 	river.AddWorker(workers, completeRides)
+	river.AddWorker(workers, finishRentals)
 	river.AddWorker(workers, release)
 	river.AddWorker(workers, purgeIdem)
 	river.AddWorker(workers, reconcileDaily)
@@ -235,7 +237,7 @@ func serve(log *slog.Logger) error {
 		Identity: idSvc, Payments: paymentSvc, Ledger: ledgerSvc, Partners: partnerSvc, Jobs: jobClient, Log: log,
 	})
 	expireHolds.Service, noShow.Service, release.Service, purgeIdem.Service = bookingSvc, bookingSvc, bookingSvc, bookingSvc
-	completeRides.Service, expireRequests.Service = bookingSvc, bookingSvc
+	completeRides.Service, expireRequests.Service, finishRentals.Service = bookingSvc, bookingSvc, bookingSvc
 	payoutSvc := payout.NewService(payout.Deps{
 		Pool: pool, Clock: clock.Real{}, Ledger: ledgerSvc, Partners: partnerSvc, Settings: settingsSvc,
 		Files: fileSvc, Jobs: jobClient, Log: log,

@@ -418,6 +418,25 @@ func (q *Queries) GetRideDetails(ctx context.Context, bookingID uuid.UUID) (Book
 	return i, err
 }
 
+const handOverRental = `-- name: HandOverRental :exec
+UPDATE bookings
+SET status = 'in_service', in_service_at = $1::timestamptz, checked_in_at = $1::timestamptz, updated_at = $1
+WHERE id = $2
+`
+
+type HandOverRentalParams struct {
+	Now time.Time
+	ID  uuid.UUID
+}
+
+// Rental handover (QR): the confirmed booking is in_service; checked_in_at is
+// set too so a second scan answers "already" (checked_in is forbidden for
+// Request Bookings).
+func (q *Queries) HandOverRental(ctx context.Context, arg HandOverRentalParams) error {
+	_, err := q.db.Exec(ctx, handOverRental, arg.Now, arg.ID)
+	return err
+}
+
 const hasReschedule = `-- name: HasReschedule :one
 SELECT EXISTS (SELECT 1 FROM booking_reschedules WHERE booking_id = $1)
 `
@@ -1279,6 +1298,78 @@ type ListPairedRideBookingsParams struct {
 // The other ride booking of a round trip (same checkout).
 func (q *Queries) ListPairedRideBookings(ctx context.Context, arg ListPairedRideBookingsParams) ([]uuid.UUID, error) {
 	rows, err := q.db.Query(ctx, listPairedRideBookings, arg.CheckoutID, arg.BookingID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRentalAutoComplete = `-- name: ListRentalAutoComplete :many
+SELECT id FROM bookings
+WHERE status = 'in_service' AND service_type = 'self_drive_rental' AND service_end_at <= $1::timestamptz
+  AND NOT (id = ANY($2::uuid[]))
+ORDER BY service_end_at, id
+LIMIT $3
+`
+
+type ListRentalAutoCompleteParams struct {
+	Cutoff time.Time
+	Skip   []uuid.UUID
+	Lim    int32
+}
+
+// FinishRentals: handed-over rentals never marked returned by @cutoff =
+// now − 24h (bookings_service_end_idx).
+func (q *Queries) ListRentalAutoComplete(ctx context.Context, arg ListRentalAutoCompleteParams) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listRentalAutoComplete, arg.Cutoff, arg.Skip, arg.Lim)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRentalAutoNoShow = `-- name: ListRentalAutoNoShow :many
+SELECT id FROM bookings
+WHERE status = 'confirmed' AND service_type = 'self_drive_rental' AND service_end_at <= $1::timestamptz
+  AND NOT (id = ANY($2::uuid[]))
+ORDER BY service_end_at, id
+LIMIT $3
+`
+
+type ListRentalAutoNoShowParams struct {
+	Now  time.Time
+	Skip []uuid.UUID
+	Lim  int32
+}
+
+// FinishRentals: confirmed rentals never handed over by their return time
+// (bookings_service_end_idx).
+func (q *Queries) ListRentalAutoNoShow(ctx context.Context, arg ListRentalAutoNoShowParams) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listRentalAutoNoShow, arg.Now, arg.Skip, arg.Lim)
 	if err != nil {
 		return nil, err
 	}

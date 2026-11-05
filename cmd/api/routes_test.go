@@ -267,6 +267,8 @@ var partnerRoutes = []route{
 	{"GET /v1/partner/bookings/{id}", "/v1/partner/bookings/" + uuid.Nil.String()},
 	{"POST /v1/partner/bookings/{id}/accept", "/v1/partner/bookings/" + uuid.Nil.String() + "/accept"},
 	{"POST /v1/partner/bookings/{id}/reject", "/v1/partner/bookings/" + uuid.Nil.String() + "/reject"},
+	{"POST /v1/partner/bookings/{id}/no-show", "/v1/partner/bookings/" + uuid.Nil.String() + "/no-show"},
+	{"POST /v1/partner/bookings/{id}/return", "/v1/partner/bookings/" + uuid.Nil.String() + "/return"},
 	{"POST /v1/partner/check-ins", "/v1/partner/check-ins"},
 	{"POST /v1/partner/payouts", "/v1/partner/payouts"},
 	{"GET /v1/partner/payouts", "/v1/partner/payouts"},

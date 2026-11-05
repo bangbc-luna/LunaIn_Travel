@@ -399,3 +399,29 @@ WHERE status = 'requested' AND response_due_at <= @now::timestamptz
   AND NOT (checkout_id = ANY(@skip::uuid[]))
 ORDER BY response_due_at, id
 LIMIT @lim;
+
+-- Rental handover (QR): the confirmed booking is in_service; checked_in_at is
+-- set too so a second scan answers "already" (checked_in is forbidden for
+-- Request Bookings).
+-- name: HandOverRental :exec
+UPDATE bookings
+SET status = 'in_service', in_service_at = @now::timestamptz, checked_in_at = @now::timestamptz, updated_at = @now
+WHERE id = @id;
+
+-- FinishRentals: handed-over rentals never marked returned by @cutoff =
+-- now − 24h (bookings_service_end_idx).
+-- name: ListRentalAutoComplete :many
+SELECT id FROM bookings
+WHERE status = 'in_service' AND service_type = 'self_drive_rental' AND service_end_at <= @cutoff::timestamptz
+  AND NOT (id = ANY(@skip::uuid[]))
+ORDER BY service_end_at, id
+LIMIT @lim;
+
+-- FinishRentals: confirmed rentals never handed over by their return time
+-- (bookings_service_end_idx).
+-- name: ListRentalAutoNoShow :many
+SELECT id FROM bookings
+WHERE status = 'confirmed' AND service_type = 'self_drive_rental' AND service_end_at <= @now::timestamptz
+  AND NOT (id = ANY(@skip::uuid[]))
+ORDER BY service_end_at, id
+LIMIT @lim;
