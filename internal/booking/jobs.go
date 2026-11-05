@@ -94,6 +94,22 @@ func (w *NoShowWorker) Work(ctx context.Context, _ *river.Job[NoShowArgs]) error
 	return err
 }
 
+// CompleteRidesArgs is the periodic ride completion job.
+type CompleteRidesArgs struct{}
+
+func (CompleteRidesArgs) Kind() string { return "booking_complete_rides" }
+
+// CompleteRidesWorker runs Service.CompleteRides.
+type CompleteRidesWorker struct {
+	river.WorkerDefaults[CompleteRidesArgs]
+	Service *Service
+}
+
+func (w *CompleteRidesWorker) Work(ctx context.Context, _ *river.Job[CompleteRidesArgs]) error {
+	_, err := w.Service.CompleteRides(ctx)
+	return err
+}
+
 // ReleaseWorker runs Service.ReleaseDue.
 type ReleaseWorker struct {
 	river.WorkerDefaults[ReleaseArgs]
@@ -146,7 +162,7 @@ func PeriodicJobs() []*river.PeriodicJob {
 	purge := river.NewPeriodicJob(river.PeriodicInterval(time.Hour),
 		func() (river.JobArgs, *river.InsertOpts) { return PurgeIdempotencyArgs{}, opts },
 		&river.PeriodicJobOpts{RunOnStart: false})
-	return []*river.PeriodicJob{job(ExpireHoldsArgs{}), job(NoShowArgs{}), job(ReleaseArgs{}), purge}
+	return []*river.PeriodicJob{job(ExpireHoldsArgs{}), job(NoShowArgs{}), job(CompleteRidesArgs{}), job(ReleaseArgs{}), purge}
 }
 
 // ExpireHolds expires the pending_payment bookings whose hold passed release
@@ -273,15 +289,43 @@ func (s *Service) expireCheckout(ctx context.Context, tx pgx.Tx, checkoutID uuid
 	return n, codes, nil
 }
 
-// MarkNoShows moves confirmed attraction bookings whose service ended
-// (service_end_at < now) to no_show and schedules their release
-// release_delay_days later. It returns how many it marked.
+// MarkNoShows moves to no_show the confirmed bookings nobody showed up for
+// and schedules their release release_delay_days later (the partner is paid
+// as for a completed booking; a ride keeps its seats). Two lists, one
+// backoff: attraction bookings whose service ended (service_end_at < now)
+// and scheduled ride bookings never checked in that departed more than
+// ride_no_show_after_minutes ago (service_start_at < now − setting). It
+// returns how many it marked.
 func (s *Service) MarkNoShows(ctx context.Context) (int, error) {
 	now := s.clock.Now()
-	ids, err := store.New(s.pool).ListNoShowCandidates(ctx, store.ListNoShowCandidatesParams{Now: now, Lim: s.batch(), Skip: s.noShowBackoff.skip(now)})
+	cfg, err := s.settings.Get(ctx)
+	if err != nil {
+		return 0, err
+	}
+	cutoff := now.Add(-time.Duration(cfg.RideNoShowAfterMinutes) * time.Minute)
+	q := store.New(s.pool)
+	attractions, err := q.ListNoShowCandidates(ctx, store.ListNoShowCandidatesParams{Now: now, Lim: s.batch(), Skip: s.noShowBackoff.skip(now)})
 	if err != nil {
 		return 0, fmt.Errorf("list no-show candidates: %w", err)
 	}
+	rides, err := q.ListRideNoShowCandidates(ctx, store.ListRideNoShowCandidatesParams{Cutoff: cutoff, Lim: s.batch(), Skip: s.noShowBackoff.skip(now)})
+	if err != nil {
+		return 0, fmt.Errorf("list ride no-show candidates: %w", err)
+	}
+	attractionDue := func(b store.Booking) bool {
+		return b.ServiceType == serviceTypeAttraction && b.ServiceEndAt.Before(now)
+	}
+	rideDue := func(b store.Booking) bool {
+		return b.ServiceType == serviceTypeRide && b.ServiceStartAt.Before(cutoff)
+	}
+	total := s.markNoShowList(ctx, attractions, attractionDue, now)
+	total += s.markNoShowList(ctx, rides, rideDue, now)
+	return total, nil
+}
+
+// markNoShowList marks each listed booking no_show in its own tx, after
+// locking it and re-checking it is still confirmed and due.
+func (s *Service) markNoShowList(ctx context.Context, ids []uuid.UUID, due func(store.Booking) bool, now time.Time) int {
 	total := 0
 	for _, id := range ids {
 		var marked bool
@@ -296,7 +340,7 @@ func (s *Service) MarkNoShows(ctx context.Context) (int, error) {
 			if err != nil {
 				return fmt.Errorf("lock booking: %w", err)
 			}
-			if b.Status != StatusConfirmed || b.ServiceType != serviceTypeAttraction || !b.ServiceEndAt.Before(now) {
+			if b.Status != StatusConfirmed || !due(b) {
 				return nil
 			}
 			if err := q.MarkNoShow(ctx, store.MarkNoShowParams{Now: now, ID: b.ID}); err != nil {
@@ -317,6 +361,59 @@ func (s *Service) MarkNoShows(ctx context.Context) (int, error) {
 		}
 		s.noShowBackoff.ok(id)
 		if marked {
+			total++
+		}
+	}
+	return total
+}
+
+// CompleteRides completes the checked-in scheduled ride bookings whose
+// service ended (service_end_at <= now) and schedules their release
+// release_delay_days later; a ride keeps its seats. Each booking is locked
+// in its own tx and re-checked; the history actor is system. A leg checked in
+// before an admin cancelled its trip is completed too: the passenger
+// travelled. It returns how many it completed.
+func (s *Service) CompleteRides(ctx context.Context) (int, error) {
+	now := s.clock.Now()
+	ids, err := store.New(s.pool).ListRidesToComplete(ctx, store.ListRidesToCompleteParams{Now: now, Lim: s.batch(), Skip: s.completeBackoff.skip(now)})
+	if err != nil {
+		return 0, fmt.Errorf("list rides to complete: %w", err)
+	}
+	total := 0
+	for _, id := range ids {
+		var done bool
+		err := db.InTx(ctx, s.pool, func(tx pgx.Tx) error {
+			if s.beforeItem != nil {
+				if err := s.beforeItem(id); err != nil {
+					return err
+				}
+			}
+			q := store.New(tx)
+			b, err := q.LockBooking(ctx, id)
+			if err != nil {
+				return fmt.Errorf("lock booking: %w", err)
+			}
+			if b.Status != StatusCheckedIn || b.ServiceType != serviceTypeRide || b.ServiceEndAt.After(now) {
+				return nil
+			}
+			if err := q.CompleteRide(ctx, store.CompleteRideParams{Now: now, ID: b.ID}); err != nil {
+				return fmt.Errorf("complete ride: %w", err)
+			}
+			if err := insertHistory(ctx, q, b, StatusCompleted, actorSystem, nil, nil, now); err != nil {
+				return err
+			}
+			if err := s.scheduleRelease(ctx, tx, b.ID, now); err != nil {
+				return err
+			}
+			done = true
+			return nil
+		})
+		if err != nil {
+			s.itemFailed(&s.completeBackoff, "booking: complete ride failed", "booking_id", id, now, err)
+			continue
+		}
+		s.completeBackoff.ok(id)
+		if done {
 			total++
 		}
 	}

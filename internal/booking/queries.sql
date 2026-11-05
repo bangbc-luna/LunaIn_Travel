@@ -150,6 +150,25 @@ WHERE status = 'confirmed' AND service_type = 'attraction_ticket' AND service_en
 ORDER BY service_end_at, id
 LIMIT @lim;
 
+-- No-show job, scheduled rides: confirmed (never checked in) ride bookings
+-- that departed before @cutoff = now − ride_no_show_after_minutes
+-- (bookings_ride_no_show_idx).
+-- name: ListRideNoShowCandidates :many
+SELECT id FROM bookings
+WHERE status = 'confirmed' AND service_type = 'scheduled_ride' AND service_start_at < @cutoff::timestamptz
+  AND NOT (id = ANY(@skip::uuid[]))
+ORDER BY service_start_at, id
+LIMIT @lim;
+
+-- Ride completion job: checked-in ride bookings whose service ended
+-- (bookings_service_end_idx).
+-- name: ListRidesToComplete :many
+SELECT id FROM bookings
+WHERE status = 'checked_in' AND service_type = 'scheduled_ride' AND service_end_at <= @now::timestamptz
+  AND NOT (id = ANY(@skip::uuid[]))
+ORDER BY service_end_at, id
+LIMIT @lim;
+
 -- Idempotency cleanup: at most @lim keys created before @cutoff
 -- (idempotency_keys_created_idx).
 -- name: PurgeIdempotencyKeys :execrows
@@ -206,6 +225,14 @@ WHERE booking_id = @booking_id;
 UPDATE bookings
 SET status = 'completed', checked_in_at = @now::timestamptz, completed_at = @now::timestamptz, updated_at = @now
 WHERE id = @id;
+
+-- Ride check-in: the passenger boarded; completion comes at service_end_at
+-- (CompleteRide).
+-- name: CheckInRide :exec
+UPDATE bookings SET status = 'checked_in', checked_in_at = @now::timestamptz, updated_at = @now WHERE id = @id;
+
+-- name: CompleteRide :exec
+UPDATE bookings SET status = 'completed', completed_at = @now::timestamptz, updated_at = @now WHERE id = @id;
 
 -- BookingGuard: active (pending_payment, confirmed) bookings of a listing on
 -- a Vietnam calendar date.

@@ -38,6 +38,22 @@ func (q *Queries) CancelBooking(ctx context.Context, arg CancelBookingParams) er
 	return err
 }
 
+const checkInRide = `-- name: CheckInRide :exec
+UPDATE bookings SET status = 'checked_in', checked_in_at = $1::timestamptz, updated_at = $1 WHERE id = $2
+`
+
+type CheckInRideParams struct {
+	Now time.Time
+	ID  uuid.UUID
+}
+
+// Ride check-in: the passenger boarded; completion comes at service_end_at
+// (CompleteRide).
+func (q *Queries) CheckInRide(ctx context.Context, arg CheckInRideParams) error {
+	_, err := q.db.Exec(ctx, checkInRide, arg.Now, arg.ID)
+	return err
+}
+
 const completeCheckIn = `-- name: CompleteCheckIn :exec
 UPDATE bookings
 SET status = 'completed', checked_in_at = $1::timestamptz, completed_at = $1::timestamptz, updated_at = $1
@@ -52,6 +68,20 @@ type CompleteCheckInParams struct {
 // Attraction check-in completes the booking at once.
 func (q *Queries) CompleteCheckIn(ctx context.Context, arg CompleteCheckInParams) error {
 	_, err := q.db.Exec(ctx, completeCheckIn, arg.Now, arg.ID)
+	return err
+}
+
+const completeRide = `-- name: CompleteRide :exec
+UPDATE bookings SET status = 'completed', completed_at = $1::timestamptz, updated_at = $1 WHERE id = $2
+`
+
+type CompleteRideParams struct {
+	Now time.Time
+	ID  uuid.UUID
+}
+
+func (q *Queries) CompleteRide(ctx context.Context, arg CompleteRideParams) error {
+	_, err := q.db.Exec(ctx, completeRide, arg.Now, arg.ID)
 	return err
 }
 
@@ -1037,6 +1067,79 @@ type ListPairedRideBookingsParams struct {
 // The other ride booking of a round trip (same checkout).
 func (q *Queries) ListPairedRideBookings(ctx context.Context, arg ListPairedRideBookingsParams) ([]uuid.UUID, error) {
 	rows, err := q.db.Query(ctx, listPairedRideBookings, arg.CheckoutID, arg.BookingID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRideNoShowCandidates = `-- name: ListRideNoShowCandidates :many
+SELECT id FROM bookings
+WHERE status = 'confirmed' AND service_type = 'scheduled_ride' AND service_start_at < $1::timestamptz
+  AND NOT (id = ANY($2::uuid[]))
+ORDER BY service_start_at, id
+LIMIT $3
+`
+
+type ListRideNoShowCandidatesParams struct {
+	Cutoff time.Time
+	Skip   []uuid.UUID
+	Lim    int32
+}
+
+// No-show job, scheduled rides: confirmed (never checked in) ride bookings
+// that departed before @cutoff = now − ride_no_show_after_minutes
+// (bookings_ride_no_show_idx).
+func (q *Queries) ListRideNoShowCandidates(ctx context.Context, arg ListRideNoShowCandidatesParams) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listRideNoShowCandidates, arg.Cutoff, arg.Skip, arg.Lim)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRidesToComplete = `-- name: ListRidesToComplete :many
+SELECT id FROM bookings
+WHERE status = 'checked_in' AND service_type = 'scheduled_ride' AND service_end_at <= $1::timestamptz
+  AND NOT (id = ANY($2::uuid[]))
+ORDER BY service_end_at, id
+LIMIT $3
+`
+
+type ListRidesToCompleteParams struct {
+	Now  time.Time
+	Skip []uuid.UUID
+	Lim  int32
+}
+
+// Ride completion job: checked-in ride bookings whose service ended
+// (bookings_service_end_idx).
+func (q *Queries) ListRidesToComplete(ctx context.Context, arg ListRidesToCompleteParams) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listRidesToComplete, arg.Now, arg.Skip, arg.Lim)
 	if err != nil {
 		return nil, err
 	}

@@ -110,7 +110,7 @@ type Service struct {
 	log      *slog.Logger
 
 	// Periodic jobs: rows backing off after a failure, one tracker per job.
-	holdBackoff, noShowBackoff, releaseBackoff jobBackoff
+	holdBackoff, noShowBackoff, completeBackoff, releaseBackoff jobBackoff
 	// batchSize overrides jobBatchSize when > 0 (tests).
 	batchSize int32
 	// beforeItem, when set (tests), runs inside each job item's transaction

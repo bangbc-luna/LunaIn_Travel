@@ -20,6 +20,9 @@ import (
 	"github.com/bangbc-luna/lunain-travel/internal/platform/httpx"
 )
 
+// TripCancelled is the status of a cancelled trip.
+const TripCancelled = "cancelled"
+
 const (
 	tripScheduled       = "scheduled"
 	maxTripAheadDays    = 365
@@ -413,6 +416,19 @@ func (s *Service) TripListingIDs(ctx context.Context, tx pgx.Tx, ids []uuid.UUID
 		out[r.ID] = r.ListingID
 	}
 	return out, nil
+}
+
+// TripStatus reads a trip's status without locking (ride check-in locks the
+// booking, not the trip). A missing trip is ErrTripNotFound.
+func (s *Service) TripStatus(ctx context.Context, tx pgx.Tx, id uuid.UUID) (string, error) {
+	row, err := store.New(tx).GetRideTrip(ctx, id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrTripNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("get ride trip: %w", err)
+	}
+	return row.Status, nil
 }
 
 // LockTrips locks the trips FOR UPDATE in id order (DB §1.1), duplicates
