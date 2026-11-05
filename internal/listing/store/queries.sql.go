@@ -137,6 +137,17 @@ func (q *Queries) CancelTrip(ctx context.Context, arg CancelTripParams) (RideTri
 	return i, err
 }
 
+const countActiveRentalPickupPoints = `-- name: CountActiveRentalPickupPoints :one
+SELECT count(*) FROM rental_pickup_points WHERE listing_id = $1 AND active
+`
+
+func (q *Queries) CountActiveRentalPickupPoints(ctx context.Context, listingID uuid.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, countActiveRentalPickupPoints, listingID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const countActiveRideSchedules = `-- name: CountActiveRideSchedules :one
 SELECT count(*) FROM ride_schedules
 WHERE listing_id = $1 AND active AND (valid_to IS NULL OR valid_to >= $2::date)
@@ -182,6 +193,17 @@ SELECT count(*) FROM listing_images WHERE listing_id = $1
 
 func (q *Queries) CountListingImages(ctx context.Context, listingID uuid.UUID) (int64, error) {
 	row := q.db.QueryRow(ctx, countListingImages, listingID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countRentableRentalModels = `-- name: CountRentableRentalModels :one
+SELECT count(*) FROM rental_vehicle_models WHERE listing_id = $1 AND active AND quantity > 0
+`
+
+func (q *Queries) CountRentableRentalModels(ctx context.Context, listingID uuid.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, countRentableRentalModels, listingID)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
@@ -408,6 +430,33 @@ func (q *Queries) GetPublicListingBySlug(ctx context.Context, slug string) (GetP
 		&i.VisibleListing.CreatedAt,
 		&i.VisibleListing.UpdatedAt,
 		&i.PriceFrom,
+	)
+	return i, err
+}
+
+const getRentalPickupPoint = `-- name: GetRentalPickupPoint :one
+SELECT id, listing_id, name, address, province_code, ward_code, delivery_fee, active, created_at, updated_at FROM rental_pickup_points WHERE id = $1 AND listing_id = $2
+`
+
+type GetRentalPickupPointParams struct {
+	ID        uuid.UUID
+	ListingID uuid.UUID
+}
+
+func (q *Queries) GetRentalPickupPoint(ctx context.Context, arg GetRentalPickupPointParams) (RentalPickupPoint, error) {
+	row := q.db.QueryRow(ctx, getRentalPickupPoint, arg.ID, arg.ListingID)
+	var i RentalPickupPoint
+	err := row.Scan(
+		&i.ID,
+		&i.ListingID,
+		&i.Name,
+		&i.Address,
+		&i.ProvinceCode,
+		&i.WardCode,
+		&i.DeliveryFee,
+		&i.Active,
+		&i.CreatedAt,
+		&i.UpdatedAt,
 	)
 	return i, err
 }
@@ -832,6 +881,51 @@ func (q *Queries) InsertOneOffTrip(ctx context.Context, arg InsertOneOffTripPara
 		&i.CancelledAt,
 		&i.CancelledBy,
 		&i.CancelSource,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const insertRentalPickupPoint = `-- name: InsertRentalPickupPoint :one
+INSERT INTO rental_pickup_points (id, listing_id, name, address, province_code, ward_code, delivery_fee,
+    active, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8, $8)
+RETURNING id, listing_id, name, address, province_code, ward_code, delivery_fee, active, created_at, updated_at
+`
+
+type InsertRentalPickupPointParams struct {
+	ID           uuid.UUID
+	ListingID    uuid.UUID
+	Name         string
+	Address      string
+	ProvinceCode string
+	WardCode     string
+	DeliveryFee  int64
+	Now          time.Time
+}
+
+func (q *Queries) InsertRentalPickupPoint(ctx context.Context, arg InsertRentalPickupPointParams) (RentalPickupPoint, error) {
+	row := q.db.QueryRow(ctx, insertRentalPickupPoint,
+		arg.ID,
+		arg.ListingID,
+		arg.Name,
+		arg.Address,
+		arg.ProvinceCode,
+		arg.WardCode,
+		arg.DeliveryFee,
+		arg.Now,
+	)
+	var i RentalPickupPoint
+	err := row.Scan(
+		&i.ID,
+		&i.ListingID,
+		&i.Name,
+		&i.Address,
+		&i.ProvinceCode,
+		&i.WardCode,
+		&i.DeliveryFee,
+		&i.Active,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -1515,6 +1609,48 @@ func (q *Queries) ListRecentAuditLog(ctx context.Context, listingID uuid.UUID) (
 	return items, nil
 }
 
+const listRentalPickupPoints = `-- name: ListRentalPickupPoints :many
+SELECT id, listing_id, name, address, province_code, ward_code, delivery_fee, active, created_at, updated_at FROM rental_pickup_points
+WHERE listing_id = $1 AND ($2::bool OR active)
+ORDER BY created_at, id
+`
+
+type ListRentalPickupPointsParams struct {
+	ListingID       uuid.UUID
+	IncludeInactive bool
+}
+
+func (q *Queries) ListRentalPickupPoints(ctx context.Context, arg ListRentalPickupPointsParams) ([]RentalPickupPoint, error) {
+	rows, err := q.db.Query(ctx, listRentalPickupPoints, arg.ListingID, arg.IncludeInactive)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []RentalPickupPoint
+	for rows.Next() {
+		var i RentalPickupPoint
+		if err := rows.Scan(
+			&i.ID,
+			&i.ListingID,
+			&i.Name,
+			&i.Address,
+			&i.ProvinceCode,
+			&i.WardCode,
+			&i.DeliveryFee,
+			&i.Active,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listRideSchedules = `-- name: ListRideSchedules :many
 SELECT id, listing_id, departure_time, weekdays, seat_capacity, price_per_seat, valid_from, valid_to, active, generated_until, created_at, updated_at FROM ride_schedules
 WHERE listing_id = $1 AND ($2::bool OR active)
@@ -1807,6 +1943,33 @@ func (q *Queries) LockOwnedListing(ctx context.Context, arg LockOwnedListingPara
 		&i.HiddenFromVisibility,
 		&i.RatingSum,
 		&i.RatingCount,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const lockRentalPickupPoint = `-- name: LockRentalPickupPoint :one
+SELECT id, listing_id, name, address, province_code, ward_code, delivery_fee, active, created_at, updated_at FROM rental_pickup_points WHERE id = $1 AND listing_id = $2 FOR UPDATE
+`
+
+type LockRentalPickupPointParams struct {
+	ID        uuid.UUID
+	ListingID uuid.UUID
+}
+
+func (q *Queries) LockRentalPickupPoint(ctx context.Context, arg LockRentalPickupPointParams) (RentalPickupPoint, error) {
+	row := q.db.QueryRow(ctx, lockRentalPickupPoint, arg.ID, arg.ListingID)
+	var i RentalPickupPoint
+	err := row.Scan(
+		&i.ID,
+		&i.ListingID,
+		&i.Name,
+		&i.Address,
+		&i.ProvinceCode,
+		&i.WardCode,
+		&i.DeliveryFee,
+		&i.Active,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -2655,6 +2818,47 @@ func (q *Queries) UpdateOpenScheduleTrips(ctx context.Context, arg UpdateOpenSch
 	return result.RowsAffected(), nil
 }
 
+const updateRentalPickupPoint = `-- name: UpdateRentalPickupPoint :one
+UPDATE rental_pickup_points
+SET name = $1, address = $2, delivery_fee = $3, active = $4, updated_at = $5
+WHERE id = $6
+RETURNING id, listing_id, name, address, province_code, ward_code, delivery_fee, active, created_at, updated_at
+`
+
+type UpdateRentalPickupPointParams struct {
+	Name        string
+	Address     string
+	DeliveryFee int64
+	Active      bool
+	Now         time.Time
+	ID          uuid.UUID
+}
+
+func (q *Queries) UpdateRentalPickupPoint(ctx context.Context, arg UpdateRentalPickupPointParams) (RentalPickupPoint, error) {
+	row := q.db.QueryRow(ctx, updateRentalPickupPoint,
+		arg.Name,
+		arg.Address,
+		arg.DeliveryFee,
+		arg.Active,
+		arg.Now,
+		arg.ID,
+	)
+	var i RentalPickupPoint
+	err := row.Scan(
+		&i.ID,
+		&i.ListingID,
+		&i.Name,
+		&i.Address,
+		&i.ProvinceCode,
+		&i.WardCode,
+		&i.DeliveryFee,
+		&i.Active,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const updateRideSchedule = `-- name: UpdateRideSchedule :one
 UPDATE ride_schedules
 SET seat_capacity = $1, price_per_seat = $2, valid_to = $3,
@@ -2865,6 +3069,64 @@ func (q *Queries) UpsertAttraction(ctx context.Context, arg UpsertAttractionPara
 		&i.ListingID,
 		&i.OpeningNote,
 		&i.CheckinInstructions,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const upsertRentalStore = `-- name: UpsertRentalStore :one
+INSERT INTO rental_stores (listing_id, handover_open, handover_close, delivery_available,
+    deposit_terms, documents_terms, late_fee_terms, allowed_area_terms, other_terms, created_at, updated_at)
+VALUES ($1, $2, $3, $4,
+    $5, $6, $7,
+    $8, $9, $10, $10)
+ON CONFLICT (listing_id) DO UPDATE
+SET handover_open = EXCLUDED.handover_open, handover_close = EXCLUDED.handover_close,
+    delivery_available = EXCLUDED.delivery_available, deposit_terms = EXCLUDED.deposit_terms,
+    documents_terms = EXCLUDED.documents_terms, late_fee_terms = EXCLUDED.late_fee_terms,
+    allowed_area_terms = EXCLUDED.allowed_area_terms, other_terms = EXCLUDED.other_terms,
+    updated_at = EXCLUDED.updated_at
+RETURNING listing_id, handover_open, handover_close, delivery_available, deposit_terms, documents_terms, late_fee_terms, allowed_area_terms, other_terms, created_at, updated_at
+`
+
+type UpsertRentalStoreParams struct {
+	ListingID         uuid.UUID
+	HandoverOpen      pgtype.Time
+	HandoverClose     pgtype.Time
+	DeliveryAvailable bool
+	DepositTerms      *string
+	DocumentsTerms    *string
+	LateFeeTerms      *string
+	AllowedAreaTerms  *string
+	OtherTerms        *string
+	Now               time.Time
+}
+
+func (q *Queries) UpsertRentalStore(ctx context.Context, arg UpsertRentalStoreParams) (RentalStore, error) {
+	row := q.db.QueryRow(ctx, upsertRentalStore,
+		arg.ListingID,
+		arg.HandoverOpen,
+		arg.HandoverClose,
+		arg.DeliveryAvailable,
+		arg.DepositTerms,
+		arg.DocumentsTerms,
+		arg.LateFeeTerms,
+		arg.AllowedAreaTerms,
+		arg.OtherTerms,
+		arg.Now,
+	)
+	var i RentalStore
+	err := row.Scan(
+		&i.ListingID,
+		&i.HandoverOpen,
+		&i.HandoverClose,
+		&i.DeliveryAvailable,
+		&i.DepositTerms,
+		&i.DocumentsTerms,
+		&i.LateFeeTerms,
+		&i.AllowedAreaTerms,
+		&i.OtherTerms,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)

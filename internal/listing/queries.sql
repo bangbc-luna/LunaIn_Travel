@@ -514,3 +514,46 @@ LIMIT @lim OFFSET @off;
 
 -- name: GetRentalStore :one
 SELECT * FROM rental_stores WHERE listing_id = @listing_id;
+
+-- name: UpsertRentalStore :one
+INSERT INTO rental_stores (listing_id, handover_open, handover_close, delivery_available,
+    deposit_terms, documents_terms, late_fee_terms, allowed_area_terms, other_terms, created_at, updated_at)
+VALUES (@listing_id, @handover_open, @handover_close, @delivery_available,
+    sqlc.narg(deposit_terms), sqlc.narg(documents_terms), sqlc.narg(late_fee_terms),
+    sqlc.narg(allowed_area_terms), sqlc.narg(other_terms), @now, @now)
+ON CONFLICT (listing_id) DO UPDATE
+SET handover_open = EXCLUDED.handover_open, handover_close = EXCLUDED.handover_close,
+    delivery_available = EXCLUDED.delivery_available, deposit_terms = EXCLUDED.deposit_terms,
+    documents_terms = EXCLUDED.documents_terms, late_fee_terms = EXCLUDED.late_fee_terms,
+    allowed_area_terms = EXCLUDED.allowed_area_terms, other_terms = EXCLUDED.other_terms,
+    updated_at = EXCLUDED.updated_at
+RETURNING *;
+
+-- name: InsertRentalPickupPoint :one
+INSERT INTO rental_pickup_points (id, listing_id, name, address, province_code, ward_code, delivery_fee,
+    active, created_at, updated_at)
+VALUES (@id, @listing_id, @name, @address, @province_code, @ward_code, @delivery_fee, true, @now, @now)
+RETURNING *;
+
+-- name: LockRentalPickupPoint :one
+SELECT * FROM rental_pickup_points WHERE id = @id AND listing_id = @listing_id FOR UPDATE;
+
+-- name: GetRentalPickupPoint :one
+SELECT * FROM rental_pickup_points WHERE id = @id AND listing_id = @listing_id;
+
+-- name: ListRentalPickupPoints :many
+SELECT * FROM rental_pickup_points
+WHERE listing_id = @listing_id AND (@include_inactive::bool OR active)
+ORDER BY created_at, id;
+
+-- name: UpdateRentalPickupPoint :one
+UPDATE rental_pickup_points
+SET name = @name, address = @address, delivery_fee = @delivery_fee, active = @active, updated_at = @now
+WHERE id = @id
+RETURNING *;
+
+-- name: CountActiveRentalPickupPoints :one
+SELECT count(*) FROM rental_pickup_points WHERE listing_id = @listing_id AND active;
+
+-- name: CountRentableRentalModels :one
+SELECT count(*) FROM rental_vehicle_models WHERE listing_id = @listing_id AND active AND quantity > 0;
