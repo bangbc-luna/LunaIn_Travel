@@ -29,7 +29,7 @@ func (q *Queries) ClearCurrentBankAccount(ctx context.Context, arg ClearCurrentB
 }
 
 const currentBankAccount = `-- name: CurrentBankAccount :one
-SELECT id, partner_id, bank_bin, bank_name, account_number, account_holder, is_current, created_at, updated_at FROM partner_bank_accounts WHERE partner_id = $1 AND is_current
+SELECT id, partner_id, bank_bin, bank_name, account_number, account_holder, is_current, created_at, updated_at, created_by FROM partner_bank_accounts WHERE partner_id = $1 AND is_current
 `
 
 func (q *Queries) CurrentBankAccount(ctx context.Context, partnerID uuid.UUID) (PartnerBankAccount, error) {
@@ -45,6 +45,7 @@ func (q *Queries) CurrentBankAccount(ctx context.Context, partnerID uuid.UUID) (
 		&i.IsCurrent,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.CreatedBy,
 	)
 	return i, err
 }
@@ -208,7 +209,7 @@ func (q *Queries) GetPartnerForUpdate(ctx context.Context, id uuid.UUID) (Partne
 const insertBankAccount = `-- name: InsertBankAccount :one
 INSERT INTO partner_bank_accounts (id, partner_id, bank_bin, bank_name, account_number, account_holder, is_current, created_at, updated_at)
 VALUES ($1, $2, $3, $4, $5, $6, true, $7, $7)
-RETURNING id, partner_id, bank_bin, bank_name, account_number, account_holder, is_current, created_at, updated_at
+RETURNING id, partner_id, bank_bin, bank_name, account_number, account_holder, is_current, created_at, updated_at, created_by
 `
 
 type InsertBankAccountParams struct {
@@ -242,6 +243,7 @@ func (q *Queries) InsertBankAccount(ctx context.Context, arg InsertBankAccountPa
 		&i.IsCurrent,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.CreatedBy,
 	)
 	return i, err
 }
@@ -318,7 +320,7 @@ func (q *Queries) IsServiceTypeEnabled(ctx context.Context, arg IsServiceTypeEna
 }
 
 const listBankAccounts = `-- name: ListBankAccounts :many
-SELECT id, partner_id, bank_bin, bank_name, account_number, account_holder, is_current, created_at, updated_at FROM partner_bank_accounts WHERE partner_id = $1
+SELECT id, partner_id, bank_bin, bank_name, account_number, account_holder, is_current, created_at, updated_at, created_by FROM partner_bank_accounts WHERE partner_id = $1
 ORDER BY created_at DESC, id DESC
 `
 
@@ -341,6 +343,7 @@ func (q *Queries) ListBankAccounts(ctx context.Context, partnerID uuid.UUID) ([]
 			&i.IsCurrent,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.CreatedBy,
 		); err != nil {
 			return nil, err
 		}

@@ -370,6 +370,7 @@ type PartnerBankAccount struct {
 	IsCurrent     bool
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
+	CreatedBy     *uuid.UUID
 }
 
 type PartnerMember struct {
@@ -406,6 +407,11 @@ type Payment struct {
 	Raw               []byte
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
+	ReviewSeenAt      *time.Time
+	ReviewSeenBy      *uuid.UUID
+	ReviewResolvedAt  *time.Time
+	ReviewResolvedBy  *uuid.UUID
+	ReviewNote        *string
 }
 
 type PaymentEvent struct {
@@ -420,6 +426,49 @@ type PaymentEvent struct {
 	Result         *string
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
+	Amount         *int64
+}
+
+type PaymentReconciliation struct {
+	ID              uuid.UUID
+	RunDate         pgtype.Date
+	Status          string
+	CheckedPayments int32
+	Mismatches      []byte
+	StartedAt       time.Time
+	FinishedAt      time.Time
+	RunBy           *uuid.UUID
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+}
+
+type Payout struct {
+	ID                uuid.UUID
+	PartnerID         uuid.UUID
+	Amount            int64
+	Status            string
+	BankBin           string
+	BankName          string
+	AccountNumber     string
+	AccountHolder     string
+	BankAccountID     uuid.UUID
+	StatementSeqFrom  *int64
+	StatementSeqTo    *int64
+	OpeningAvailable  *int64
+	ClosingAvailable  *int64
+	RequestedBy       uuid.UUID
+	RequestedAt       time.Time
+	ApprovedBy        *uuid.UUID
+	ApprovedAt        *time.Time
+	PaidBy            *uuid.UUID
+	PaidAt            *time.Time
+	TransferReference *string
+	ProofFileID       *uuid.UUID
+	RejectedBy        *uuid.UUID
+	RejectedAt        *time.Time
+	RejectReason      *string
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
 }
 
 type PlatformCommissionEntry struct {
@@ -472,23 +521,25 @@ type RefreshToken struct {
 }
 
 type Refund struct {
-	ID                uuid.UUID
-	PaymentID         uuid.UUID
-	CheckoutID        uuid.UUID
-	BookingID         *uuid.UUID
-	ProviderReference *string
-	Amount            int64
-	Reason            string
-	Status            string
-	BankBin           *string
-	AccountNumber     *string
-	AccountHolder     *string
-	TransferReference *string
-	ProofFileID       *uuid.UUID
-	CompletedBy       *uuid.UUID
-	CompletedAt       *time.Time
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
+	ID                    uuid.UUID
+	PaymentID             uuid.UUID
+	CheckoutID            uuid.UUID
+	BookingID             *uuid.UUID
+	ProviderReference     *string
+	Amount                int64
+	Reason                string
+	Status                string
+	BankBin               *string
+	AccountNumber         *string
+	AccountHolder         *string
+	TransferReference     *string
+	ProofFileID           *uuid.UUID
+	CompletedBy           *uuid.UUID
+	CompletedAt           *time.Time
+	CreatedAt             time.Time
+	UpdatedAt             time.Time
+	BankInfoReminderCount int32
+	BankInfoRemindedAt    *time.Time
 }
 
 type ServiceType struct {

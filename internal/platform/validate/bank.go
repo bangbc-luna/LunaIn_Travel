@@ -15,6 +15,7 @@ const MaxAccountHolderRunes = 200
 var (
 	bankBINRe       = regexp.MustCompile(`^[0-9]{6}$`)
 	accountNumberRe = regexp.MustCompile(`^[0-9]{6,19}$`)
+	holderRe        = regexp.MustCompile(`^[A-Z]+( [A-Z]+)*$`)
 )
 
 // BankAccount is a normalized Vietnamese bank account (partner payouts and
@@ -60,6 +61,8 @@ func NormalizeBankAccount(bin, number, holder string) (BankAccount, string) {
 		return out, "account_number phải gồm 6 đến 19 chữ số"
 	case out.Holder == "" || utf8.RuneCountInString(out.Holder) > MaxAccountHolderRunes:
 		return out, "account_holder không được để trống (tối đa 200 ký tự)"
+	case !holderRe.MatchString(out.Holder):
+		return out, "account_holder chỉ gồm chữ cái A–Z không dấu và khoảng trắng"
 	}
 	return out, ""
 }

@@ -54,7 +54,7 @@ func (q *Queries) FinishPaymentEvent(ctx context.Context, arg FinishPaymentEvent
 }
 
 const getPayment = `-- name: GetPayment :one
-SELECT id, checkout_id, provider, provider_order_code, amount, status, checkout_url, qr_code, expires_at, paid_at, provider_reference, raw, created_at, updated_at FROM payments WHERE id = $1
+SELECT id, checkout_id, provider, provider_order_code, amount, status, checkout_url, qr_code, expires_at, paid_at, provider_reference, raw, created_at, updated_at, review_seen_at, review_seen_by, review_resolved_at, review_resolved_by, review_note FROM payments WHERE id = $1
 `
 
 func (q *Queries) GetPayment(ctx context.Context, id uuid.UUID) (Payment, error) {
@@ -75,12 +75,17 @@ func (q *Queries) GetPayment(ctx context.Context, id uuid.UUID) (Payment, error)
 		&i.Raw,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ReviewSeenAt,
+		&i.ReviewSeenBy,
+		&i.ReviewResolvedAt,
+		&i.ReviewResolvedBy,
+		&i.ReviewNote,
 	)
 	return i, err
 }
 
 const getPaymentByOrderCode = `-- name: GetPaymentByOrderCode :one
-SELECT id, checkout_id, provider, provider_order_code, amount, status, checkout_url, qr_code, expires_at, paid_at, provider_reference, raw, created_at, updated_at FROM payments WHERE provider_order_code = $1
+SELECT id, checkout_id, provider, provider_order_code, amount, status, checkout_url, qr_code, expires_at, paid_at, provider_reference, raw, created_at, updated_at, review_seen_at, review_seen_by, review_resolved_at, review_resolved_by, review_note FROM payments WHERE provider_order_code = $1
 `
 
 func (q *Queries) GetPaymentByOrderCode(ctx context.Context, orderCode int64) (Payment, error) {
@@ -101,6 +106,11 @@ func (q *Queries) GetPaymentByOrderCode(ctx context.Context, orderCode int64) (P
 		&i.Raw,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ReviewSeenAt,
+		&i.ReviewSeenBy,
+		&i.ReviewResolvedAt,
+		&i.ReviewResolvedBy,
+		&i.ReviewNote,
 	)
 	return i, err
 }
@@ -117,7 +127,7 @@ func (q *Queries) GetPaymentEventReceivedAt(ctx context.Context, dedupeKey strin
 }
 
 const getPaymentWithCheckoutCode = `-- name: GetPaymentWithCheckoutCode :one
-SELECT p.id, p.checkout_id, p.provider, p.provider_order_code, p.amount, p.status, p.checkout_url, p.qr_code, p.expires_at, p.paid_at, p.provider_reference, p.raw, p.created_at, p.updated_at, c.code AS checkout_code
+SELECT p.id, p.checkout_id, p.provider, p.provider_order_code, p.amount, p.status, p.checkout_url, p.qr_code, p.expires_at, p.paid_at, p.provider_reference, p.raw, p.created_at, p.updated_at, p.review_seen_at, p.review_seen_by, p.review_resolved_at, p.review_resolved_by, p.review_note, c.code AS checkout_code
 FROM payments p
 JOIN checkouts c ON c.id = p.checkout_id
 WHERE p.id = $1
@@ -146,13 +156,18 @@ func (q *Queries) GetPaymentWithCheckoutCode(ctx context.Context, id uuid.UUID) 
 		&i.Payment.Raw,
 		&i.Payment.CreatedAt,
 		&i.Payment.UpdatedAt,
+		&i.Payment.ReviewSeenAt,
+		&i.Payment.ReviewSeenBy,
+		&i.Payment.ReviewResolvedAt,
+		&i.Payment.ReviewResolvedBy,
+		&i.Payment.ReviewNote,
 		&i.CheckoutCode,
 	)
 	return i, err
 }
 
 const getPendingPaymentByCheckout = `-- name: GetPendingPaymentByCheckout :one
-SELECT id, checkout_id, provider, provider_order_code, amount, status, checkout_url, qr_code, expires_at, paid_at, provider_reference, raw, created_at, updated_at FROM payments WHERE checkout_id = $1 AND status = 'pending'
+SELECT id, checkout_id, provider, provider_order_code, amount, status, checkout_url, qr_code, expires_at, paid_at, provider_reference, raw, created_at, updated_at, review_seen_at, review_seen_by, review_resolved_at, review_resolved_by, review_note FROM payments WHERE checkout_id = $1 AND status = 'pending'
 `
 
 func (q *Queries) GetPendingPaymentByCheckout(ctx context.Context, checkoutID uuid.UUID) (Payment, error) {
@@ -173,6 +188,11 @@ func (q *Queries) GetPendingPaymentByCheckout(ctx context.Context, checkoutID uu
 		&i.Raw,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ReviewSeenAt,
+		&i.ReviewSeenBy,
+		&i.ReviewResolvedAt,
+		&i.ReviewResolvedBy,
+		&i.ReviewNote,
 	)
 	return i, err
 }
@@ -234,7 +254,7 @@ func (q *Queries) InsertPaymentEvent(ctx context.Context, arg InsertPaymentEvent
 const insertPendingPayment = `-- name: InsertPendingPayment :one
 INSERT INTO payments (id, checkout_id, amount, status, expires_at, created_at, updated_at)
 VALUES ($1, $2, $3, 'pending', $4, $5, $5)
-RETURNING id, checkout_id, provider, provider_order_code, amount, status, checkout_url, qr_code, expires_at, paid_at, provider_reference, raw, created_at, updated_at
+RETURNING id, checkout_id, provider, provider_order_code, amount, status, checkout_url, qr_code, expires_at, paid_at, provider_reference, raw, created_at, updated_at, review_seen_at, review_seen_by, review_resolved_at, review_resolved_by, review_note
 `
 
 type InsertPendingPaymentParams struct {
@@ -270,6 +290,11 @@ func (q *Queries) InsertPendingPayment(ctx context.Context, arg InsertPendingPay
 		&i.Raw,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ReviewSeenAt,
+		&i.ReviewSeenBy,
+		&i.ReviewResolvedAt,
+		&i.ReviewResolvedBy,
+		&i.ReviewNote,
 	)
 	return i, err
 }
@@ -279,7 +304,7 @@ INSERT INTO refunds (id, payment_id, checkout_id, booking_id, provider_reference
                      bank_bin, account_number, account_holder, created_at, updated_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7,
         $8, $9, $10, $11, $12, $12)
-RETURNING id, payment_id, checkout_id, booking_id, provider_reference, amount, reason, status, bank_bin, account_number, account_holder, transfer_reference, proof_file_id, completed_by, completed_at, created_at, updated_at
+RETURNING id, payment_id, checkout_id, booking_id, provider_reference, amount, reason, status, bank_bin, account_number, account_holder, transfer_reference, proof_file_id, completed_by, completed_at, created_at, updated_at, bank_info_reminder_count, bank_info_reminded_at
 `
 
 type InsertRefundParams struct {
@@ -331,12 +356,14 @@ func (q *Queries) InsertRefund(ctx context.Context, arg InsertRefundParams) (Ref
 		&i.CompletedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.BankInfoReminderCount,
+		&i.BankInfoRemindedAt,
 	)
 	return i, err
 }
 
 const listCustomerRefunds = `-- name: ListCustomerRefunds :many
-SELECT r.id, r.payment_id, r.checkout_id, r.booking_id, r.provider_reference, r.amount, r.reason, r.status, r.bank_bin, r.account_number, r.account_holder, r.transfer_reference, r.proof_file_id, r.completed_by, r.completed_at, r.created_at, r.updated_at FROM refunds r
+SELECT r.id, r.payment_id, r.checkout_id, r.booking_id, r.provider_reference, r.amount, r.reason, r.status, r.bank_bin, r.account_number, r.account_holder, r.transfer_reference, r.proof_file_id, r.completed_by, r.completed_at, r.created_at, r.updated_at, r.bank_info_reminder_count, r.bank_info_reminded_at FROM refunds r
 JOIN checkouts c ON c.id = r.checkout_id
 WHERE c.customer_id = $1
 ORDER BY r.id DESC
@@ -375,6 +402,8 @@ func (q *Queries) ListCustomerRefunds(ctx context.Context, arg ListCustomerRefun
 			&i.CompletedAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.BankInfoReminderCount,
+			&i.BankInfoRemindedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -411,7 +440,7 @@ func (q *Queries) LockCheckoutBookingRows(ctx context.Context, checkoutID uuid.U
 }
 
 const lockCheckoutPayments = `-- name: LockCheckoutPayments :many
-SELECT id, checkout_id, provider, provider_order_code, amount, status, checkout_url, qr_code, expires_at, paid_at, provider_reference, raw, created_at, updated_at FROM payments WHERE checkout_id = $1 ORDER BY id FOR NO KEY UPDATE
+SELECT id, checkout_id, provider, provider_order_code, amount, status, checkout_url, qr_code, expires_at, paid_at, provider_reference, raw, created_at, updated_at, review_seen_at, review_seen_by, review_resolved_at, review_resolved_by, review_note FROM payments WHERE checkout_id = $1 ORDER BY id FOR NO KEY UPDATE
 `
 
 // All payments of a checkout, locked in id order (after its bookings),
@@ -440,6 +469,11 @@ func (q *Queries) LockCheckoutPayments(ctx context.Context, checkoutID uuid.UUID
 			&i.Raw,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.ReviewSeenAt,
+			&i.ReviewSeenBy,
+			&i.ReviewResolvedAt,
+			&i.ReviewResolvedBy,
+			&i.ReviewNote,
 		); err != nil {
 			return nil, err
 		}
@@ -464,7 +498,7 @@ func (q *Queries) LockCheckoutRow(ctx context.Context, id uuid.UUID) (uuid.UUID,
 }
 
 const lockCustomerRefund = `-- name: LockCustomerRefund :one
-SELECT r.id, r.payment_id, r.checkout_id, r.booking_id, r.provider_reference, r.amount, r.reason, r.status, r.bank_bin, r.account_number, r.account_holder, r.transfer_reference, r.proof_file_id, r.completed_by, r.completed_at, r.created_at, r.updated_at FROM refunds r
+SELECT r.id, r.payment_id, r.checkout_id, r.booking_id, r.provider_reference, r.amount, r.reason, r.status, r.bank_bin, r.account_number, r.account_holder, r.transfer_reference, r.proof_file_id, r.completed_by, r.completed_at, r.created_at, r.updated_at, r.bank_info_reminder_count, r.bank_info_reminded_at FROM refunds r
 JOIN checkouts c ON c.id = r.checkout_id
 WHERE r.id = $1 AND c.customer_id = $2
 FOR UPDATE OF r
@@ -497,12 +531,14 @@ func (q *Queries) LockCustomerRefund(ctx context.Context, arg LockCustomerRefund
 		&i.CompletedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.BankInfoReminderCount,
+		&i.BankInfoRemindedAt,
 	)
 	return i, err
 }
 
 const lockPayment = `-- name: LockPayment :one
-SELECT id, checkout_id, provider, provider_order_code, amount, status, checkout_url, qr_code, expires_at, paid_at, provider_reference, raw, created_at, updated_at FROM payments WHERE id = $1 FOR NO KEY UPDATE
+SELECT id, checkout_id, provider, provider_order_code, amount, status, checkout_url, qr_code, expires_at, paid_at, provider_reference, raw, created_at, updated_at, review_seen_at, review_seen_by, review_resolved_at, review_resolved_by, review_note FROM payments WHERE id = $1 FOR NO KEY UPDATE
 `
 
 // payments come after checkouts and bookings in the lock order (DB §1.1).
@@ -529,6 +565,11 @@ func (q *Queries) LockPayment(ctx context.Context, id uuid.UUID) (Payment, error
 		&i.Raw,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ReviewSeenAt,
+		&i.ReviewSeenBy,
+		&i.ReviewResolvedAt,
+		&i.ReviewResolvedBy,
+		&i.ReviewNote,
 	)
 	return i, err
 }
