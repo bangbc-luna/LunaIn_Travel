@@ -89,17 +89,46 @@ func (s *Service) generateOne(ctx context.Context, id uuid.UUID, now time.Time) 
 		if err != nil {
 			return fmt.Errorf("lock ride schedule: %w", err)
 		}
-		swept, err := store.New(tx).SweepScheduleTrips(ctx, store.SweepScheduleTripsParams{
-			ScheduleID: sc.ID, Reason: scheduleCancelMsg, Now: now,
-		})
-		if err != nil {
-			return fmt.Errorf("sweep schedule trips: %w", err)
-		}
-		if swept > 0 {
-			s.log.Info("listing: cancelled trips outside their schedule", "schedule_id", sc.ID, "trips", swept)
+		if err := s.sweepSchedule(ctx, tx, sc.ID, now); err != nil {
+			return err
 		}
 		n, err = s.generateForSchedule(ctx, tx, sc, now)
 		return err
 	})
 	return n, err
+}
+
+// sweepSchedule handles the unbooked future trips that schedule id (locked by
+// the caller) no longer covers. A trip that another active schedule of the
+// listing covers is handed over to it, with its capacity and price (review
+// I2: a partner replaced the schedule while the trip held seats). That
+// schedule is locked FOR UPDATE first; the partner path never holds two
+// schedules, and the overlap rule keeps a covering schedule from needing id
+// back. The remaining trips are cancelled (cancel_source schedule).
+func (s *Service) sweepSchedule(ctx context.Context, tx pgx.Tx, id uuid.UUID, now time.Time) error {
+	q := store.New(tx)
+	covers, err := q.ListCoveringSchedules(ctx, store.ListCoveringSchedulesParams{ScheduleID: id, Now: now})
+	if err != nil {
+		return fmt.Errorf("list covering schedules: %w", err)
+	}
+	for _, cover := range covers {
+		if _, err := q.LockRideScheduleByID(ctx, cover); err != nil {
+			return fmt.Errorf("lock covering schedule: %w", err)
+		}
+		moved, err := q.ReassignCoveredTrips(ctx, store.ReassignCoveredTripsParams{ScheduleID: id, CoverID: cover, Now: now})
+		if err != nil {
+			return fmt.Errorf("reassign covered trips: %w", err)
+		}
+		if moved > 0 {
+			s.log.Info("listing: trips handed over to the covering schedule", "schedule_id", id, "cover_id", cover, "trips", moved)
+		}
+	}
+	swept, err := q.SweepScheduleTrips(ctx, store.SweepScheduleTripsParams{ScheduleID: id, Reason: scheduleCancelMsg, Now: now})
+	if err != nil {
+		return fmt.Errorf("sweep schedule trips: %w", err)
+	}
+	if swept > 0 {
+		s.log.Info("listing: cancelled trips outside their schedule", "schedule_id", id, "trips", swept)
+	}
+	return nil
 }

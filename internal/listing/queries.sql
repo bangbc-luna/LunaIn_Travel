@@ -342,11 +342,51 @@ WHERE (s.active
                      OR (s.valid_to IS NOT NULL AND (t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date > s.valid_to)))
 ORDER BY s.id;
 
+-- A trip that schedule @schedule_id no longer covers (it is inactive, or the
+-- trip's VN date is after its valid_to) may be covered by another active
+-- schedule of the listing: same VN departure time, the trip's VN weekday bit
+-- set (bit 0 = Monday) and its VN date within [valid_from, valid_to]. That
+-- happens when a partner replaces a schedule while a trip held seats (the
+-- replacement's generation skips the existing row). The overlap rule allows
+-- at most one such schedule per trip.
+-- name: ListCoveringSchedules :many
+SELECT DISTINCT b.id
+FROM ride_trips t
+JOIN ride_schedules s ON s.id = t.schedule_id
+JOIN ride_schedules b ON b.listing_id = t.listing_id AND b.id <> s.id AND b.active
+WHERE s.id = @schedule_id::uuid AND t.departure_at > @now::timestamptz
+  AND t.status = 'scheduled' AND t.seats_reserved = 0
+  AND (NOT s.active
+       OR (s.valid_to IS NOT NULL AND (t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date > s.valid_to))
+  AND b.departure_time = (t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::time
+  AND (b.weekdays::int & (1 << (extract(isodow FROM t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::int - 1))) <> 0
+  AND (t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date >= b.valid_from
+  AND (b.valid_to IS NULL OR (t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date <= b.valid_to)
+ORDER BY b.id;
+
+-- Hands the unbooked trips of @schedule_id that it no longer covers but
+-- @cover_id (locked by the caller) does over to @cover_id, with its capacity
+-- and price, so that its later edits apply to them.
+-- name: ReassignCoveredTrips :execrows
+UPDATE ride_trips t
+SET schedule_id = b.id, seat_capacity = b.seat_capacity, price_per_seat = b.price_per_seat, updated_at = @now::timestamptz
+FROM ride_schedules s, ride_schedules b
+WHERE s.id = @schedule_id::uuid AND t.schedule_id = s.id AND b.id = @cover_id::uuid
+  AND b.listing_id = t.listing_id AND b.id <> s.id AND b.active
+  AND t.departure_at > @now::timestamptz AND t.status = 'scheduled' AND t.seats_reserved = 0
+  AND (NOT s.active
+       OR (s.valid_to IS NOT NULL AND (t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date > s.valid_to))
+  AND b.departure_time = (t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::time
+  AND (b.weekdays::int & (1 << (extract(isodow FROM t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::int - 1))) <> 0
+  AND (t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date >= b.valid_from
+  AND (b.valid_to IS NULL OR (t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date <= b.valid_to);
+
 -- Cancels the future, unbooked, still scheduled trips of a schedule that it
 -- no longer covers (schedule inactive, or the trip's VN date after
 -- valid_to): trips kept by a schedule edit because they had seats held, once
--- those seats are released. seats_reserved = 0 is re-checked per row, so a
--- concurrent reservation wins.
+-- those seats are released. A trip another active schedule covers (see
+-- ListCoveringSchedules) is never cancelled here. seats_reserved = 0 is
+-- re-checked per row, so a concurrent reservation wins.
 -- name: SweepScheduleTrips :execrows
 UPDATE ride_trips t
 SET status = 'cancelled', cancelled_reason = @reason::text, cancelled_at = @now::timestamptz,
@@ -355,7 +395,14 @@ FROM ride_schedules s
 WHERE s.id = @schedule_id::uuid AND t.schedule_id = s.id AND t.departure_at > @now::timestamptz
   AND t.status = 'scheduled' AND t.seats_reserved = 0
   AND (NOT s.active
-       OR (s.valid_to IS NOT NULL AND (t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date > s.valid_to));
+       OR (s.valid_to IS NOT NULL AND (t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date > s.valid_to))
+  AND NOT EXISTS (
+      SELECT 1 FROM ride_schedules b
+      WHERE b.listing_id = t.listing_id AND b.id <> s.id AND b.active
+        AND b.departure_time = (t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::time
+        AND (b.weekdays::int & (1 << (extract(isodow FROM t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::int - 1))) <> 0
+        AND (t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date >= b.valid_from
+        AND (b.valid_to IS NULL OR (t.departure_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date <= b.valid_to));
 
 -- Inserts the schedule's trips; a trip the schedule itself cancelled at the
 -- same departure is reopened. Any other existing trip (one-off, running, or

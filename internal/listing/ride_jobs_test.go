@@ -207,3 +207,64 @@ func TestGenerateTrips_SweepLeavesActiveScheduleTrips(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 59, e.count(t, `SELECT count(*) FROM ride_trips WHERE schedule_id = $1 AND status = 'scheduled'`, s.ID))
 }
+
+// Review I2: the partner replaces schedule A with B at the same departure
+// while a trip of A holds a seat. B's generation skips that row. Once the
+// seat is released, the job hands the trip to B (with B's capacity and price)
+// instead of cancelling it, so the departure stays on sale.
+func TestGenerateTrips_HandsKeptTripToReplacementSchedule(t *testing.T) {
+	e, p := rideEnv(t)
+	ctx := context.Background()
+	l := e.routed(t, p)
+	a := e.schedule(t, p, l, daily("07:00"))
+	kept := e.tripAt(t, l.ID, vnAt(2026, 11, 14, 7, 0)) // Saturday
+	e.reserve(t, kept.ID, 1)
+	_, err := e.Svc.UpdateRideSchedule(ctx, p.ID, p.OwnerUserID, l.ID, a.ID, listing.RideSchedulePatch{Active: ptr(false)})
+	require.NoError(t, err)
+
+	b := e.schedule(t, p, l, listing.RideScheduleInput{
+		DepartureTime: "07:00", Weekdays: 0b0111111, SeatCapacity: 20, PricePerSeat: 300_000, ValidFrom: "2026-11-05",
+	})
+	require.Equal(t, a.ID, *e.tripAt(t, l.ID, vnAt(2026, 11, 14, 7, 0)).ScheduleID)
+
+	// The hold expires, then the job runs.
+	e.reserve(t, kept.ID, 0)
+	_, err = e.Svc.GenerateTrips(ctx)
+	require.NoError(t, err)
+	x := e.tripAt(t, l.ID, vnAt(2026, 11, 14, 7, 0))
+	require.Equal(t, kept.ID, x.ID)
+	require.Equal(t, "scheduled", x.Status)
+	require.Equal(t, b.ID, *x.ScheduleID)
+	require.Equal(t, int64(300_000), x.Price)
+	require.Equal(t, 20, x.SeatCapacity)
+
+	// B's edits now reach it.
+	_, err = e.Svc.UpdateRideSchedule(ctx, p.ID, p.OwnerUserID, l.ID, b.ID, listing.RideSchedulePatch{PricePerSeat: ptr(int64(310_000))})
+	require.NoError(t, err)
+	require.Equal(t, int64(310_000), e.tripAt(t, l.ID, vnAt(2026, 11, 14, 7, 0)).Price)
+	// A has nothing left on sale; Sunday (not in B) stays cancelled by A.
+	require.Zero(t, e.count(t, `SELECT count(*) FROM ride_trips WHERE schedule_id = $1 AND status = 'scheduled'`, a.ID))
+	require.Equal(t, "cancelled", e.tripAt(t, l.ID, vnAt(2026, 11, 8, 7, 0)).Status)
+}
+
+// Only an active schedule spares a trip from the sweep.
+func TestGenerateTrips_SweepIgnoresInactiveCover(t *testing.T) {
+	e, p := rideEnv(t)
+	ctx := context.Background()
+	l := e.routed(t, p)
+	a := e.schedule(t, p, l, daily("07:00"))
+	kept := e.tripAt(t, l.ID, vnAt(2026, 11, 14, 7, 0))
+	e.reserve(t, kept.ID, 1)
+	_, err := e.Svc.UpdateRideSchedule(ctx, p.ID, p.OwnerUserID, l.ID, a.ID, listing.RideSchedulePatch{Active: ptr(false)})
+	require.NoError(t, err)
+	b := e.schedule(t, p, l, daily("07:00"))
+	_, err = e.Svc.UpdateRideSchedule(ctx, p.ID, p.OwnerUserID, l.ID, b.ID, listing.RideSchedulePatch{Active: ptr(false)})
+	require.NoError(t, err)
+
+	e.reserve(t, kept.ID, 0)
+	_, err = e.Svc.GenerateTrips(ctx)
+	require.NoError(t, err)
+	x := e.tripAt(t, l.ID, vnAt(2026, 11, 14, 7, 0))
+	require.Equal(t, "cancelled", x.Status)
+	require.Equal(t, a.ID, *x.ScheduleID)
+}
