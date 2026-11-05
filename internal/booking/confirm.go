@@ -154,10 +154,19 @@ func (s *Service) HandlePaid(ctx context.Context, tx pgx.Tx, ev payment.PaidEven
 	// (DB §1.1), then its bookings re-read under them (every status or hold
 	// change of a rental booking holds its model lock) for rentalChecks.
 	if modelIDs := rentalModelIDs(rows); len(modelIDs) > 0 {
+		if s.beforeRentalLock != nil {
+			s.beforeRentalLock()
+		}
 		locked, err := s.listings.LockRentalModels(ctx, tx, modelIDs)
 		if err != nil {
 			return payment.PaidOutcome{}, err
 		}
+		// A rental hold lapses only by time (hold_until > now), never by a
+		// status change another tx makes: "on time" must be decided with the
+		// time read after waiting on the model lock, or a request committed
+		// meanwhile could have re-sold the vehicle (final review I1). A
+		// booking that became late since reconfirmChecks is errStateChanged.
+		now = s.clock.Now()
 		models := make(map[uuid.UUID]listing.RentalModel, len(locked))
 		for _, m := range locked {
 			models[m.ID] = m

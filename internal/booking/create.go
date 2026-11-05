@@ -121,6 +121,9 @@ type Service struct {
 	// beforeItem, when set (tests), runs inside each job item's transaction
 	// before any work; an error fails the item.
 	beforeItem func(id uuid.UUID) error
+	// beforeRentalLock, when set (tests), runs in HandlePaid just before it
+	// locks a rental checkout's vehicle models.
+	beforeRentalLock func()
 }
 
 // NewService builds a Service.
@@ -659,8 +662,12 @@ func (s *Service) Pay(ctx context.Context, customerID, id uuid.UUID) (BookingVie
 		// The payment was cancelled (a withdraw) or expired while its link
 		// was being created: the link may now be live at the provider, after
 		// the withdraw or expiry already cancelled links. Cancel it (money
-		// paid on it anyway is refunded by the webhook).
+		// paid on it anyway is refunded by the webhook). An expired payment
+		// answers like the pre-check: the hold has lapsed.
 		s.cancelLink(ctx, p.OrderCode)
+		if p.Status == payment.StatusExpired {
+			return BookingView{}, ErrHoldExpired
+		}
 		return BookingView{}, ErrBookingNotPayable
 	}
 	if err != nil {

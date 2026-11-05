@@ -120,7 +120,11 @@ func rentalModelIDs(rows []store.ListCheckoutBookingsRow) []uuid.UUID {
 // of rows can be (re-)confirmed by the money arriving now, and records it in
 // rebookable for every rental booking:
 //
-//   - awaiting_payment, not late: yes; its vehicle is still held for it.
+//   - awaiting_payment, not late: yes while its vehicle is still held for
+//     it, i.e. the peak of the other holds plus one is within the model's
+//     quantity (rentalAvailable, excluding this booking; the model may have
+//     been deactivated since the accept). Otherwise no: refunded in full
+//     (late_payment) without any ledger entry (final review I1).
 //   - Late (expired, or awaiting_payment past hold_release_at; lateBooking):
 //     only an accepted request (accepted_at set: a request that expired
 //     unanswered was never accepted by the partner), with its listing
@@ -162,7 +166,24 @@ func (s *Service) rentalChecks(ctx context.Context, tx pgx.Tx, rows []store.List
 				}
 			}
 		case b.Status == StatusAwaitingPayment:
-			ok = true
+			// On time, its own hold is live, so the other holds leave one
+			// vehicle for it. Checked anyway (final review I1): if the hold
+			// was treated as lapsed and the vehicle re-sold meanwhile, the
+			// payment is refunded like a late one instead of confirming a
+			// second holder. The model being deactivated since the accept
+			// does not matter here: an accepted booking is still served.
+			model, found := models[*r.VehicleModelID]
+			if !found {
+				return fmt.Errorf("booking: rental model %s of booking %s not locked", *r.VehicleModelID, b.ID)
+			}
+			model.Active = true
+			err := s.rentalAvailable(ctx, q, model, *r.RentalPickupAt, *r.RentalReturnAt, now, b.ID)
+			switch {
+			case err == nil:
+				ok = true
+			case !errors.Is(err, ErrVehicleUnavailable):
+				return err
+			}
 		}
 		rebookable[b.ID] = ok
 	}

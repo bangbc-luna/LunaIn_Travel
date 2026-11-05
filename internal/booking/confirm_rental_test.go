@@ -175,9 +175,11 @@ func TestRentalLatePaid_UnitTakenRefunds(t *testing.T) {
 }
 
 // Vision (quantity 2): two other requests overlap R but not each other, so
-// the peak without R is 1 and R is re-confirmed (a raw count of overlapping
-// holds would be 2 and refuse it). R itself is excluded from the peak.
-func TestRentalLatePaid_PeakExcludesSelf(t *testing.T) {
+// the peak of concurrent holds is 1 and R is re-confirmed, where a raw count
+// of overlapping holds (2) would refuse it. (R holds nothing while expired;
+// the exclusion of R itself from the peak is what TestRentalPaid_Confirms
+// relies on: an on-time payment on the last Vios must confirm.)
+func TestRentalLatePaid_PeakNotRawCount(t *testing.T) {
 	r := newRentalEnv(t)
 	ctx := context.Background()
 	v := r.createRental(t, r.Customer, "r", r.rentalInput(r.Vision.ID, r.P0.ID, vnAt(2026, 11, 7, 8, 0), vnAt(2026, 11, 9, 8, 0)))
