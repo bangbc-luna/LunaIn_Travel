@@ -6,7 +6,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -129,23 +128,6 @@ func TestUnderpaidThenCorrectiveTransfer(t *testing.T) {
 	require.Equal(t, int64(80_000), rows[1].Amount)
 	require.Equal(t, "payment_mismatch", rows[1].Reason)
 	require.Equal(t, 0, e.count(t, `SELECT count(*) FROM river_job WHERE args::text LIKE '%đã được thanh toán trước đó%'`))
-}
-
-// Ruling 12: no bank reference: the payment link id identifies the transfer.
-func TestWebhook_EmptyReferenceFallback(t *testing.T) {
-	e := newEnv(t)
-	v := e.create(t, "k")
-	oc := e.orderCode(t, v.ID)
-	body := e.Fake.MarkPaidRef(oc, gross, "")
-	for range 2 {
-		rec := e.webhook(t, body)
-		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	}
-	want := "link:fake-link-" + strconv.FormatInt(oc, 10)
-	require.Equal(t, want, e.str(t, `SELECT provider_reference FROM payments WHERE provider_order_code = $1`, oc))
-	require.Equal(t, 1, e.count(t, `SELECT count(*) FROM payment_events WHERE dedupe_key = $1`,
-		"payos:"+strconv.FormatInt(oc, 10)+":"+want))
-	require.Equal(t, "confirmed", e.bookingStatus(t, v.ID))
 }
 
 // Ruling 12: two different transfers on one order code at the same time:

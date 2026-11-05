@@ -26,6 +26,17 @@ func (q *Queries) CancelPayment(ctx context.Context, arg CancelPaymentParams) er
 	return err
 }
 
+const checkoutHasBookingRefund = `-- name: CheckoutHasBookingRefund :one
+SELECT EXISTS (SELECT 1 FROM refunds WHERE checkout_id = $1 AND booking_id IS NOT NULL)
+`
+
+func (q *Queries) CheckoutHasBookingRefund(ctx context.Context, checkoutID uuid.UUID) (bool, error) {
+	row := q.db.QueryRow(ctx, checkoutHasBookingRefund, checkoutID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const finishPaymentEvent = `-- name: FinishPaymentEvent :exec
 UPDATE payment_events SET processed_at = $1::timestamptz, result = $2::text, updated_at = $1
 WHERE dedupe_key = $3

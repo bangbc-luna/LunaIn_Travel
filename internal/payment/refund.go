@@ -51,6 +51,16 @@ type Refund struct {
 	ProviderReference *string    `json:"-"`
 }
 
+// CheckoutHasBookingRefund reports whether any booking of the checkout was
+// already refunded (a booking is refunded at most once).
+func (s *Service) CheckoutHasBookingRefund(ctx context.Context, tx pgx.Tx, checkoutID uuid.UUID) (bool, error) {
+	ok, err := store.New(tx).CheckoutHasBookingRefund(ctx, checkoutID)
+	if err != nil {
+		return false, fmt.Errorf("checkout booking refunds: %w", err)
+	}
+	return ok, nil
+}
+
 // CreateRefund inserts a refund inside the caller's tx (which holds the
 // checkout, its bookings and the payment). It starts awaiting_bank_info, or
 // pending with the bank account prefilled when the customer saved one.

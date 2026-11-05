@@ -3,6 +3,8 @@ package payment
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -97,17 +99,15 @@ func DedupeKey(orderCode int64, reference string) string {
 }
 
 // TransferReference is the reference identifying a webhook's transfer: the
-// bank reference; without one "link:" + paymentLinkId; without that either
-// "event:" + orderCode + ":" + the raw transactionDateTime.
+// bank reference, or without one "raw:" + lowercase hex sha256 of the signed
+// "data" JSON exactly as received (Ruling 16): stable across redeliveries of
+// one transfer, distinct for different transfers on the same link.
 func TransferReference(wd WebhookData) string {
-	switch {
-	case wd.Reference != "":
+	if wd.Reference != "" {
 		return wd.Reference
-	case wd.PaymentLinkID != "":
-		return "link:" + wd.PaymentLinkID
-	default:
-		return "event:" + strconv.FormatInt(wd.OrderCode, 10) + ":" + wd.TransactionDateTime
 	}
+	sum := sha256.Sum256(wd.Raw)
+	return "raw:" + hex.EncodeToString(sum[:])
 }
 
 // statusShowsMoney: state PAID or UNDERPAID, or any amount paid.

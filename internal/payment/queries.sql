@@ -81,3 +81,6 @@ UPDATE payments SET status = @status, updated_at = @now WHERE id = @id;
 
 -- name: GetPaymentEventReceivedAt :one
 SELECT received_at FROM payment_events WHERE dedupe_key = @dedupe_key;
+
+-- name: CheckoutHasBookingRefund :one
+SELECT EXISTS (SELECT 1 FROM refunds WHERE checkout_id = @checkout_id AND booking_id IS NOT NULL);

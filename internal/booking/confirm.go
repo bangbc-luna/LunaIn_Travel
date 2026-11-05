@@ -23,7 +23,8 @@ import (
 
 // Statuses and values used by payment confirmation.
 const (
-	StatusExpired = "expired"
+	StatusExpired   = "expired"
+	StatusCancelled = "cancelled"
 
 	checkoutPaid   = "paid"
 	checkoutClosed = "closed"
@@ -133,7 +134,7 @@ func (s *Service) HandlePaid(ctx context.Context, tx pgx.Tx, ev payment.PaidEven
 	if ref := c.pay.ProviderReference; ref != nil && *ref == ev.Reference {
 		return payment.PaidOutcome{Result: ResultAlreadyProcessed}, nil
 	}
-	canTake, err := c.canTakeMoney()
+	canTake, err := c.canTakeMoney(ctx)
 	if err != nil {
 		return payment.PaidOutcome{}, err
 	}
@@ -249,18 +250,44 @@ func (c *confirmation) eligible(b store.Booking) (bool, error) {
 // only a paid checkout or a paid payment makes it a duplicate). A replaced
 // payment additionally needs every booking still bookable (Ruling 10);
 // otherwise late bookings are refunded one by one.
-func (c *confirmation) canTakeMoney() (bool, error) {
+//
+// Ruling 15: money already settled for this checkout also makes it a
+// duplicate: a booking of the checkout was refunded (a booking is refunded at
+// most once) or cancelled, or the checkout was closed after money arrived
+// (a payment of it holds a transfer reference). A checkout closed by the
+// hold-expiry job alone (no money yet) still takes a late payment, so that
+// Review Focus 2 re-confirmation keeps working.
+func (c *confirmation) canTakeMoney(ctx context.Context) (bool, error) {
 	if c.co.Status == checkoutPaid {
 		return false, nil
 	}
 	c.replaced = c.pay.Status == payment.StatusCancelled
+	moneyIn := false
 	for _, p := range c.pays {
 		if p.Status == payment.StatusPaid {
 			return false, nil
 		}
+		if p.ProviderReference != nil {
+			moneyIn = true
+		}
 		if p.ID != c.pay.ID && p.Status == payment.StatusPending {
 			c.replaced = true
 		}
+	}
+	if c.co.Status == checkoutClosed && moneyIn {
+		return false, nil
+	}
+	for _, b := range c.bookings {
+		if b.Status == StatusCancelled {
+			return false, nil
+		}
+	}
+	refunded, err := c.s.payments.CheckoutHasBookingRefund(ctx, c.tx, c.co.ID)
+	if err != nil {
+		return false, err
+	}
+	if refunded {
+		return false, nil
 	}
 	switch c.pay.Status {
 	case payment.StatusPending, payment.StatusExpired, payment.StatusCancelled, payment.StatusNeedsReview:
