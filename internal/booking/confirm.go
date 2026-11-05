@@ -392,12 +392,13 @@ func (c *confirmation) confirm(ctx context.Context) (payment.PaidOutcome, error)
 		return c.out, err
 	}
 
-	checkoutStatus := checkoutClosed
 	if len(toPost) > 0 {
-		checkoutStatus = checkoutPaid
-	}
-	if err := c.q.SetCheckoutStatus(ctx, store.SetCheckoutStatusParams{Status: checkoutStatus, Now: c.now, ID: c.co.ID}); err != nil {
-		return c.out, fmt.Errorf("set checkout %s: %w", checkoutStatus, err)
+		// The confirming payment is recorded: cancellations refund against it.
+		if err := c.q.SetCheckoutPaid(ctx, store.SetCheckoutPaidParams{PaidPaymentID: &c.pay.ID, Now: c.now, ID: c.co.ID}); err != nil {
+			return c.out, fmt.Errorf("set checkout paid: %w", err)
+		}
+	} else if err := c.q.SetCheckoutStatus(ctx, store.SetCheckoutStatusParams{Status: checkoutClosed, Now: c.now, ID: c.co.ID}); err != nil {
+		return c.out, fmt.Errorf("set checkout closed: %w", err)
 	}
 	status := payment.StatusPaid
 	excess := c.ev.AmountPaid - c.pay.Amount

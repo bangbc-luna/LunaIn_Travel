@@ -223,7 +223,7 @@ func (q *Queries) GetBookingDetail(ctx context.Context, id uuid.UUID) (GetBookin
 }
 
 const getCheckout = `-- name: GetCheckout :one
-SELECT id, code, customer_id, total_amount, status, created_at, updated_at FROM checkouts WHERE id = $1
+SELECT id, code, customer_id, total_amount, status, created_at, updated_at, paid_payment_id FROM checkouts WHERE id = $1
 `
 
 func (q *Queries) GetCheckout(ctx context.Context, id uuid.UUID) (Checkout, error) {
@@ -237,6 +237,7 @@ func (q *Queries) GetCheckout(ctx context.Context, id uuid.UUID) (Checkout, erro
 		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.PaidPaymentID,
 	)
 	return i, err
 }
@@ -884,7 +885,7 @@ func (q *Queries) LockBooking(ctx context.Context, id uuid.UUID) (Booking, error
 }
 
 const lockCheckout = `-- name: LockCheckout :one
-SELECT id, code, customer_id, total_amount, status, created_at, updated_at FROM checkouts WHERE id = $1 FOR UPDATE
+SELECT id, code, customer_id, total_amount, status, created_at, updated_at, paid_payment_id FROM checkouts WHERE id = $1 FOR UPDATE
 `
 
 // checkouts come before bookings in the lock order (DB §1.1).
@@ -899,6 +900,7 @@ func (q *Queries) LockCheckout(ctx context.Context, id uuid.UUID) (Checkout, err
 		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.PaidPaymentID,
 	)
 	return i, err
 }
@@ -1148,6 +1150,22 @@ func (q *Queries) ReserveIdempotencyKey(ctx context.Context, arg ReserveIdempote
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const setCheckoutPaid = `-- name: SetCheckoutPaid :exec
+UPDATE checkouts SET status = 'paid', paid_payment_id = $1, updated_at = $2 WHERE id = $3
+`
+
+type SetCheckoutPaidParams struct {
+	PaidPaymentID *uuid.UUID
+	Now           time.Time
+	ID            uuid.UUID
+}
+
+// The checkout becomes paid by the payment that confirmed it.
+func (q *Queries) SetCheckoutPaid(ctx context.Context, arg SetCheckoutPaidParams) error {
+	_, err := q.db.Exec(ctx, setCheckoutPaid, arg.PaidPaymentID, arg.Now, arg.ID)
+	return err
 }
 
 const setCheckoutStatus = `-- name: SetCheckoutStatus :exec

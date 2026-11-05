@@ -64,11 +64,7 @@ func (s *Service) AdminRoutes(mux httpx.Router, iss *auth.Issuer) {
 			return
 		}
 		p, _ := auth.PrincipalFrom(r.Context())
-		if _, err := s.CancelByAdmin(r.Context(), p.UserID, id, in.Mode, in.Reason); err != nil {
-			httpx.WriteError(w, r, err)
-			return
-		}
-		v, err := s.AdminGet(r.Context(), id)
+		v, err := s.CancelByAdmin(r.Context(), p.UserID, id, in.Mode, in.Reason)
 		writeView(w, r, http.StatusOK, v, err)
 	}))
 }

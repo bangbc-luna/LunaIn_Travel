@@ -56,11 +56,27 @@ var (
 // BankAccount is the customer's bank account a refund is sent to.
 type BankAccount = payment.BankAccount
 
-// canCancel is the cancellation predicate shared by the commands and
-// BookingView.can_cancel: a confirmed booking (customer or Super Admin) can be
-// cancelled; the refund then depends on the time left before
-// original_service_start_at (0% once it passed).
-func canCancel(b store.Booking) bool { return b.Status == StatusConfirmed }
+// errServiceEnded: the (current, possibly rescheduled) service already
+// ended; the no-show path owns the booking (Ruling 21).
+var errServiceEnded = httpx.NewError(ErrInvalidBookingState.Status, ErrInvalidBookingState.Code,
+	"Đơn đặt chỗ đã qua thời gian sử dụng dịch vụ, không thể hủy")
+
+// cancelBlock is the cancellation predicate shared by the commands and
+// BookingView.can_cancel (nil: allowed). A confirmed booking (customer or
+// Super Admin) can be cancelled until its current service_end_at; the refund
+// then depends on the time left before original_service_start_at (0% once
+// it passed, e.g. after the original start but before a rescheduled visit).
+func cancelBlock(b store.Booking, now time.Time) error {
+	switch {
+	case b.Status != StatusConfirmed:
+		return ErrInvalidBookingState
+	case !now.Before(b.ServiceEndAt):
+		return errServiceEnded
+	}
+	return nil
+}
+
+func canCancel(b store.Booking, now time.Time) bool { return cancelBlock(b, now) == nil }
 
 // cancellation describes one cancel command.
 type cancellation struct {
@@ -80,13 +96,6 @@ type cancellation struct {
 // saved as the customer's default), without it is awaiting_bank_info unless
 // an account was saved before.
 func (s *Service) CancelByCustomer(ctx context.Context, customerID, bookingID uuid.UUID, bank *BankAccount) (BookingView, error) {
-	if bank != nil {
-		acc, err := bank.Normalize()
-		if err != nil {
-			return BookingView{}, err
-		}
-		bank = &acc
-	}
 	err := s.cancel(ctx, bookingID, &customerID, cancellation{
 		kind: cancelKindCustomer, refundReason: payment.RefundCustomerCancel,
 		actorKind: actorCustomer, actor: customerID, bank: bank,
@@ -146,8 +155,16 @@ func (s *Service) cancel(ctx context.Context, bookingID uuid.UUID, owner *uuid.U
 	if err != nil {
 		return fmt.Errorf("get booking: %w", err)
 	}
-	if !canCancel(b) {
-		return ErrInvalidBookingState
+	// Ownership (404) first, then the bank account (422), then the state (409).
+	if c.bank != nil {
+		acc, err := c.bank.Normalize()
+		if err != nil {
+			return err
+		}
+		c.bank = &acc
+	}
+	if err := cancelBlock(b, s.clock.Now()); err != nil {
+		return err
 	}
 	return db.InTx(ctx, s.pool, func(tx pgx.Tx) error {
 		q := store.New(tx)
@@ -164,10 +181,10 @@ func (s *Service) cancel(ctx context.Context, bookingID uuid.UUID, owner *uuid.U
 		if err != nil {
 			return fmt.Errorf("lock booking: %w", err)
 		}
-		if !canCancel(b) {
-			return ErrInvalidBookingState
-		}
 		now := s.clock.Now()
+		if err := cancelBlock(b, now); err != nil {
+			return err
+		}
 		refund := b.GrossAmount
 		if !c.forceMajeure {
 			if refund, err = policyRefund(b, now); err != nil {
@@ -185,13 +202,13 @@ func (s *Service) cancel(ctx context.Context, bookingID uuid.UUID, owner *uuid.U
 		}
 		var r *payment.Refund
 		if refund > 0 {
-			pay, err := s.payments.CapturedPayment(ctx, tx, co.ID)
-			if err != nil {
-				return err
+			// Refunded against the payment that confirmed the checkout.
+			if co.PaidPaymentID == nil {
+				return fmt.Errorf("booking: confirmed booking %s has no paid checkout", b.ID)
 			}
 			id := b.ID
 			created, err := s.payments.CreateRefund(ctx, tx, payment.RefundInput{
-				PaymentID: pay.ID, CheckoutID: co.ID, CustomerID: co.CustomerID,
+				PaymentID: *co.PaidPaymentID, CheckoutID: co.ID, CustomerID: co.CustomerID,
 				BookingID: &id, Amount: refund, Reason: c.refundReason,
 			})
 			if err != nil {

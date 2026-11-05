@@ -174,13 +174,14 @@ type BookingTicketLine struct {
 }
 
 type Checkout struct {
-	ID          uuid.UUID
-	Code        string
-	CustomerID  uuid.UUID
-	TotalAmount int64
-	Status      string
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	ID            uuid.UUID
+	Code          string
+	CustomerID    uuid.UUID
+	TotalAmount   int64
+	Status        string
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+	PaidPaymentID *uuid.UUID
 }
 
 type CommissionRate struct {

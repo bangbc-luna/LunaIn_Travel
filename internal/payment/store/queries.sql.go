@@ -53,38 +53,6 @@ func (q *Queries) FinishPaymentEvent(ctx context.Context, arg FinishPaymentEvent
 	return err
 }
 
-const getCapturedPayment = `-- name: GetCapturedPayment :one
-SELECT id, checkout_id, provider, provider_order_code, amount, status, checkout_url, qr_code, expires_at, paid_at, provider_reference, raw, created_at, updated_at FROM payments
-WHERE checkout_id = $1 AND provider_reference IS NOT NULL
-  AND status IN ('paid', 'needs_review')
-ORDER BY (status = 'paid') DESC, paid_at DESC, id DESC
-LIMIT 1
-`
-
-// The payment whose money confirmed the checkout: the paid one, else (an
-// overpayment left it needs_review) the latest that received money.
-func (q *Queries) GetCapturedPayment(ctx context.Context, checkoutID uuid.UUID) (Payment, error) {
-	row := q.db.QueryRow(ctx, getCapturedPayment, checkoutID)
-	var i Payment
-	err := row.Scan(
-		&i.ID,
-		&i.CheckoutID,
-		&i.Provider,
-		&i.ProviderOrderCode,
-		&i.Amount,
-		&i.Status,
-		&i.CheckoutUrl,
-		&i.QrCode,
-		&i.ExpiresAt,
-		&i.PaidAt,
-		&i.ProviderReference,
-		&i.Raw,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-	)
-	return i, err
-}
-
 const getPayment = `-- name: GetPayment :one
 SELECT id, checkout_id, provider, provider_order_code, amount, status, checkout_url, qr_code, expires_at, paid_at, provider_reference, raw, created_at, updated_at FROM payments WHERE id = $1
 `

@@ -40,6 +40,39 @@ func TestDecodeJSON_TrailingValueAndOK(t *testing.T) {
 	require.NoError(t, decode(`{"a":1}`))
 }
 
+func TestDecodeOptionalJSON(t *testing.T) {
+	type in struct {
+		A int `json:"a"`
+	}
+	req := func(body string, chunked bool) *http.Request {
+		r := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+		if chunked {
+			r.ContentLength = -1
+			r.TransferEncoding = []string{"chunked"}
+		}
+		return r
+	}
+	for _, chunked := range []bool{false, true} {
+		var v in
+		ok, err := httpx.DecodeOptionalJSON(req("", chunked), &v)
+		require.NoError(t, err)
+		require.False(t, ok)
+		ok, err = httpx.DecodeOptionalJSON(req(" \n", chunked), &v)
+		require.NoError(t, err)
+		require.False(t, ok)
+		ok, err = httpx.DecodeOptionalJSON(req(`{"a":3}`, chunked), &v)
+		require.NoError(t, err)
+		require.True(t, ok)
+		require.Equal(t, 3, v.A)
+		_, err = httpx.DecodeOptionalJSON(req(`{"zzz":1}`, chunked), &v)
+		require.ErrorIs(t, err, httpx.ErrInvalidRequest)
+		_, err = httpx.DecodeOptionalJSON(req(`{"a":`, chunked), &v)
+		require.ErrorIs(t, err, httpx.ErrInvalidRequest)
+	}
+	// DecodeJSON still requires a body.
+	require.ErrorIs(t, httpx.DecodeJSON(req("", true), &in{}), httpx.ErrInvalidRequest)
+}
+
 func TestWriteError_AppError(t *testing.T) {
 	w := httptest.NewRecorder()
 	httpx.WriteError(w, httptest.NewRequest(http.MethodGet, "/", nil), httpx.ErrForbidden)

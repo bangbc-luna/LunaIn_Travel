@@ -91,15 +91,6 @@ SELECT received_at FROM payment_events WHERE dedupe_key = @dedupe_key;
 -- name: CheckoutHasBookingRefund :one
 SELECT EXISTS (SELECT 1 FROM refunds WHERE checkout_id = @checkout_id AND booking_id IS NOT NULL);
 
--- The payment whose money confirmed the checkout: the paid one, else (an
--- overpayment left it needs_review) the latest that received money.
--- name: GetCapturedPayment :one
-SELECT * FROM payments
-WHERE checkout_id = @checkout_id AND provider_reference IS NOT NULL
-  AND status IN ('paid', 'needs_review')
-ORDER BY (status = 'paid') DESC, paid_at DESC, id DESC
-LIMIT 1;
-
 -- name: UpsertRefundAccount :one
 INSERT INTO customer_refund_accounts (user_id, bank_bin, account_number, account_holder, created_at, updated_at)
 VALUES (@user_id, @bank_bin, @account_number, @account_holder, @now, @now)

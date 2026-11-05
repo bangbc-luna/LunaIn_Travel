@@ -116,6 +116,10 @@ SELECT * FROM bookings WHERE checkout_id = @checkout_id ORDER BY id FOR UPDATE;
 -- name: ConfirmBooking :exec
 UPDATE bookings SET status = 'confirmed', confirmed_at = @now::timestamptz, updated_at = @now WHERE id = @id;
 
+-- The checkout becomes paid by the payment that confirmed it.
+-- name: SetCheckoutPaid :exec
+UPDATE checkouts SET status = 'paid', paid_payment_id = @paid_payment_id, updated_at = @now WHERE id = @id;
+
 -- name: SetCheckoutStatus :exec
 UPDATE checkouts SET status = @status, updated_at = @now WHERE id = @id;
 

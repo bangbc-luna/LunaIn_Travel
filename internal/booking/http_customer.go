@@ -130,12 +130,10 @@ func (s *Service) CustomerRoutes(mux httpx.Router, iss *auth.Issuer) {
 		var in struct {
 			BankAccount *BankAccount `json:"bank_account"`
 		}
-		// The body is optional: no body cancels without a bank account.
-		if r.ContentLength != 0 {
-			if err := httpx.DecodeJSON(r, &in); err != nil {
-				httpx.WriteError(w, r, err)
-				return
-			}
+		// The body is optional (also chunked): none cancels without a bank account.
+		if _, err := httpx.DecodeOptionalJSON(r, &in); err != nil {
+			httpx.WriteError(w, r, err)
+			return
 		}
 		v, err := s.CancelByCustomer(r.Context(), userID, id, in.BankAccount)
 		writeView(w, r, http.StatusOK, v, err)

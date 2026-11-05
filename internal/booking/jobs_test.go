@@ -266,7 +266,9 @@ func TestReleaseIfDue_SkipsNotDue(t *testing.T) {
 func TestExpireHolds_ClosesOnlyOpenCheckout(t *testing.T) {
 	e := newEnv(t)
 	v := e.create(t, "k")
-	e.exec(t, `UPDATE checkouts SET status = 'paid' WHERE id = (SELECT checkout_id FROM bookings WHERE id = $1)`, v.ID)
+	e.exec(t, `UPDATE checkouts c SET status = 'paid',
+		paid_payment_id = (SELECT p.id FROM payments p WHERE p.checkout_id = c.id LIMIT 1)
+		WHERE c.id = (SELECT checkout_id FROM bookings WHERE id = $1)`, v.ID)
 	e.Clock.T = v.HoldExpiresAt.Add(6 * time.Minute)
 	require.Equal(t, 1, e.expireHolds(t))
 	require.Equal(t, "expired", e.bookingStatus(t, v.ID))

@@ -192,20 +192,6 @@ func (s *Service) ListMine(ctx context.Context, customerID uuid.UUID) ([]Refund,
 	return out, nil
 }
 
-// CapturedPayment returns, inside tx, the payment whose money confirmed the
-// checkout (the paid one, else the latest needs_review one that received
-// money): booking refunds are made against it.
-func (s *Service) CapturedPayment(ctx context.Context, tx pgx.Tx, checkoutID uuid.UUID) (Payment, error) {
-	r, err := store.New(tx).GetCapturedPayment(ctx, checkoutID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return Payment{}, fmt.Errorf("payment: checkout %s has no captured payment", checkoutID)
-	}
-	if err != nil {
-		return Payment{}, fmt.Errorf("get captured payment: %w", err)
-	}
-	return fromRow(r), nil
-}
-
 // CheckoutHasBookingRefund reports whether any booking of the checkout was
 // already refunded (a booking is refunded at most once).
 func (s *Service) CheckoutHasBookingRefund(ctx context.Context, tx pgx.Tx, checkoutID uuid.UUID) (bool, error) {

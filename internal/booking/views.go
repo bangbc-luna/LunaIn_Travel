@@ -211,7 +211,7 @@ func (s *Service) load(ctx context.Context, row store.GetBookingDetailRow, aud a
 		v.CommissionRateBps, v.CommissionAmount = &rate, &amount
 	}
 	// The same predicates as CancelByCustomer and Reschedule.
-	v.CanCancel = canCancel(b)
+	v.CanCancel = canCancel(b, s.clock.Now())
 	if b.Status == StatusConfirmed && b.ServiceType == serviceTypeAttraction {
 		cfg, err := s.settings.Get(ctx)
 		if err != nil {

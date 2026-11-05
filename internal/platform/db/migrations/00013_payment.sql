@@ -34,6 +34,16 @@ ALTER SEQUENCE payment_order_code_seq OWNED BY payments.provider_order_code;
 CREATE UNIQUE INDEX payments_checkout_pending_idx ON payments (checkout_id) WHERE status = 'pending';
 CREATE INDEX payments_checkout_idx ON payments (checkout_id);
 
+-- The payment whose money confirmed the checkout: booking refunds (cancel)
+-- are made against it. Same checkout via the composite FK; set exactly when
+-- the checkout becomes paid.
+ALTER TABLE checkouts
+    ADD COLUMN paid_payment_id uuid NULL,
+    ADD CONSTRAINT checkouts_paid_payment_fkey
+        FOREIGN KEY (paid_payment_id, id) REFERENCES payments (id, checkout_id),
+    ADD CONSTRAINT checkouts_paid_payment_check
+        CHECK ((status = 'paid') = (paid_payment_id IS NOT NULL));
+
 -- Every webhook received; a repeated webhook is stopped by dedupe_key.
 CREATE TABLE payment_events (
     id              uuid PRIMARY KEY,
@@ -110,4 +120,5 @@ CREATE TABLE customer_refund_accounts (
 DROP TABLE customer_refund_accounts;
 DROP TABLE refunds;
 DROP TABLE payment_events;
+ALTER TABLE checkouts DROP COLUMN paid_payment_id;
 DROP TABLE payments;
