@@ -90,7 +90,9 @@ func (e *env) requireBalance(t *testing.T, pending, available int64) {
 
 func (e *env) emails(t *testing.T) int {
 	t.Helper()
-	return e.count(t, `SELECT count(*) FROM river_job WHERE kind = 'send_email'`)
+	// Mismatch alerts to super admins (M-3) are counted by adminAlerts.
+	return e.count(t, `SELECT count(*) FROM river_job WHERE kind = 'send_email'
+		AND args->>'to' NOT IN (SELECT email FROM users WHERE role = 'super_admin')`)
 }
 
 type refundRow struct {
@@ -269,8 +271,8 @@ func TestPaid_Underpaid(t *testing.T) {
 	e.pay(t, oc, 300_000)
 	st, err := e.Fake.GetStatus(context.Background(), oc)
 	require.NoError(t, err)
-	require.Equal(t, payment.Status{State: payment.StateUnderpaid, AmountPaid: 300_000}, st,
-		"the provider itself reports UNDERPAID")
+	require.Equal(t, payment.Status{State: payment.StateUnderpaid, AmountPaid: 300_000},
+		payment.Status{State: st.State, AmountPaid: st.AmountPaid}, "the provider itself reports UNDERPAID")
 
 	require.Equal(t, "pending_payment", e.bookingStatus(t, v.ID))
 	require.Equal(t, "needs_review", e.paymentStatus(t, oc))

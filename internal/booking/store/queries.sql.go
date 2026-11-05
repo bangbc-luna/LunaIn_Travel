@@ -781,13 +781,15 @@ func (q *Queries) ListCheckoutBookings(ctx context.Context, checkoutID uuid.UUID
 const listHoldsToRelease = `-- name: ListHoldsToRelease :many
 SELECT id, checkout_id FROM bookings
 WHERE status = 'pending_payment' AND hold_release_at <= $1::timestamptz
+  AND NOT (checkout_id = ANY($2::uuid[]))
 ORDER BY hold_release_at, id
-LIMIT $2
+LIMIT $3
 `
 
 type ListHoldsToReleaseParams struct {
-	Now time.Time
-	Lim int32
+	Now  time.Time
+	Skip []uuid.UUID
+	Lim  int32
 }
 
 type ListHoldsToReleaseRow struct {
@@ -797,7 +799,7 @@ type ListHoldsToReleaseRow struct {
 
 // Hold expiry job: bookings past their hold release (bookings_hold_release_idx).
 func (q *Queries) ListHoldsToRelease(ctx context.Context, arg ListHoldsToReleaseParams) ([]ListHoldsToReleaseRow, error) {
-	rows, err := q.db.Query(ctx, listHoldsToRelease, arg.Now, arg.Lim)
+	rows, err := q.db.Query(ctx, listHoldsToRelease, arg.Now, arg.Skip, arg.Lim)
 	if err != nil {
 		return nil, err
 	}
@@ -819,19 +821,21 @@ func (q *Queries) ListHoldsToRelease(ctx context.Context, arg ListHoldsToRelease
 const listNoShowCandidates = `-- name: ListNoShowCandidates :many
 SELECT id FROM bookings
 WHERE status = 'confirmed' AND service_type = 'attraction_ticket' AND service_end_at < $1
+  AND NOT (id = ANY($2::uuid[]))
 ORDER BY service_end_at, id
-LIMIT $2
+LIMIT $3
 `
 
 type ListNoShowCandidatesParams struct {
-	Now time.Time
-	Lim int32
+	Now  time.Time
+	Skip []uuid.UUID
+	Lim  int32
 }
 
 // No-show job: confirmed attraction bookings whose service ended
 // (bookings_service_end_idx).
 func (q *Queries) ListNoShowCandidates(ctx context.Context, arg ListNoShowCandidatesParams) ([]uuid.UUID, error) {
-	rows, err := q.db.Query(ctx, listNoShowCandidates, arg.Now, arg.Lim)
+	rows, err := q.db.Query(ctx, listNoShowCandidates, arg.Now, arg.Skip, arg.Lim)
 	if err != nil {
 		return nil, err
 	}
@@ -1147,6 +1151,31 @@ type MarkNoShowParams struct {
 func (q *Queries) MarkNoShow(ctx context.Context, arg MarkNoShowParams) error {
 	_, err := q.db.Exec(ctx, markNoShow, arg.Now, arg.ID)
 	return err
+}
+
+const purgeIdempotencyKeys = `-- name: PurgeIdempotencyKeys :execrows
+DELETE FROM idempotency_keys
+WHERE ctid IN (
+    SELECT k.ctid FROM idempotency_keys k
+    WHERE k.created_at < $1::timestamptz
+    ORDER BY k.created_at
+    LIMIT $2
+)
+`
+
+type PurgeIdempotencyKeysParams struct {
+	Cutoff time.Time
+	Lim    int32
+}
+
+// Idempotency cleanup: at most @lim keys created before @cutoff
+// (idempotency_keys_created_idx).
+func (q *Queries) PurgeIdempotencyKeys(ctx context.Context, arg PurgeIdempotencyKeysParams) (int64, error) {
+	result, err := q.db.Exec(ctx, purgeIdempotencyKeys, arg.Cutoff, arg.Lim)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const rescheduleBooking = `-- name: RescheduleBooking :exec

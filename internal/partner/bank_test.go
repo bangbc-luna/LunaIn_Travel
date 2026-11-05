@@ -140,3 +140,73 @@ func TestHTTP_BankAccounts(t *testing.T) {
 	require.Len(t, list, 1)
 	require.Equal(t, ba.ID, list[0].ID)
 }
+
+func TestSetBankAccount_Audited(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	a := e.create(t, input("alpha"))
+	first, err := e.Svc.SetBankAccount(ctx, a.ID, a.OwnerUserID, bankInput("0011001234567"))
+	require.NoError(t, err)
+	second, err := e.Svc.SetBankAccount(ctx, a.ID, a.OwnerUserID, bankInput("0011009999999"))
+	require.NoError(t, err)
+
+	type auditRow struct {
+		Actor  uuid.UUID
+		Kind   string
+		Target uuid.UUID
+		Before map[string]any
+		After  map[string]any
+	}
+	rows, err := e.Pool.Query(ctx, `SELECT actor_user_id, target_kind, target_id, before, after
+		FROM admin_audit_log WHERE action = 'partner.bank_account.set' ORDER BY id`)
+	require.NoError(t, err)
+	got, err := pgx.CollectRows(rows, pgx.RowToStructByPos[auditRow])
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	for _, r := range got {
+		require.Equal(t, a.OwnerUserID, r.Actor)
+		require.Equal(t, "partner", r.Kind)
+		require.Equal(t, a.ID, r.Target)
+	}
+	require.Nil(t, got[0].Before)
+	require.Equal(t, first.AccountNumber, got[0].After["account_number"])
+	require.Equal(t, first.AccountNumber, got[1].Before["account_number"])
+	require.Equal(t, first.ID.String(), got[1].Before["id"])
+	require.Equal(t, second.AccountNumber, got[1].After["account_number"])
+	require.Equal(t, second.ID.String(), got[1].After["id"])
+
+	for _, id := range []uuid.UUID{first.ID, second.ID} {
+		var createdBy *uuid.UUID
+		require.NoError(t, e.Pool.QueryRow(ctx,
+			`SELECT created_by FROM partner_bank_accounts WHERE id = $1`, id).Scan(&createdBy))
+		require.NotNil(t, createdBy)
+		require.Equal(t, a.OwnerUserID, *createdBy)
+	}
+}
+
+func TestSetBankAccount_HolderWithDigits422(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	a := e.create(t, input("alpha"))
+	_, err := e.Svc.SetBankAccount(ctx, a.ID, a.OwnerUserID, partner.BankAccountInput{
+		BankBIN: "970436", BankName: "Vietcombank", AccountNumber: "0011001234567", AccountHolder: "Nguyen Van 2",
+	})
+	status, code := appCode(t, err)
+	require.Equal(t, http.StatusUnprocessableEntity, status)
+	require.Equal(t, "invalid_bank_account", code)
+	require.Equal(t, 0, e.count(t, "partner_bank_accounts"))
+	require.Equal(t, 0, e.auditCount(t, "partner.bank_account.set"))
+}
+
+func TestOwnerEmail(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	a := e.create(t, input("alpha"))
+	var got string
+	require.NoError(t, db.InTx(ctx, e.Pool, func(tx pgx.Tx) error {
+		var err error
+		got, err = e.Svc.OwnerEmail(ctx, tx, a.ID)
+		return err
+	}))
+	require.Equal(t, "owner@alpha.vn", got)
+}

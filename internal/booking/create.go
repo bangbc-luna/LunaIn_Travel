@@ -106,6 +106,14 @@ type Service struct {
 	ledger   *ledger.Service
 	jobs     *river.Client[pgx.Tx]
 	log      *slog.Logger
+
+	// Periodic jobs: rows backing off after a failure, one tracker per job.
+	holdBackoff, noShowBackoff, releaseBackoff jobBackoff
+	// batchSize overrides jobBatchSize when > 0 (tests).
+	batchSize int32
+	// beforeItem, when set (tests), runs inside each job item's transaction
+	// before any work; an error fails the item.
+	beforeItem func(id uuid.UUID) error
 }
 
 // NewService builds a Service.
@@ -571,8 +579,9 @@ func (s *Service) insertCheckout(ctx context.Context, q *store.Queries, customer
 }
 
 // Pay (re)creates the payment link of the customer's pending_payment
-// booking and returns the booking. Another customer's booking is
-// ErrBookingNotFound. No DB tx is open while the provider is called.
+// booking and returns the booking. Without a pending payment (a refunded
+// underpayment) payment.ReissueAfterMismatch reserves a new one first.
+// Another customer's booking is ErrBookingNotFound. No DB tx is open while the provider is called.
 func (s *Service) Pay(ctx context.Context, customerID, id uuid.UUID) (BookingView, error) {
 	b, err := store.New(s.pool).GetBooking(ctx, id)
 	if errors.Is(err, pgx.ErrNoRows) || (err == nil && b.CustomerID != customerID) {
@@ -587,7 +596,15 @@ func (s *Service) Pay(ctx context.Context, customerID, id uuid.UUID) (BookingVie
 	if b.HoldExpiresAt == nil || !s.clock.Now().Before(*b.HoldExpiresAt) {
 		return BookingView{}, ErrHoldExpired
 	}
-	if _, err := s.payments.StartPayment(ctx, b.CheckoutID); err != nil {
+	_, err = s.payments.StartPayment(ctx, b.CheckoutID)
+	if errors.Is(err, payment.ErrPaymentNotFound) {
+		// No pending payment: after a refunded underpayment a new one is
+		// reserved with the same deadline (M-4), then its link created.
+		if _, err = s.payments.ReissueAfterMismatch(ctx, b.CheckoutID); err == nil {
+			_, err = s.payments.StartPayment(ctx, b.CheckoutID)
+		}
+	}
+	if err != nil {
 		if errors.Is(err, payment.ErrPaymentExpired) {
 			return BookingView{}, ErrHoldExpired
 		}

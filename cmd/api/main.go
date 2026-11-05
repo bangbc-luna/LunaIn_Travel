@@ -25,6 +25,7 @@ import (
 	"github.com/bangbc-luna/lunain-travel/internal/listing"
 	"github.com/bangbc-luna/lunain-travel/internal/partner"
 	"github.com/bangbc-luna/lunain-travel/internal/payment"
+	"github.com/bangbc-luna/lunain-travel/internal/payout"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/auth"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/clock"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/config"
@@ -33,6 +34,7 @@ import (
 	"github.com/bangbc-luna/lunain-travel/internal/platform/jobs"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/mailer"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/storage"
+	"github.com/bangbc-luna/lunain-travel/internal/reconcile"
 	"github.com/bangbc-luna/lunain-travel/internal/settings"
 )
 
@@ -159,15 +161,22 @@ func serve(log *slog.Logger) error {
 			User: cfg.SMTPUser, Password: cfg.SMTPPassword, From: cfg.MailFrom,
 		}
 	}
-	// The booking workers get their Service once it is built (it needs the
-	// job client for emails); the client is started only after that.
+	// The booking and reconcile workers get their Service once it is built
+	// (it needs the job client for emails); the client is started only after
+	// that.
 	expireHolds, noShow, release := &booking.ExpireHoldsWorker{}, &booking.NoShowWorker{}, &booking.ReleaseWorker{}
+	purgeIdem := &booking.PurgeIdempotencyWorker{}
+	reconcileDaily, remindRefunds := &reconcile.DailyWorker{}, &reconcile.RemindRefundsWorker{}
 	workers := river.NewWorkers()
 	river.AddWorker(workers, &mailer.SendEmailWorker{Mailer: mail})
 	river.AddWorker(workers, expireHolds)
 	river.AddWorker(workers, noShow)
 	river.AddWorker(workers, release)
-	jobClient, err := jobs.NewClient(pool, workers, log, booking.PeriodicJobs()...)
+	river.AddWorker(workers, purgeIdem)
+	river.AddWorker(workers, reconcileDaily)
+	river.AddWorker(workers, remindRefunds)
+	periodic := append(booking.PeriodicJobs(), reconcile.PeriodicJobs()...)
+	jobClient, err := jobs.NewClient(pool, workers, log, periodic...)
 	if err != nil {
 		return err
 	}
@@ -212,12 +221,22 @@ func serve(log *slog.Logger) error {
 
 	settingsSvc := settings.NewService(pool, clock.Real{})
 	paymentSvc := payment.NewService(pool, clock.Real{}, paymentProvider(cfg), log)
+	paymentSvc.SetOps(payment.OpsDeps{Jobs: jobClient, Users: idSvc, Files: fileSvc})
 	ledgerSvc := ledger.NewService(pool, clock.Real{})
 	bookingSvc := booking.NewService(booking.Deps{
 		Pool: pool, Clock: clock.Real{}, Listings: listingSvc, Catalog: catSvc, Settings: settingsSvc,
 		Identity: idSvc, Payments: paymentSvc, Ledger: ledgerSvc, Jobs: jobClient, Log: log,
 	})
-	expireHolds.Service, noShow.Service, release.Service = bookingSvc, bookingSvc, bookingSvc
+	expireHolds.Service, noShow.Service, release.Service, purgeIdem.Service = bookingSvc, bookingSvc, bookingSvc, bookingSvc
+	payoutSvc := payout.NewService(payout.Deps{
+		Pool: pool, Clock: clock.Real{}, Ledger: ledgerSvc, Partners: partnerSvc, Settings: settingsSvc,
+		Files: fileSvc, Jobs: jobClient, Log: log,
+	})
+	reconcileSvc := reconcile.NewService(reconcile.Deps{
+		Pool: pool, Clock: clock.Real{}, Payments: paymentSvc, Ledger: ledgerSvc, Handler: bookingSvc,
+		Identity: idSvc, Jobs: jobClient, Log: log,
+	})
+	reconcileDaily.Service, remindRefunds.Payments = reconcileSvc, paymentSvc
 
 	if err := jobClient.Start(context.Background()); err != nil {
 		return err
@@ -234,7 +253,8 @@ func serve(log *slog.Logger) error {
 		Pool: pool, Issuer: issuer, ClientIP: httpx.ClientIPFunc(cfg.TrustedProxyHops),
 		Identity: idSvc, Settings: settingsSvc, Files: fileSvc,
 		Geo: geoSvc, Catalog: catSvc, Partner: partnerSvc, Listing: listingSvc,
-		Ledger: ledgerSvc, Payment: paymentSvc, Booking: bookingSvc, AppEnv: cfg.AppEnv,
+		Ledger: ledgerSvc, Payment: paymentSvc, Booking: bookingSvc, Payout: payoutSvc, Reconcile: reconcileSvc,
+		AppEnv: cfg.AppEnv,
 	})
 
 	srv := &http.Server{

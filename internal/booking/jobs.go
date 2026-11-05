@@ -31,7 +31,30 @@ const (
 	// reasonHoldExpired: history reason of the hold expiry job.
 	reasonHoldExpired = "hết thời gian giữ chỗ"
 	actorPartner      = "partner"
+
+	// idempotencyTTL: an Idempotency-Key older than this is deleted.
+	idempotencyTTL = 24 * time.Hour
+	// purgeBatchSize bounds the keys deleted per purge run.
+	purgeBatchSize = 5000
 )
+
+// batch is the number of rows a job run lists at most.
+func (s *Service) batch() int32 {
+	if s.batchSize > 0 {
+		return s.batchSize
+	}
+	return jobBatchSize
+}
+
+// itemFailed logs a failed job item and backs it off; the fifth failure also
+// logs "poison row" once.
+func (s *Service) itemFailed(b *jobBackoff, msg, key string, id uuid.UUID, now time.Time, err error) {
+	failures := b.fail(id, now)
+	s.log.Error(msg, key, id, "failures", failures, "err", err)
+	if failures == poisonFailures {
+		s.log.Error("poison row", key, id, "failures", failures)
+	}
+}
 
 // ExpireHoldsArgs is the periodic hold expiry job.
 type ExpireHoldsArgs struct{}
@@ -82,7 +105,36 @@ func (w *ReleaseWorker) Work(ctx context.Context, _ *river.Job[ReleaseArgs]) err
 	return err
 }
 
-// PeriodicJobs are the booking jobs, every minute, not run on start. A run
+// PurgeIdempotencyArgs is the hourly idempotency key cleanup job.
+type PurgeIdempotencyArgs struct{}
+
+func (PurgeIdempotencyArgs) Kind() string { return "booking_purge_idempotency" }
+
+// PurgeIdempotencyWorker runs Service.PurgeIdempotencyKeys.
+type PurgeIdempotencyWorker struct {
+	river.WorkerDefaults[PurgeIdempotencyArgs]
+	Service *Service
+}
+
+func (w *PurgeIdempotencyWorker) Work(ctx context.Context, _ *river.Job[PurgeIdempotencyArgs]) error {
+	_, err := w.Service.PurgeIdempotencyKeys(ctx)
+	return err
+}
+
+// PurgeIdempotencyKeys deletes the Idempotency-Keys created more than
+// idempotencyTTL ago, at most purgeBatchSize per run, and returns how many.
+func (s *Service) PurgeIdempotencyKeys(ctx context.Context) (int64, error) {
+	n, err := store.New(s.pool).PurgeIdempotencyKeys(ctx, store.PurgeIdempotencyKeysParams{
+		Cutoff: s.clock.Now().Add(-idempotencyTTL), Lim: purgeBatchSize,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("purge idempotency keys: %w", err)
+	}
+	return n, nil
+}
+
+// PeriodicJobs are the booking jobs, every minute (the idempotency purge every
+// hour), not run on start. A run
 // is never retried: the next tick does the same work.
 func PeriodicJobs() []*river.PeriodicJob {
 	every := river.PeriodicInterval(jobInterval)
@@ -91,7 +143,10 @@ func PeriodicJobs() []*river.PeriodicJob {
 		return river.NewPeriodicJob(every, func() (river.JobArgs, *river.InsertOpts) { return args, opts },
 			&river.PeriodicJobOpts{RunOnStart: false})
 	}
-	return []*river.PeriodicJob{job(ExpireHoldsArgs{}), job(NoShowArgs{}), job(ReleaseArgs{})}
+	purge := river.NewPeriodicJob(river.PeriodicInterval(time.Hour),
+		func() (river.JobArgs, *river.InsertOpts) { return PurgeIdempotencyArgs{}, opts },
+		&river.PeriodicJobOpts{RunOnStart: false})
+	return []*river.PeriodicJob{job(ExpireHoldsArgs{}), job(NoShowArgs{}), job(ReleaseArgs{}), purge}
 }
 
 // ExpireHolds expires the pending_payment bookings whose hold passed release
@@ -108,7 +163,7 @@ func PeriodicJobs() []*river.PeriodicJob {
 // Focus 2, HandlePaid).
 func (s *Service) ExpireHolds(ctx context.Context) (int, error) {
 	now := s.clock.Now()
-	rows, err := store.New(s.pool).ListHoldsToRelease(ctx, store.ListHoldsToReleaseParams{Now: now, Lim: jobBatchSize})
+	rows, err := store.New(s.pool).ListHoldsToRelease(ctx, store.ListHoldsToReleaseParams{Now: now, Lim: s.batch(), Skip: s.holdBackoff.skip(now)})
 	if err != nil {
 		return 0, fmt.Errorf("list holds to release: %w", err)
 	}
@@ -123,14 +178,20 @@ func (s *Service) ExpireHolds(ctx context.Context) (int, error) {
 		var n int
 		var codes []int64
 		err := db.InTx(ctx, s.pool, func(tx pgx.Tx) error {
+			if s.beforeItem != nil {
+				if err := s.beforeItem(id); err != nil {
+					return err
+				}
+			}
 			var err error
 			n, codes, err = s.expireCheckout(ctx, tx, id, now)
 			return err
 		})
 		if err != nil {
-			s.log.Error("booking: expire holds failed", "checkout_id", id, "err", err)
+			s.itemFailed(&s.holdBackoff, "booking: expire holds failed", "checkout_id", id, now, err)
 			continue
 		}
+		s.holdBackoff.ok(id)
 		total += n
 		for _, oc := range codes {
 			s.cancelLink(ctx, oc)
@@ -208,7 +269,7 @@ func (s *Service) expireCheckout(ctx context.Context, tx pgx.Tx, checkoutID uuid
 // release_delay_days later. It returns how many it marked.
 func (s *Service) MarkNoShows(ctx context.Context) (int, error) {
 	now := s.clock.Now()
-	ids, err := store.New(s.pool).ListNoShowCandidates(ctx, store.ListNoShowCandidatesParams{Now: now, Lim: jobBatchSize})
+	ids, err := store.New(s.pool).ListNoShowCandidates(ctx, store.ListNoShowCandidatesParams{Now: now, Lim: s.batch(), Skip: s.noShowBackoff.skip(now)})
 	if err != nil {
 		return 0, fmt.Errorf("list no-show candidates: %w", err)
 	}
@@ -216,6 +277,11 @@ func (s *Service) MarkNoShows(ctx context.Context) (int, error) {
 	for _, id := range ids {
 		var marked bool
 		err := db.InTx(ctx, s.pool, func(tx pgx.Tx) error {
+			if s.beforeItem != nil {
+				if err := s.beforeItem(id); err != nil {
+					return err
+				}
+			}
 			q := store.New(tx)
 			b, err := q.LockBooking(ctx, id)
 			if err != nil {
@@ -237,9 +303,10 @@ func (s *Service) MarkNoShows(ctx context.Context) (int, error) {
 			return nil
 		})
 		if err != nil {
-			s.log.Error("booking: no-show failed", "booking_id", id, "err", err)
+			s.itemFailed(&s.noShowBackoff, "booking: no-show failed", "booking_id", id, now, err)
 			continue
 		}
+		s.noShowBackoff.ok(id)
 		if marked {
 			total++
 		}
@@ -253,7 +320,7 @@ func (s *Service) MarkNoShows(ctx context.Context) (int, error) {
 // and its net pending moved to available. It returns how many it released.
 func (s *Service) ReleaseDue(ctx context.Context) (int, error) {
 	now := s.clock.Now()
-	ids, err := s.ledger.DueReleases(ctx, now, jobBatchSize)
+	ids, err := s.ledger.DueReleases(ctx, now, s.batch(), s.releaseBackoff.skip(now))
 	if err != nil {
 		return 0, err
 	}
@@ -261,6 +328,11 @@ func (s *Service) ReleaseDue(ctx context.Context) (int, error) {
 	for _, id := range ids {
 		var released bool
 		err := db.InTx(ctx, s.pool, func(tx pgx.Tx) error {
+			if s.beforeItem != nil {
+				if err := s.beforeItem(id); err != nil {
+					return err
+				}
+			}
 			if _, err := store.New(tx).LockBooking(ctx, id); err != nil {
 				return fmt.Errorf("lock booking: %w", err)
 			}
@@ -269,9 +341,10 @@ func (s *Service) ReleaseDue(ctx context.Context) (int, error) {
 			return err
 		})
 		if err != nil {
-			s.log.Error("booking: release failed", "booking_id", id, "err", err)
+			s.itemFailed(&s.releaseBackoff, "booking: release failed", "booking_id", id, now, err)
 			continue
 		}
+		s.releaseBackoff.ok(id)
 		if released {
 			total++
 		}

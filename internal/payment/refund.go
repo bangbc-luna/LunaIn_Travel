@@ -60,6 +60,10 @@ type Refund struct {
 	CompletedAt       *time.Time `json:"completed_at"`
 	CreatedAt         time.Time  `json:"created_at"`
 	ProviderReference *string    `json:"-"`
+	// Admin-only fields (see adminRefund).
+	CheckoutID  uuid.UUID  `json:"-"`
+	ProofFileID *uuid.UUID `json:"-"`
+	CompletedBy *uuid.UUID `json:"-"`
 }
 
 func refundFromRow(r store.Refund) Refund {
@@ -68,6 +72,7 @@ func refundFromRow(r store.Refund) Refund {
 		Reason: r.Reason, Status: r.Status, BankBIN: r.BankBin, AccountNumber: r.AccountNumber,
 		AccountHolder: r.AccountHolder, TransferReference: r.TransferReference,
 		CompletedAt: r.CompletedAt, CreatedAt: r.CreatedAt, ProviderReference: r.ProviderReference,
+		CheckoutID: r.CheckoutID, ProofFileID: r.ProofFileID, CompletedBy: r.CompletedBy,
 	}
 }
 

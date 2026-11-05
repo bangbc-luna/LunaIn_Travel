@@ -10,10 +10,13 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const cancelPayment = `-- name: CancelPayment :exec
-UPDATE payments SET status = 'cancelled', updated_at = $1 WHERE id = $2
+UPDATE payments SET status = 'cancelled', review_seen_at = NULL, review_seen_by = NULL, review_resolved_at = NULL, review_resolved_by = NULL,
+    review_note = NULL, updated_at = $1
+WHERE id = $2
 `
 
 type CancelPaymentParams struct {
@@ -21,6 +24,9 @@ type CancelPaymentParams struct {
 	ID  uuid.UUID
 }
 
+// Every query writing payments.status clears the review columns (Ruling 1):
+// payments_review_status_check allows them only on needs_review, and a new
+// needs_review (new money) reopens the review from scratch.
 func (q *Queries) CancelPayment(ctx context.Context, arg CancelPaymentParams) error {
 	_, err := q.db.Exec(ctx, cancelPayment, arg.Now, arg.ID)
 	return err
@@ -37,8 +43,71 @@ func (q *Queries) CheckoutHasBookingRefund(ctx context.Context, checkoutID uuid.
 	return exists, err
 }
 
+const completeRefund = `-- name: CompleteRefund :one
+UPDATE refunds
+SET status = 'completed', transfer_reference = $1::text, proof_file_id = $2,
+    completed_by = $3::uuid, completed_at = $4::timestamptz, updated_at = $4
+WHERE id = $5
+RETURNING id, payment_id, checkout_id, booking_id, provider_reference, amount, reason, status, bank_bin, account_number, account_holder, transfer_reference, proof_file_id, completed_by, completed_at, created_at, updated_at, bank_info_reminder_count, bank_info_reminded_at
+`
+
+type CompleteRefundParams struct {
+	TransferReference string
+	ProofFileID       *uuid.UUID
+	Actor             uuid.UUID
+	Now               time.Time
+	ID                uuid.UUID
+}
+
+func (q *Queries) CompleteRefund(ctx context.Context, arg CompleteRefundParams) (Refund, error) {
+	row := q.db.QueryRow(ctx, completeRefund,
+		arg.TransferReference,
+		arg.ProofFileID,
+		arg.Actor,
+		arg.Now,
+		arg.ID,
+	)
+	var i Refund
+	err := row.Scan(
+		&i.ID,
+		&i.PaymentID,
+		&i.CheckoutID,
+		&i.BookingID,
+		&i.ProviderReference,
+		&i.Amount,
+		&i.Reason,
+		&i.Status,
+		&i.BankBin,
+		&i.AccountNumber,
+		&i.AccountHolder,
+		&i.TransferReference,
+		&i.ProofFileID,
+		&i.CompletedBy,
+		&i.CompletedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.BankInfoReminderCount,
+		&i.BankInfoRemindedAt,
+	)
+	return i, err
+}
+
+const countPaymentsToReconcile = `-- name: CountPaymentsToReconcile :one
+SELECT count(*) FROM payments
+WHERE created_at >= $1 OR (status = 'needs_review' AND review_resolved_at IS NULL)
+`
+
+func (q *Queries) CountPaymentsToReconcile(ctx context.Context, since time.Time) (int64, error) {
+	row := q.db.QueryRow(ctx, countPaymentsToReconcile, since)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const finishPaymentEvent = `-- name: FinishPaymentEvent :exec
-UPDATE payment_events SET processed_at = $1::timestamptz, result = $2::text, updated_at = $1
+UPDATE payment_events
+SET processed_at = $1::timestamptz, result = $2::text,
+    amount = CASE WHEN $2::text = 'already_processed' THEN NULL ELSE amount END, updated_at = $1
 WHERE dedupe_key = $3
 `
 
@@ -48,13 +117,25 @@ type FinishPaymentEventParams struct {
 	DedupeKey string
 }
 
+// An already_processed transfer brought no new money: its amount is cleared.
 func (q *Queries) FinishPaymentEvent(ctx context.Context, arg FinishPaymentEventParams) error {
 	_, err := q.db.Exec(ctx, finishPaymentEvent, arg.Now, arg.Result, arg.DedupeKey)
 	return err
 }
 
+const getCheckoutCustomer = `-- name: GetCheckoutCustomer :one
+SELECT customer_id FROM checkouts WHERE id = $1
+`
+
+func (q *Queries) GetCheckoutCustomer(ctx context.Context, id uuid.UUID) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, getCheckoutCustomer, id)
+	var customer_id uuid.UUID
+	err := row.Scan(&customer_id)
+	return customer_id, err
+}
+
 const getPayment = `-- name: GetPayment :one
-SELECT id, checkout_id, provider, provider_order_code, amount, status, checkout_url, qr_code, expires_at, paid_at, provider_reference, raw, created_at, updated_at FROM payments WHERE id = $1
+SELECT id, checkout_id, provider, provider_order_code, amount, status, checkout_url, qr_code, expires_at, paid_at, provider_reference, raw, created_at, updated_at, review_seen_at, review_seen_by, review_resolved_at, review_resolved_by, review_note FROM payments WHERE id = $1
 `
 
 func (q *Queries) GetPayment(ctx context.Context, id uuid.UUID) (Payment, error) {
@@ -75,12 +156,17 @@ func (q *Queries) GetPayment(ctx context.Context, id uuid.UUID) (Payment, error)
 		&i.Raw,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ReviewSeenAt,
+		&i.ReviewSeenBy,
+		&i.ReviewResolvedAt,
+		&i.ReviewResolvedBy,
+		&i.ReviewNote,
 	)
 	return i, err
 }
 
 const getPaymentByOrderCode = `-- name: GetPaymentByOrderCode :one
-SELECT id, checkout_id, provider, provider_order_code, amount, status, checkout_url, qr_code, expires_at, paid_at, provider_reference, raw, created_at, updated_at FROM payments WHERE provider_order_code = $1
+SELECT id, checkout_id, provider, provider_order_code, amount, status, checkout_url, qr_code, expires_at, paid_at, provider_reference, raw, created_at, updated_at, review_seen_at, review_seen_by, review_resolved_at, review_resolved_by, review_note FROM payments WHERE provider_order_code = $1
 `
 
 func (q *Queries) GetPaymentByOrderCode(ctx context.Context, orderCode int64) (Payment, error) {
@@ -101,6 +187,11 @@ func (q *Queries) GetPaymentByOrderCode(ctx context.Context, orderCode int64) (P
 		&i.Raw,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ReviewSeenAt,
+		&i.ReviewSeenBy,
+		&i.ReviewResolvedAt,
+		&i.ReviewResolvedBy,
+		&i.ReviewNote,
 	)
 	return i, err
 }
@@ -116,8 +207,19 @@ func (q *Queries) GetPaymentEventReceivedAt(ctx context.Context, dedupeKey strin
 	return received_at, err
 }
 
+const getPaymentEventResult = `-- name: GetPaymentEventResult :one
+SELECT result FROM payment_events WHERE dedupe_key = $1
+`
+
+func (q *Queries) GetPaymentEventResult(ctx context.Context, dedupeKey string) (*string, error) {
+	row := q.db.QueryRow(ctx, getPaymentEventResult, dedupeKey)
+	var result *string
+	err := row.Scan(&result)
+	return result, err
+}
+
 const getPaymentWithCheckoutCode = `-- name: GetPaymentWithCheckoutCode :one
-SELECT p.id, p.checkout_id, p.provider, p.provider_order_code, p.amount, p.status, p.checkout_url, p.qr_code, p.expires_at, p.paid_at, p.provider_reference, p.raw, p.created_at, p.updated_at, c.code AS checkout_code
+SELECT p.id, p.checkout_id, p.provider, p.provider_order_code, p.amount, p.status, p.checkout_url, p.qr_code, p.expires_at, p.paid_at, p.provider_reference, p.raw, p.created_at, p.updated_at, p.review_seen_at, p.review_seen_by, p.review_resolved_at, p.review_resolved_by, p.review_note, c.code AS checkout_code
 FROM payments p
 JOIN checkouts c ON c.id = p.checkout_id
 WHERE p.id = $1
@@ -146,13 +248,18 @@ func (q *Queries) GetPaymentWithCheckoutCode(ctx context.Context, id uuid.UUID) 
 		&i.Payment.Raw,
 		&i.Payment.CreatedAt,
 		&i.Payment.UpdatedAt,
+		&i.Payment.ReviewSeenAt,
+		&i.Payment.ReviewSeenBy,
+		&i.Payment.ReviewResolvedAt,
+		&i.Payment.ReviewResolvedBy,
+		&i.Payment.ReviewNote,
 		&i.CheckoutCode,
 	)
 	return i, err
 }
 
 const getPendingPaymentByCheckout = `-- name: GetPendingPaymentByCheckout :one
-SELECT id, checkout_id, provider, provider_order_code, amount, status, checkout_url, qr_code, expires_at, paid_at, provider_reference, raw, created_at, updated_at FROM payments WHERE checkout_id = $1 AND status = 'pending'
+SELECT id, checkout_id, provider, provider_order_code, amount, status, checkout_url, qr_code, expires_at, paid_at, provider_reference, raw, created_at, updated_at, review_seen_at, review_seen_by, review_resolved_at, review_resolved_by, review_note FROM payments WHERE checkout_id = $1 AND status = 'pending'
 `
 
 func (q *Queries) GetPendingPaymentByCheckout(ctx context.Context, checkoutID uuid.UUID) (Payment, error) {
@@ -173,6 +280,64 @@ func (q *Queries) GetPendingPaymentByCheckout(ctx context.Context, checkoutID uu
 		&i.Raw,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ReviewSeenAt,
+		&i.ReviewSeenBy,
+		&i.ReviewResolvedAt,
+		&i.ReviewResolvedBy,
+		&i.ReviewNote,
+	)
+	return i, err
+}
+
+const getReconciliation = `-- name: GetReconciliation :one
+SELECT id, run_date, status, checked_payments, mismatches, started_at, finished_at, run_by, created_at, updated_at FROM payment_reconciliations WHERE run_date = $1
+`
+
+func (q *Queries) GetReconciliation(ctx context.Context, runDate pgtype.Date) (PaymentReconciliation, error) {
+	row := q.db.QueryRow(ctx, getReconciliation, runDate)
+	var i PaymentReconciliation
+	err := row.Scan(
+		&i.ID,
+		&i.RunDate,
+		&i.Status,
+		&i.CheckedPayments,
+		&i.Mismatches,
+		&i.StartedAt,
+		&i.FinishedAt,
+		&i.RunBy,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getRefund = `-- name: GetRefund :one
+SELECT id, payment_id, checkout_id, booking_id, provider_reference, amount, reason, status, bank_bin, account_number, account_holder, transfer_reference, proof_file_id, completed_by, completed_at, created_at, updated_at, bank_info_reminder_count, bank_info_reminded_at FROM refunds WHERE id = $1
+`
+
+func (q *Queries) GetRefund(ctx context.Context, id uuid.UUID) (Refund, error) {
+	row := q.db.QueryRow(ctx, getRefund, id)
+	var i Refund
+	err := row.Scan(
+		&i.ID,
+		&i.PaymentID,
+		&i.CheckoutID,
+		&i.BookingID,
+		&i.ProviderReference,
+		&i.Amount,
+		&i.Reason,
+		&i.Status,
+		&i.BankBin,
+		&i.AccountNumber,
+		&i.AccountHolder,
+		&i.TransferReference,
+		&i.ProofFileID,
+		&i.CompletedBy,
+		&i.CompletedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.BankInfoReminderCount,
+		&i.BankInfoRemindedAt,
 	)
 	return i, err
 }
@@ -197,9 +362,9 @@ func (q *Queries) GetRefundAccount(ctx context.Context, userID uuid.UUID) (Custo
 
 const insertPaymentEvent = `-- name: InsertPaymentEvent :execrows
 INSERT INTO payment_events (id, payment_id, provider, dedupe_key, signature_valid, payload, received_at,
-                            processed_at, result, created_at, updated_at)
+                            processed_at, result, amount, created_at, updated_at)
 VALUES ($1, $2, 'payos', $3, true, $4, $5,
-        $6, $7, $5, $5)
+        $6, $7, $8, $5, $5)
 ON CONFLICT (dedupe_key) DO NOTHING
 `
 
@@ -211,6 +376,7 @@ type InsertPaymentEventParams struct {
 	Now         time.Time
 	ProcessedAt *time.Time
 	Result      *string
+	Amount      *int64
 }
 
 // A repeated delivery inserts nothing (0 rows). A concurrent insert of the
@@ -224,6 +390,7 @@ func (q *Queries) InsertPaymentEvent(ctx context.Context, arg InsertPaymentEvent
 		arg.Now,
 		arg.ProcessedAt,
 		arg.Result,
+		arg.Amount,
 	)
 	if err != nil {
 		return 0, err
@@ -234,7 +401,7 @@ func (q *Queries) InsertPaymentEvent(ctx context.Context, arg InsertPaymentEvent
 const insertPendingPayment = `-- name: InsertPendingPayment :one
 INSERT INTO payments (id, checkout_id, amount, status, expires_at, created_at, updated_at)
 VALUES ($1, $2, $3, 'pending', $4, $5, $5)
-RETURNING id, checkout_id, provider, provider_order_code, amount, status, checkout_url, qr_code, expires_at, paid_at, provider_reference, raw, created_at, updated_at
+RETURNING id, checkout_id, provider, provider_order_code, amount, status, checkout_url, qr_code, expires_at, paid_at, provider_reference, raw, created_at, updated_at, review_seen_at, review_seen_by, review_resolved_at, review_resolved_by, review_note
 `
 
 type InsertPendingPaymentParams struct {
@@ -270,6 +437,11 @@ func (q *Queries) InsertPendingPayment(ctx context.Context, arg InsertPendingPay
 		&i.Raw,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ReviewSeenAt,
+		&i.ReviewSeenBy,
+		&i.ReviewResolvedAt,
+		&i.ReviewResolvedBy,
+		&i.ReviewNote,
 	)
 	return i, err
 }
@@ -279,7 +451,7 @@ INSERT INTO refunds (id, payment_id, checkout_id, booking_id, provider_reference
                      bank_bin, account_number, account_holder, created_at, updated_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7,
         $8, $9, $10, $11, $12, $12)
-RETURNING id, payment_id, checkout_id, booking_id, provider_reference, amount, reason, status, bank_bin, account_number, account_holder, transfer_reference, proof_file_id, completed_by, completed_at, created_at, updated_at
+RETURNING id, payment_id, checkout_id, booking_id, provider_reference, amount, reason, status, bank_bin, account_number, account_holder, transfer_reference, proof_file_id, completed_by, completed_at, created_at, updated_at, bank_info_reminder_count, bank_info_reminded_at
 `
 
 type InsertRefundParams struct {
@@ -331,12 +503,147 @@ func (q *Queries) InsertRefund(ctx context.Context, arg InsertRefundParams) (Ref
 		&i.CompletedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.BankInfoReminderCount,
+		&i.BankInfoRemindedAt,
 	)
 	return i, err
 }
 
+const listAdminPayments = `-- name: ListAdminPayments :many
+SELECT id, checkout_id, provider, provider_order_code, amount, status, checkout_url, qr_code, expires_at, paid_at, provider_reference, raw, created_at, updated_at, review_seen_at, review_seen_by, review_resolved_at, review_resolved_by, review_note FROM payments
+WHERE ($1::text IS NULL OR status = $1)
+  AND (NOT $2::bool OR (status = 'needs_review' AND review_resolved_at IS NULL))
+  AND ($3::uuid IS NULL OR checkout_id = $3)
+  AND ($4::uuid IS NULL OR id < $4)
+ORDER BY id DESC
+LIMIT $5
+`
+
+type ListAdminPaymentsParams struct {
+	Status     *string
+	OpenReview bool
+	CheckoutID *uuid.UUID
+	Cursor     *uuid.UUID
+	Lim        int32
+}
+
+// Newest first. open_review: needs_review and not resolved yet.
+func (q *Queries) ListAdminPayments(ctx context.Context, arg ListAdminPaymentsParams) ([]Payment, error) {
+	rows, err := q.db.Query(ctx, listAdminPayments,
+		arg.Status,
+		arg.OpenReview,
+		arg.CheckoutID,
+		arg.Cursor,
+		arg.Lim,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Payment
+	for rows.Next() {
+		var i Payment
+		if err := rows.Scan(
+			&i.ID,
+			&i.CheckoutID,
+			&i.Provider,
+			&i.ProviderOrderCode,
+			&i.Amount,
+			&i.Status,
+			&i.CheckoutUrl,
+			&i.QrCode,
+			&i.ExpiresAt,
+			&i.PaidAt,
+			&i.ProviderReference,
+			&i.Raw,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.ReviewSeenAt,
+			&i.ReviewSeenBy,
+			&i.ReviewResolvedAt,
+			&i.ReviewResolvedBy,
+			&i.ReviewNote,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAdminRefunds = `-- name: ListAdminRefunds :many
+SELECT id, payment_id, checkout_id, booking_id, provider_reference, amount, reason, status, bank_bin, account_number, account_holder, transfer_reference, proof_file_id, completed_by, completed_at, created_at, updated_at, bank_info_reminder_count, bank_info_reminded_at FROM refunds
+WHERE ($1::text IS NULL OR status = $1)
+  AND ($2::text IS NULL OR reason = $2)
+  AND ($3::uuid IS NULL OR booking_id = $3)
+  AND ($4::uuid IS NULL OR payment_id = $4)
+  AND ($5::uuid IS NULL OR id < $5)
+ORDER BY id DESC
+LIMIT $6
+`
+
+type ListAdminRefundsParams struct {
+	Status    *string
+	Reason    *string
+	BookingID *uuid.UUID
+	PaymentID *uuid.UUID
+	Cursor    *uuid.UUID
+	Lim       int32
+}
+
+// Newest first; every filter optional; cursor = last id of the previous page.
+func (q *Queries) ListAdminRefunds(ctx context.Context, arg ListAdminRefundsParams) ([]Refund, error) {
+	rows, err := q.db.Query(ctx, listAdminRefunds,
+		arg.Status,
+		arg.Reason,
+		arg.BookingID,
+		arg.PaymentID,
+		arg.Cursor,
+		arg.Lim,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Refund
+	for rows.Next() {
+		var i Refund
+		if err := rows.Scan(
+			&i.ID,
+			&i.PaymentID,
+			&i.CheckoutID,
+			&i.BookingID,
+			&i.ProviderReference,
+			&i.Amount,
+			&i.Reason,
+			&i.Status,
+			&i.BankBin,
+			&i.AccountNumber,
+			&i.AccountHolder,
+			&i.TransferReference,
+			&i.ProofFileID,
+			&i.CompletedBy,
+			&i.CompletedAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.BankInfoReminderCount,
+			&i.BankInfoRemindedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listCustomerRefunds = `-- name: ListCustomerRefunds :many
-SELECT r.id, r.payment_id, r.checkout_id, r.booking_id, r.provider_reference, r.amount, r.reason, r.status, r.bank_bin, r.account_number, r.account_holder, r.transfer_reference, r.proof_file_id, r.completed_by, r.completed_at, r.created_at, r.updated_at FROM refunds r
+SELECT r.id, r.payment_id, r.checkout_id, r.booking_id, r.provider_reference, r.amount, r.reason, r.status, r.bank_bin, r.account_number, r.account_holder, r.transfer_reference, r.proof_file_id, r.completed_by, r.completed_at, r.created_at, r.updated_at, r.bank_info_reminder_count, r.bank_info_reminded_at FROM refunds r
 JOIN checkouts c ON c.id = r.checkout_id
 WHERE c.customer_id = $1
 ORDER BY r.id DESC
@@ -375,7 +682,269 @@ func (q *Queries) ListCustomerRefunds(ctx context.Context, arg ListCustomerRefun
 			&i.CompletedAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.BankInfoReminderCount,
+			&i.BankInfoRemindedAt,
 		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPaymentEvents = `-- name: ListPaymentEvents :many
+SELECT dedupe_key, result, amount, received_at FROM payment_events
+WHERE payment_id = $1
+ORDER BY received_at, id
+`
+
+type ListPaymentEventsRow struct {
+	DedupeKey  string
+	Result     *string
+	Amount     *int64
+	ReceivedAt time.Time
+}
+
+func (q *Queries) ListPaymentEvents(ctx context.Context, paymentID *uuid.UUID) ([]ListPaymentEventsRow, error) {
+	rows, err := q.db.Query(ctx, listPaymentEvents, paymentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListPaymentEventsRow
+	for rows.Next() {
+		var i ListPaymentEventsRow
+		if err := rows.Scan(
+			&i.DedupeKey,
+			&i.Result,
+			&i.Amount,
+			&i.ReceivedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPaymentRefunds = `-- name: ListPaymentRefunds :many
+SELECT id, payment_id, checkout_id, booking_id, provider_reference, amount, reason, status, bank_bin, account_number, account_holder, transfer_reference, proof_file_id, completed_by, completed_at, created_at, updated_at, bank_info_reminder_count, bank_info_reminded_at FROM refunds WHERE payment_id = $1 ORDER BY id
+`
+
+func (q *Queries) ListPaymentRefunds(ctx context.Context, paymentID uuid.UUID) ([]Refund, error) {
+	rows, err := q.db.Query(ctx, listPaymentRefunds, paymentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Refund
+	for rows.Next() {
+		var i Refund
+		if err := rows.Scan(
+			&i.ID,
+			&i.PaymentID,
+			&i.CheckoutID,
+			&i.BookingID,
+			&i.ProviderReference,
+			&i.Amount,
+			&i.Reason,
+			&i.Status,
+			&i.BankBin,
+			&i.AccountNumber,
+			&i.AccountHolder,
+			&i.TransferReference,
+			&i.ProofFileID,
+			&i.CompletedBy,
+			&i.CompletedAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.BankInfoReminderCount,
+			&i.BankInfoRemindedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPaymentsToReconcile = `-- name: ListPaymentsToReconcile :many
+SELECT id, checkout_id, provider, provider_order_code, amount, status, checkout_url, qr_code, expires_at, paid_at, provider_reference, raw, created_at, updated_at, review_seen_at, review_seen_by, review_resolved_at, review_resolved_by, review_note FROM payments
+WHERE created_at >= $1 OR (status = 'needs_review' AND review_resolved_at IS NULL)
+ORDER BY (status = 'needs_review' AND review_resolved_at IS NULL) DESC, id
+LIMIT $2
+`
+
+type ListPaymentsToReconcileParams struct {
+	Since time.Time
+	Lim   int32
+}
+
+// Payments created at or after @since, plus every unresolved needs_review
+// payment: the unresolved needs_review ones first, then oldest first.
+func (q *Queries) ListPaymentsToReconcile(ctx context.Context, arg ListPaymentsToReconcileParams) ([]Payment, error) {
+	rows, err := q.db.Query(ctx, listPaymentsToReconcile, arg.Since, arg.Lim)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Payment
+	for rows.Next() {
+		var i Payment
+		if err := rows.Scan(
+			&i.ID,
+			&i.CheckoutID,
+			&i.Provider,
+			&i.ProviderOrderCode,
+			&i.Amount,
+			&i.Status,
+			&i.CheckoutUrl,
+			&i.QrCode,
+			&i.ExpiresAt,
+			&i.PaidAt,
+			&i.ProviderReference,
+			&i.Raw,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.ReviewSeenAt,
+			&i.ReviewSeenBy,
+			&i.ReviewResolvedAt,
+			&i.ReviewResolvedBy,
+			&i.ReviewNote,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listReconciliations = `-- name: ListReconciliations :many
+SELECT id, run_date, status, checked_payments, mismatches, started_at, finished_at, run_by, created_at, updated_at FROM payment_reconciliations
+WHERE ($1::date IS NULL OR run_date < $1::date)
+ORDER BY run_date DESC
+LIMIT $2
+`
+
+type ListReconciliationsParams struct {
+	Before pgtype.Date
+	Lim    int32
+}
+
+// Newest first; @before (exclusive) when given.
+func (q *Queries) ListReconciliations(ctx context.Context, arg ListReconciliationsParams) ([]PaymentReconciliation, error) {
+	rows, err := q.db.Query(ctx, listReconciliations, arg.Before, arg.Lim)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []PaymentReconciliation
+	for rows.Next() {
+		var i PaymentReconciliation
+		if err := rows.Scan(
+			&i.ID,
+			&i.RunDate,
+			&i.Status,
+			&i.CheckedPayments,
+			&i.Mismatches,
+			&i.StartedAt,
+			&i.FinishedAt,
+			&i.RunBy,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRefundsToRemind = `-- name: ListRefundsToRemind :many
+SELECT id FROM refunds
+WHERE status = 'awaiting_bank_info'
+  AND created_at <= $1
+  AND (bank_info_reminded_at IS NULL OR bank_info_reminded_at <= $1)
+  AND bank_info_reminder_count < $2::int
+ORDER BY created_at, id
+LIMIT $3
+`
+
+type ListRefundsToRemindParams struct {
+	Cutoff   time.Time
+	MaxCount int32
+	Lim      int32
+}
+
+// Refunds still waiting for the customer's bank account, created and last
+// reminded at or before @cutoff, reminded fewer than @max_count times.
+func (q *Queries) ListRefundsToRemind(ctx context.Context, arg ListRefundsToRemindParams) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listRefundsToRemind, arg.Cutoff, arg.MaxCount, arg.Lim)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listStaleAwaitingEvents = `-- name: ListStaleAwaitingEvents :many
+SELECT e.dedupe_key, e.payment_id, e.payload FROM payment_events e
+WHERE e.result = 'awaiting_status'
+  AND e.received_at <= $1
+  AND NOT EXISTS (SELECT 1 FROM payment_events m WHERE m.dedupe_key = left(e.dedupe_key, -length(':awaiting')))
+ORDER BY e.received_at, e.id
+LIMIT $2
+`
+
+type ListStaleAwaitingEventsParams struct {
+	Cutoff time.Time
+	Lim    int32
+}
+
+type ListStaleAwaitingEventsRow struct {
+	DedupeKey string
+	PaymentID *uuid.UUID
+	Payload   []byte
+}
+
+// awaiting_status tracking rows received at or before @cutoff whose transfer
+// has no main row (the dedupe key without the ":awaiting" suffix) yet.
+func (q *Queries) ListStaleAwaitingEvents(ctx context.Context, arg ListStaleAwaitingEventsParams) ([]ListStaleAwaitingEventsRow, error) {
+	rows, err := q.db.Query(ctx, listStaleAwaitingEvents, arg.Cutoff, arg.Lim)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListStaleAwaitingEventsRow
+	for rows.Next() {
+		var i ListStaleAwaitingEventsRow
+		if err := rows.Scan(&i.DedupeKey, &i.PaymentID, &i.Payload); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -411,7 +980,7 @@ func (q *Queries) LockCheckoutBookingRows(ctx context.Context, checkoutID uuid.U
 }
 
 const lockCheckoutPayments = `-- name: LockCheckoutPayments :many
-SELECT id, checkout_id, provider, provider_order_code, amount, status, checkout_url, qr_code, expires_at, paid_at, provider_reference, raw, created_at, updated_at FROM payments WHERE checkout_id = $1 ORDER BY id FOR NO KEY UPDATE
+SELECT id, checkout_id, provider, provider_order_code, amount, status, checkout_url, qr_code, expires_at, paid_at, provider_reference, raw, created_at, updated_at, review_seen_at, review_seen_by, review_resolved_at, review_resolved_by, review_note FROM payments WHERE checkout_id = $1 ORDER BY id FOR NO KEY UPDATE
 `
 
 // All payments of a checkout, locked in id order (after its bookings),
@@ -440,6 +1009,11 @@ func (q *Queries) LockCheckoutPayments(ctx context.Context, checkoutID uuid.UUID
 			&i.Raw,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.ReviewSeenAt,
+			&i.ReviewSeenBy,
+			&i.ReviewResolvedAt,
+			&i.ReviewResolvedBy,
+			&i.ReviewNote,
 		); err != nil {
 			return nil, err
 		}
@@ -452,19 +1026,25 @@ func (q *Queries) LockCheckoutPayments(ctx context.Context, checkoutID uuid.UUID
 }
 
 const lockCheckoutRow = `-- name: LockCheckoutRow :one
-SELECT id FROM checkouts WHERE id = $1 FOR UPDATE
+SELECT id, status, customer_id FROM checkouts WHERE id = $1 FOR UPDATE
 `
 
+type LockCheckoutRowRow struct {
+	ID         uuid.UUID
+	Status     string
+	CustomerID uuid.UUID
+}
+
 // Lock helpers for rotating a payment (checkout -> bookings -> payment).
-func (q *Queries) LockCheckoutRow(ctx context.Context, id uuid.UUID) (uuid.UUID, error) {
+func (q *Queries) LockCheckoutRow(ctx context.Context, id uuid.UUID) (LockCheckoutRowRow, error) {
 	row := q.db.QueryRow(ctx, lockCheckoutRow, id)
-	var id_2 uuid.UUID
-	err := row.Scan(&id_2)
-	return id_2, err
+	var i LockCheckoutRowRow
+	err := row.Scan(&i.ID, &i.Status, &i.CustomerID)
+	return i, err
 }
 
 const lockCustomerRefund = `-- name: LockCustomerRefund :one
-SELECT r.id, r.payment_id, r.checkout_id, r.booking_id, r.provider_reference, r.amount, r.reason, r.status, r.bank_bin, r.account_number, r.account_holder, r.transfer_reference, r.proof_file_id, r.completed_by, r.completed_at, r.created_at, r.updated_at FROM refunds r
+SELECT r.id, r.payment_id, r.checkout_id, r.booking_id, r.provider_reference, r.amount, r.reason, r.status, r.bank_bin, r.account_number, r.account_holder, r.transfer_reference, r.proof_file_id, r.completed_by, r.completed_at, r.created_at, r.updated_at, r.bank_info_reminder_count, r.bank_info_reminded_at FROM refunds r
 JOIN checkouts c ON c.id = r.checkout_id
 WHERE r.id = $1 AND c.customer_id = $2
 FOR UPDATE OF r
@@ -497,12 +1077,14 @@ func (q *Queries) LockCustomerRefund(ctx context.Context, arg LockCustomerRefund
 		&i.CompletedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.BankInfoReminderCount,
+		&i.BankInfoRemindedAt,
 	)
 	return i, err
 }
 
 const lockPayment = `-- name: LockPayment :one
-SELECT id, checkout_id, provider, provider_order_code, amount, status, checkout_url, qr_code, expires_at, paid_at, provider_reference, raw, created_at, updated_at FROM payments WHERE id = $1 FOR NO KEY UPDATE
+SELECT id, checkout_id, provider, provider_order_code, amount, status, checkout_url, qr_code, expires_at, paid_at, provider_reference, raw, created_at, updated_at, review_seen_at, review_seen_by, review_resolved_at, review_resolved_by, review_note FROM payments WHERE id = $1 FOR NO KEY UPDATE
 `
 
 // payments come after checkouts and bookings in the lock order (DB §1.1).
@@ -529,8 +1111,61 @@ func (q *Queries) LockPayment(ctx context.Context, id uuid.UUID) (Payment, error
 		&i.Raw,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ReviewSeenAt,
+		&i.ReviewSeenBy,
+		&i.ReviewResolvedAt,
+		&i.ReviewResolvedBy,
+		&i.ReviewNote,
 	)
 	return i, err
+}
+
+const lockRefund = `-- name: LockRefund :one
+SELECT id, payment_id, checkout_id, booking_id, provider_reference, amount, reason, status, bank_bin, account_number, account_holder, transfer_reference, proof_file_id, completed_by, completed_at, created_at, updated_at, bank_info_reminder_count, bank_info_reminded_at FROM refunds WHERE id = $1 FOR UPDATE
+`
+
+// Only the refund row (Super Admin actions, reminders).
+func (q *Queries) LockRefund(ctx context.Context, id uuid.UUID) (Refund, error) {
+	row := q.db.QueryRow(ctx, lockRefund, id)
+	var i Refund
+	err := row.Scan(
+		&i.ID,
+		&i.PaymentID,
+		&i.CheckoutID,
+		&i.BookingID,
+		&i.ProviderReference,
+		&i.Amount,
+		&i.Reason,
+		&i.Status,
+		&i.BankBin,
+		&i.AccountNumber,
+		&i.AccountHolder,
+		&i.TransferReference,
+		&i.ProofFileID,
+		&i.CompletedBy,
+		&i.CompletedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.BankInfoReminderCount,
+		&i.BankInfoRemindedAt,
+	)
+	return i, err
+}
+
+const markRefundReminded = `-- name: MarkRefundReminded :exec
+UPDATE refunds
+SET bank_info_reminder_count = bank_info_reminder_count + 1, bank_info_reminded_at = $1::timestamptz, updated_at = $1
+WHERE id = $2
+`
+
+type MarkRefundRemindedParams struct {
+	Now time.Time
+	ID  uuid.UUID
+}
+
+func (q *Queries) MarkRefundReminded(ctx context.Context, arg MarkRefundRemindedParams) error {
+	_, err := q.db.Exec(ctx, markRefundReminded, arg.Now, arg.ID)
+	return err
 }
 
 const paymentEventExists = `-- name: PaymentEventExists :one
@@ -544,10 +1179,32 @@ func (q *Queries) PaymentEventExists(ctx context.Context, dedupeKey string) (boo
 	return exists, err
 }
 
+const paymentRecorded = `-- name: PaymentRecorded :one
+SELECT COALESCE(sum(amount), 0)::bigint AS recorded,
+       COALESCE(max(received_at) FILTER (WHERE amount IS NOT NULL), 'epoch'::timestamptz)::timestamptz AS last_received_at
+FROM payment_events
+WHERE payment_id = $1 AND dedupe_key NOT LIKE '%:awaiting'
+`
+
+type PaymentRecordedRow struct {
+	Recorded       int64
+	LastReceivedAt time.Time
+}
+
+// Money recorded on a payment (awaiting rows carry no amount) and when the
+// last transfer with an amount was received (epoch when none).
+func (q *Queries) PaymentRecorded(ctx context.Context, paymentID *uuid.UUID) (PaymentRecordedRow, error) {
+	row := q.db.QueryRow(ctx, paymentRecorded, paymentID)
+	var i PaymentRecordedRow
+	err := row.Scan(&i.Recorded, &i.LastReceivedAt)
+	return i, err
+}
+
 const recordPaymentReceived = `-- name: RecordPaymentReceived :exec
 UPDATE payments
 SET status = $1, paid_at = $2::timestamptz, provider_reference = $3::text,
-    raw = $4, updated_at = $5
+    raw = $4, review_seen_at = NULL, review_seen_by = NULL, review_resolved_at = NULL, review_resolved_by = NULL,
+    review_note = NULL, updated_at = $5
 WHERE id = $6
 `
 
@@ -571,6 +1228,55 @@ func (q *Queries) RecordPaymentReceived(ctx context.Context, arg RecordPaymentRe
 		arg.ID,
 	)
 	return err
+}
+
+const resolveReview = `-- name: ResolveReview :one
+UPDATE payments
+SET review_seen_at = COALESCE(review_seen_at, $1::timestamptz), review_seen_by = COALESCE(review_seen_by, $2::uuid),
+    review_resolved_at = $1::timestamptz, review_resolved_by = $2::uuid, review_note = $3,
+    updated_at = $1::timestamptz
+WHERE id = $4
+RETURNING id, checkout_id, provider, provider_order_code, amount, status, checkout_url, qr_code, expires_at, paid_at, provider_reference, raw, created_at, updated_at, review_seen_at, review_seen_by, review_resolved_at, review_resolved_by, review_note
+`
+
+type ResolveReviewParams struct {
+	Now   time.Time
+	Actor uuid.UUID
+	Note  *string
+	ID    uuid.UUID
+}
+
+// Resolving implies seeing: the seen columns are filled when still empty.
+func (q *Queries) ResolveReview(ctx context.Context, arg ResolveReviewParams) (Payment, error) {
+	row := q.db.QueryRow(ctx, resolveReview,
+		arg.Now,
+		arg.Actor,
+		arg.Note,
+		arg.ID,
+	)
+	var i Payment
+	err := row.Scan(
+		&i.ID,
+		&i.CheckoutID,
+		&i.Provider,
+		&i.ProviderOrderCode,
+		&i.Amount,
+		&i.Status,
+		&i.CheckoutUrl,
+		&i.QrCode,
+		&i.ExpiresAt,
+		&i.PaidAt,
+		&i.ProviderReference,
+		&i.Raw,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ReviewSeenAt,
+		&i.ReviewSeenBy,
+		&i.ReviewResolvedAt,
+		&i.ReviewResolvedBy,
+		&i.ReviewNote,
+	)
+	return i, err
 }
 
 const setPaymentLink = `-- name: SetPaymentLink :execrows
@@ -601,7 +1307,9 @@ func (q *Queries) SetPaymentLink(ctx context.Context, arg SetPaymentLinkParams) 
 }
 
 const setPaymentStatus = `-- name: SetPaymentStatus :exec
-UPDATE payments SET status = $1, updated_at = $2 WHERE id = $3
+UPDATE payments SET status = $1, review_seen_at = NULL, review_seen_by = NULL, review_resolved_at = NULL, review_resolved_by = NULL,
+    review_note = NULL, updated_at = $2
+WHERE id = $3
 `
 
 type SetPaymentStatusParams struct {
@@ -639,6 +1347,97 @@ func (q *Queries) SetRefundBankInfo(ctx context.Context, arg SetRefundBankInfoPa
 		arg.ID,
 	)
 	return err
+}
+
+const setReviewSeen = `-- name: SetReviewSeen :one
+UPDATE payments SET review_seen_at = $1::timestamptz, review_seen_by = $2::uuid, updated_at = $1
+WHERE id = $3
+RETURNING id, checkout_id, provider, provider_order_code, amount, status, checkout_url, qr_code, expires_at, paid_at, provider_reference, raw, created_at, updated_at, review_seen_at, review_seen_by, review_resolved_at, review_resolved_by, review_note
+`
+
+type SetReviewSeenParams struct {
+	Now   time.Time
+	Actor uuid.UUID
+	ID    uuid.UUID
+}
+
+func (q *Queries) SetReviewSeen(ctx context.Context, arg SetReviewSeenParams) (Payment, error) {
+	row := q.db.QueryRow(ctx, setReviewSeen, arg.Now, arg.Actor, arg.ID)
+	var i Payment
+	err := row.Scan(
+		&i.ID,
+		&i.CheckoutID,
+		&i.Provider,
+		&i.ProviderOrderCode,
+		&i.Amount,
+		&i.Status,
+		&i.CheckoutUrl,
+		&i.QrCode,
+		&i.ExpiresAt,
+		&i.PaidAt,
+		&i.ProviderReference,
+		&i.Raw,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ReviewSeenAt,
+		&i.ReviewSeenBy,
+		&i.ReviewResolvedAt,
+		&i.ReviewResolvedBy,
+		&i.ReviewNote,
+	)
+	return i, err
+}
+
+const upsertReconciliation = `-- name: UpsertReconciliation :one
+INSERT INTO payment_reconciliations (id, run_date, status, checked_payments, mismatches, started_at, finished_at,
+                                     run_by, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
+        $9, $9)
+ON CONFLICT (run_date) DO UPDATE
+SET status = EXCLUDED.status, checked_payments = EXCLUDED.checked_payments, mismatches = EXCLUDED.mismatches,
+    started_at = EXCLUDED.started_at, finished_at = EXCLUDED.finished_at, run_by = EXCLUDED.run_by,
+    updated_at = EXCLUDED.updated_at
+RETURNING id, run_date, status, checked_payments, mismatches, started_at, finished_at, run_by, created_at, updated_at
+`
+
+type UpsertReconciliationParams struct {
+	ID              uuid.UUID
+	RunDate         pgtype.Date
+	Status          string
+	CheckedPayments int32
+	Mismatches      []byte
+	StartedAt       time.Time
+	FinishedAt      time.Time
+	RunBy           *uuid.UUID
+	Now             time.Time
+}
+
+func (q *Queries) UpsertReconciliation(ctx context.Context, arg UpsertReconciliationParams) (PaymentReconciliation, error) {
+	row := q.db.QueryRow(ctx, upsertReconciliation,
+		arg.ID,
+		arg.RunDate,
+		arg.Status,
+		arg.CheckedPayments,
+		arg.Mismatches,
+		arg.StartedAt,
+		arg.FinishedAt,
+		arg.RunBy,
+		arg.Now,
+	)
+	var i PaymentReconciliation
+	err := row.Scan(
+		&i.ID,
+		&i.RunDate,
+		&i.Status,
+		&i.CheckedPayments,
+		&i.Mismatches,
+		&i.StartedAt,
+		&i.FinishedAt,
+		&i.RunBy,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }
 
 const upsertRefundAccount = `-- name: UpsertRefundAccount :one

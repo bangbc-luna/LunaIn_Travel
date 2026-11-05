@@ -18,8 +18,10 @@ SET pending = @pending, available = @available, last_seq = @last_seq, updated_at
 WHERE partner_id = @partner_id;
 
 -- name: InsertLedgerEntry :exec
-INSERT INTO ledger_entries (id, partner_id, seq, available_after, booking_id, kind, bucket, amount, created_at, updated_at)
-VALUES (@id, @partner_id, @seq, @available_after, @booking_id, @kind, @bucket, @amount, @now, @now);
+INSERT INTO ledger_entries (id, partner_id, seq, available_after, booking_id, payout_id, kind, bucket, amount,
+                            reason, created_by, created_at, updated_at)
+VALUES (@id, @partner_id, @seq, @available_after, @booking_id, @payout_id, @kind, @bucket, @amount,
+        @reason, @created_by, @now, @now);
 
 -- name: InsertPlatformCommission :exec
 INSERT INTO platform_commission_entries (id, booking_id, service_type, kind, amount, created_at, updated_at)
@@ -85,5 +87,69 @@ WHERE e.available_after <> e.running;
 -- name: ListDueReleases :many
 SELECT booking_id FROM booking_settlements
 WHERE released_at IS NULL AND release_due_at <= @now::timestamptz
+  AND NOT (booking_id = ANY(@skip::uuid[]))
 ORDER BY release_due_at, booking_id
 LIMIT @lim;
+
+-- available_after of one entry (statement opening / closing balances).
+-- name: GetAvailableAfter :one
+SELECT available_after FROM ledger_entries
+WHERE partner_id = @partner_id AND seq = @seq;
+
+-- name: LastSeq :one
+SELECT COALESCE(MAX(seq), 0)::bigint FROM ledger_entries WHERE partner_id = @partner_id;
+
+-- Statement lines: the available bucket between two seqs (inclusive), by seq.
+-- name: ListStatementLines :many
+SELECT seq, kind, amount, available_after, booking_id, payout_id, reason, created_at
+FROM ledger_entries
+WHERE partner_id = @partner_id AND bucket = 'available' AND seq BETWEEN @from_seq::bigint AND @to_seq::bigint
+ORDER BY seq;
+
+-- Admin ledger page: every entry after a seq, by seq.
+-- name: ListLedgerEntries :many
+SELECT seq, kind, bucket, amount, available_after, booking_id, payout_id, reason, created_at
+FROM ledger_entries
+WHERE partner_id = @partner_id AND seq > @after_seq::bigint
+ORDER BY seq
+LIMIT @lim;
+
+-- Every partner with a balance row or a ledger entry (VerifyAll).
+-- name: ListLedgerPartners :many
+SELECT partner_id FROM partner_balances
+UNION
+SELECT DISTINCT partner_id FROM ledger_entries
+ORDER BY partner_id;
+
+-- Settlements whose pending entries disagree with them: an open settlement's
+-- net_pending must equal the sum of the booking's pending entries, a released
+-- one must have that sum at 0 (spec §9).
+-- name: SettlementDrifts :many
+SELECT s.booking_id, s.partner_id, s.net_pending, (s.released_at IS NOT NULL)::bool AS released,
+       COALESCE(e.pending, 0)::bigint AS entries_pending
+FROM booking_settlements s
+LEFT JOIN (
+    SELECT booking_id, SUM(amount) AS pending
+    FROM ledger_entries
+    WHERE bucket = 'pending' AND booking_id IS NOT NULL
+    GROUP BY booking_id
+) e ON e.booking_id = s.booking_id
+WHERE (s.released_at IS NULL AND s.net_pending <> COALESCE(e.pending, 0))
+   OR (s.released_at IS NOT NULL AND COALESCE(e.pending, 0) <> 0)
+ORDER BY s.partner_id, s.booking_id;
+
+-- Pending entries of bookings that have no settlement row at all (VerifyAll).
+-- name: OrphanPendingEntries :many
+SELECT e.booking_id::uuid AS booking_id, e.partner_id, SUM(e.amount)::bigint AS pending
+FROM ledger_entries e
+WHERE e.bucket = 'pending' AND e.booking_id IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM booking_settlements s WHERE s.booking_id = e.booking_id)
+GROUP BY e.booking_id, e.partner_id
+ORDER BY e.partner_id, e.booking_id;
+
+-- FK guard for an adjustment tied to a booking: takes, in the global lock
+-- order (bookings before partner_balances, DB §1.1), the FOR KEY SHARE lock
+-- the ledger_entries FK checks would otherwise take after partner_balances.
+-- Reads the booking module's table on purpose (like the payments FK guard).
+-- name: KeyShareBookingOfPartner :one
+SELECT id FROM bookings WHERE id = @booking_id AND partner_id = @partner_id FOR KEY SHARE;

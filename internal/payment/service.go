@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/riverqueue/river"
 
 	"github.com/bangbc-luna/lunain-travel/internal/payment/store"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/clock"
@@ -55,13 +56,25 @@ type Payment struct {
 	// ProviderReference is the bank reference of the first transfer received.
 	ProviderReference *string    `json:"-"`
 	PaidAt            *time.Time `json:"-"`
+	CreatedAt         time.Time  `json:"-"`
+	// Review of a needs_review payment by a Super Admin (admin views only).
+	ReviewSeenAt     *time.Time `json:"-"`
+	ReviewSeenBy     *uuid.UUID `json:"-"`
+	ReviewResolvedAt *time.Time `json:"-"`
+	ReviewResolvedBy *uuid.UUID `json:"-"`
+	ReviewNote       *string    `json:"-"`
+	// ReviewState is set by the admin reads and actions only, and only on a
+	// needs_review payment: new, seen or resolved.
+	ReviewState string `json:"review_state,omitempty"`
 }
 
 func fromRow(r store.Payment) Payment {
 	return Payment{
 		ID: r.ID, CheckoutID: r.CheckoutID, OrderCode: r.ProviderOrderCode, Amount: r.Amount,
 		Status: r.Status, CheckoutURL: r.CheckoutUrl, QRCode: r.QrCode, ExpiresAt: r.ExpiresAt,
-		ProviderReference: r.ProviderReference, PaidAt: r.PaidAt,
+		ProviderReference: r.ProviderReference, PaidAt: r.PaidAt, CreatedAt: r.CreatedAt,
+		ReviewSeenAt: r.ReviewSeenAt, ReviewSeenBy: r.ReviewSeenBy,
+		ReviewResolvedAt: r.ReviewResolvedAt, ReviewResolvedBy: r.ReviewResolvedBy, ReviewNote: r.ReviewNote,
 	}
 }
 
@@ -72,6 +85,10 @@ type Service struct {
 	clock    clock.Clock
 	provider Provider
 	log      *slog.Logger
+	ops      OpsDeps
+	// reconcileBatch caps a ReconcilePayments run (defaultReconcileBatch;
+	// lowered by tests).
+	reconcileBatch int
 }
 
 // NewService builds a Service. log may be nil (slog.Default).
@@ -79,8 +96,28 @@ func NewService(pool *pgxpool.Pool, c clock.Clock, provider Provider, log *slog.
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Service{pool: pool, clock: c, provider: provider, log: log}
+	return &Service{pool: pool, clock: c, provider: provider, log: log, reconcileBatch: defaultReconcileBatch}
 }
+
+// OpsDeps are the collaborators of the Super Admin payment operations
+// (refunds, reviews, reminders). Without them (tests that never call
+// SetOps) emails are only logged.
+type OpsDeps struct {
+	// Jobs queues emails (outbox).
+	Jobs *river.Client[pgx.Tx]
+	// Users resolves a customer's account email (identity.Service).
+	Users interface {
+		EmailOf(ctx context.Context, tx pgx.Tx, userID uuid.UUID) (string, error)
+	}
+	// Files checks proof uploads (files.Service).
+	Files interface {
+		Owned(ctx context.Context, tx pgx.Tx, id, uploadedBy uuid.UUID, purpose string) error
+	}
+}
+
+// SetOps sets the ops collaborators; main calls it once the job client
+// exists, before serving.
+func (s *Service) SetOps(d OpsDeps) { s.ops = d }
 
 // ReservePayment inserts a pending payment of amount for checkoutID inside
 // the caller's tx (which already holds the checkout/booking locks: payments

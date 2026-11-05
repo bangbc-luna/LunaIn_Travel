@@ -48,10 +48,23 @@ var (
 	// ErrInvalidAmount: a negative amount, a commission above gross, or a
 	// waiver that is not the booking's commission.
 	ErrInvalidAmount = errors.New("ledger: invalid amount")
-	// ErrAlreadyPosted: this posting was already made for the booking
-	// (unique violation on the settlement, the per-booking entry kind or the
-	// platform commission kind). The tx is aborted.
-	ErrAlreadyPosted = errors.New("ledger: already posted for this booking")
+	// ErrAlreadyPosted: this posting was already made for the booking or
+	// payout (unique violation on the settlement, the per-booking entry kind,
+	// the platform commission kind or the per-payout entry kind). The tx is
+	// aborted.
+	ErrAlreadyPosted = errors.New("ledger: already posted")
+	// ErrNothingAvailable: a payout hold while available <= 0.
+	ErrNothingAvailable = errors.New("ledger: nothing available")
+	// ErrExceedsAvailable: a payout hold above the available balance.
+	ErrExceedsAvailable = errors.New("ledger: amount exceeds available")
+	// ErrInvalidReason: an adjustment reason empty after trimming or longer
+	// than 500 runes.
+	ErrInvalidReason = errors.New("ledger: invalid adjustment reason")
+	// ErrBookingNotOfPartner: an adjustment's booking is unknown or belongs
+	// to another partner. The tx is aborted.
+	ErrBookingNotOfPartner = errors.New("ledger: booking does not belong to the partner")
+	// ErrEntryNotFound: no ledger entry with that seq for the partner.
+	ErrEntryNotFound = errors.New("ledger: entry not found")
 )
 
 // Service posts ledger entries and reads partner balances.
@@ -78,9 +91,25 @@ type Balance struct {
 	Available int64 `json:"available"`
 }
 
+// entry is one ledger line to append. bookingID / payoutID / createdBy /
+// reason are optional (nil) and must match what the entry's kind requires.
 type entry struct {
-	kind, bucket string
-	amount       int64
+	kind, bucket                   string
+	amount                         int64
+	bookingID, payoutID, createdBy *uuid.UUID
+	reason                         *string
+}
+
+// Posted is where an appended entry landed: its seq and the partner's
+// available balance right after it.
+type Posted struct {
+	Seq            int64
+	AvailableAfter int64
+}
+
+// bookingEntry is an entry of a booking (earning, refund, waiver, release).
+func bookingEntry(kind, bucket string, amount int64, bookingID uuid.UUID) entry {
+	return entry{kind: kind, bucket: bucket, amount: amount, bookingID: &bookingID}
 }
 
 // PostBookingConfirmed records a confirmed booking: booking_earning
@@ -107,7 +136,8 @@ func (s *Service) PostBookingConfirmed(ctx context.Context, tx pgx.Tx, b Booking
 	if err := s.postPlatform(ctx, q, b.BookingID, b.ServiceType, platformCommission, b.Commission, now); err != nil {
 		return err
 	}
-	return s.post(ctx, q, b.PartnerID, b.BookingID, now, entry{kindBookingEarning, bucketPending, net})
+	_, err := s.post(ctx, q, b.PartnerID, now, bookingEntry(kindBookingEarning, bucketPending, net, b.BookingID))
+	return err
 }
 
 // PostRefund records a refund to the customer: refund_debit −refund in
@@ -132,7 +162,8 @@ func (s *Service) PostRefund(ctx context.Context, tx pgx.Tx, bookingID, partnerI
 	}); err != nil {
 		return fmt.Errorf("update settlement net pending: %w", err)
 	}
-	return s.post(ctx, q, partnerID, bookingID, now, entry{kindRefundDebit, bucketPending, -refund})
+	_, err := s.post(ctx, q, partnerID, now, bookingEntry(kindRefundDebit, bucketPending, -refund, bookingID))
+	return err
 }
 
 // PostCommissionWaiver gives the commission back to the partner (force
@@ -173,7 +204,8 @@ func (s *Service) PostCommissionWaiver(ctx context.Context, tx pgx.Tx, bookingID
 	if err := s.postPlatform(ctx, q, bookingID, serviceType, platformWaiver, -commission, now); err != nil {
 		return err
 	}
-	return s.post(ctx, q, partnerID, bookingID, now, entry{kindCommissionWaiver, bucketPending, commission})
+	_, err = s.post(ctx, q, partnerID, now, bookingEntry(kindCommissionWaiver, bucketPending, commission, bookingID))
+	return err
 }
 
 // ScheduleRelease sets the booking's release_due_at unless it is already set
@@ -213,9 +245,10 @@ func (s *Service) Release(ctx context.Context, tx pgx.Tx, bookingID uuid.UUID) e
 	if err := q.MarkSettlementReleased(ctx, store.MarkSettlementReleasedParams{Now: now, BookingID: bookingID}); err != nil {
 		return fmt.Errorf("mark settlement released: %w", err)
 	}
-	return s.post(ctx, q, st.PartnerID, bookingID, now,
-		entry{kindRelease, bucketPending, -st.NetPending},
-		entry{kindRelease, bucketAvailable, st.NetPending})
+	_, err = s.post(ctx, q, st.PartnerID, now,
+		bookingEntry(kindRelease, bucketPending, -st.NetPending, bookingID),
+		bookingEntry(kindRelease, bucketAvailable, st.NetPending, bookingID))
+	return err
 }
 
 // ReleaseIfDue is Release, but only when the settlement is still due at now
@@ -235,9 +268,13 @@ func (s *Service) ReleaseIfDue(ctx context.Context, tx pgx.Tx, bookingID uuid.UU
 
 // DueReleases lists (unlocked) up to limit bookings whose settlement is due
 // for release at now and not released yet, oldest due first. The caller then
-// locks each booking FOR UPDATE and calls Release.
-func (s *Service) DueReleases(ctx context.Context, now time.Time, limit int32) ([]uuid.UUID, error) {
-	ids, err := store.New(s.pool).ListDueReleases(ctx, store.ListDueReleasesParams{Now: now, Lim: limit})
+// locks each booking FOR UPDATE and calls Release. Bookings in skip are left
+// out (rows backing off after a failure).
+func (s *Service) DueReleases(ctx context.Context, now time.Time, limit int32, skip []uuid.UUID) ([]uuid.UUID, error) {
+	if skip == nil {
+		skip = []uuid.UUID{}
+	}
+	ids, err := store.New(s.pool).ListDueReleases(ctx, store.ListDueReleasesParams{Now: now, Lim: limit, Skip: skip})
 	if err != nil {
 		return nil, fmt.Errorf("list due releases: %w", err)
 	}
@@ -267,45 +304,55 @@ func (s *Service) Verify(ctx context.Context, partnerID uuid.UUID) error {
 		return fmt.Errorf("begin verify tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
-	q := store.New(tx)
+	problem, err := verifyPartner(ctx, store.New(tx), partnerID)
+	if err != nil {
+		return err
+	}
+	if problem != "" {
+		return errors.New(problem)
+	}
+	return nil
+}
 
-	var cache store.PartnerBalance
-	cache, err = q.GetPartnerBalance(ctx, partnerID)
+// verifyPartner runs Verify's checks with q. A mismatch is reported as a
+// non-empty problem; err is only for failed queries.
+func verifyPartner(ctx context.Context, q *store.Queries, partnerID uuid.UUID) (problem string, err error) {
+	cache, err := q.GetPartnerBalance(ctx, partnerID)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		return fmt.Errorf("get partner balance: %w", err)
+		return "", fmt.Errorf("get partner balance: %w", err)
 	}
 	tot, err := q.LedgerTotals(ctx, partnerID)
 	if err != nil {
-		return fmt.Errorf("ledger totals: %w", err)
+		return "", fmt.Errorf("ledger totals: %w", err)
 	}
 	switch {
 	case tot.Pending != cache.Pending:
-		return fmt.Errorf("ledger: partner %s pending cache %d, entries %d", partnerID, cache.Pending, tot.Pending)
+		return fmt.Sprintf("ledger: partner %s pending cache %d, entries %d", partnerID, cache.Pending, tot.Pending), nil
 	case tot.Available != cache.Available:
-		return fmt.Errorf("ledger: partner %s available cache %d, entries %d", partnerID, cache.Available, tot.Available)
+		return fmt.Sprintf("ledger: partner %s available cache %d, entries %d", partnerID, cache.Available, tot.Available), nil
 	case tot.Entries != cache.LastSeq || tot.MaxSeq != cache.LastSeq:
 		// seq > 0 and UNIQUE(partner_id, seq): count = max = last_seq means 1..last_seq without gaps.
-		return fmt.Errorf("ledger: partner %s last_seq %d, %d entries, max seq %d",
-			partnerID, cache.LastSeq, tot.Entries, tot.MaxSeq)
+		return fmt.Sprintf("ledger: partner %s last_seq %d, %d entries, max seq %d",
+			partnerID, cache.LastSeq, tot.Entries, tot.MaxSeq), nil
 	}
 	if tot.Entries > 0 {
 		bad, err := q.AvailableAfterMismatches(ctx, partnerID)
 		if err != nil {
-			return fmt.Errorf("available_after mismatches: %w", err)
+			return "", fmt.Errorf("available_after mismatches: %w", err)
 		}
 		if bad != 0 {
-			return fmt.Errorf("ledger: partner %s has %d entries with a wrong available_after", partnerID, bad)
+			return fmt.Sprintf("ledger: partner %s has %d entries with a wrong available_after", partnerID, bad), nil
 		}
 		last, err := q.LastAvailableAfter(ctx, partnerID)
 		if err != nil {
-			return fmt.Errorf("last available_after: %w", err)
+			return "", fmt.Errorf("last available_after: %w", err)
 		}
 		if last != cache.Available {
-			return fmt.Errorf("ledger: partner %s available cache %d, last available_after %d",
-				partnerID, cache.Available, last)
+			return fmt.Sprintf("ledger: partner %s available cache %d, last available_after %d",
+				partnerID, cache.Available, last), nil
 		}
 	}
-	return nil
+	return "", nil
 }
 
 // lockSettlement locks the booking's settlement row FOR UPDATE.
@@ -354,10 +401,25 @@ func (s *Service) postPlatform(ctx context.Context, q *store.Queries, bookingID 
 	return nil
 }
 
-// post appends the non-zero entries for partnerID. It creates the balance row
-// lazily, locks it FOR UPDATE (the last lock of the transaction), hands out
-// consecutive seq values, stamps available_after and updates the cache.
-func (s *Service) post(ctx context.Context, q *store.Queries, partnerID, bookingID uuid.UUID, now time.Time, entries ...entry) error {
+// lockBalance creates the partner's balance row lazily and locks it FOR
+// UPDATE: the last lock of the transaction (DB §1.1).
+func lockBalance(ctx context.Context, q *store.Queries, partnerID uuid.UUID, now time.Time) (store.PartnerBalance, error) {
+	if err := q.EnsurePartnerBalance(ctx, store.EnsurePartnerBalanceParams{PartnerID: partnerID, Now: now}); err != nil {
+		return store.PartnerBalance{}, fmt.Errorf("ensure partner balance: %w", err)
+	}
+	bal, err := q.LockPartnerBalance(ctx, partnerID)
+	if err != nil {
+		return store.PartnerBalance{}, fmt.Errorf("lock partner balance: %w", err)
+	}
+	return bal, nil
+}
+
+// post appends the non-zero entries for partnerID and returns where each
+// landed (zero-amount entries are skipped and get no Posted). It creates the
+// balance row lazily, locks it FOR UPDATE (the last lock of the transaction),
+// hands out consecutive seq values, stamps available_after and updates the
+// cache.
+func (s *Service) post(ctx context.Context, q *store.Queries, partnerID uuid.UUID, now time.Time, entries ...entry) ([]Posted, error) {
 	nonZero := entries[:0:0]
 	for _, e := range entries {
 		if e.amount != 0 {
@@ -365,18 +427,16 @@ func (s *Service) post(ctx context.Context, q *store.Queries, partnerID, booking
 		}
 	}
 	if len(nonZero) == 0 {
-		return nil
+		return nil, nil
 	}
 
-	if err := q.EnsurePartnerBalance(ctx, store.EnsurePartnerBalanceParams{PartnerID: partnerID, Now: now}); err != nil {
-		return fmt.Errorf("ensure partner balance: %w", err)
-	}
-	bal, err := q.LockPartnerBalance(ctx, partnerID)
+	bal, err := lockBalance(ctx, q, partnerID, now)
 	if err != nil {
-		return fmt.Errorf("lock partner balance: %w", err)
+		return nil, err
 	}
 
 	pending, available, seq := bal.Pending, bal.Available, bal.LastSeq
+	posted := make([]Posted, 0, len(nonZero))
 	for _, e := range nonZero {
 		seq++
 		switch e.bucket {
@@ -385,33 +445,53 @@ func (s *Service) post(ctx context.Context, q *store.Queries, partnerID, booking
 		case bucketAvailable:
 			available += e.amount
 		default:
-			return fmt.Errorf("ledger: unknown bucket %q", e.bucket)
+			return nil, fmt.Errorf("ledger: unknown bucket %q", e.bucket)
 		}
 		id, err := uuid.NewV7()
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if err := q.InsertLedgerEntry(ctx, store.InsertLedgerEntryParams{
 			ID: id, PartnerID: partnerID, Seq: seq, AvailableAfter: available,
-			BookingID: &bookingID, Kind: e.kind, Bucket: e.bucket, Amount: e.amount, Now: now,
+			BookingID: e.bookingID, PayoutID: e.payoutID, Kind: e.kind, Bucket: e.bucket, Amount: e.amount,
+			Reason: e.reason, CreatedBy: e.createdBy, Now: now,
 		}); err != nil {
-			return fmt.Errorf("insert ledger entry %s/%s: %w", e.kind, e.bucket, mapDuplicate(err))
+			return nil, fmt.Errorf("insert ledger entry %s/%s: %w", e.kind, e.bucket, mapPostError(err))
 		}
+		posted = append(posted, Posted{Seq: seq, AvailableAfter: available})
 	}
 	if err := q.UpdatePartnerBalance(ctx, store.UpdatePartnerBalanceParams{
 		Pending: pending, Available: available, LastSeq: seq, Now: now, PartnerID: partnerID,
 	}); err != nil {
-		return fmt.Errorf("update partner balance: %w", err)
+		return nil, fmt.Errorf("update partner balance: %w", err)
 	}
-	return nil
+	return posted, nil
 }
 
 // duplicatePostConstraints are the unique constraints that reject a posting
-// repeated for the same booking.
+// repeated for the same booking or payout.
 var duplicatePostConstraints = map[string]bool{
 	"booking_settlements_pkey":                        true,
 	"ledger_entries_booking_kind_bucket_idx":          true,
 	"platform_commission_entries_booking_id_kind_key": true,
+	"ledger_entries_payout_kind_idx":                  true,
+}
+
+// bookingPartnerFKs are the foreign keys an entry's booking_id violates when
+// the booking does not exist or belongs to another partner.
+var bookingPartnerFKs = map[string]bool{
+	"ledger_entries_booking_id_partner_id_fkey": true,
+	"ledger_entries_booking_id_fkey":            true,
+}
+
+// mapPostError is mapDuplicate plus ErrBookingNotOfPartner for an entry whose
+// booking is unknown or another partner's (23503 on the booking FKs).
+func mapPostError(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23503" && bookingPartnerFKs[pgErr.ConstraintName] {
+		return fmt.Errorf("%w: %w", ErrBookingNotOfPartner, err)
+	}
+	return mapDuplicate(err)
 }
 
 // mapDuplicate turns a unique violation of a per-booking posting constraint

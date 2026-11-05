@@ -109,8 +109,8 @@ UPDATE partner_bank_accounts SET is_current = false, updated_at = @now
 WHERE partner_id = @partner_id AND is_current;
 
 -- name: InsertBankAccount :one
-INSERT INTO partner_bank_accounts (id, partner_id, bank_bin, bank_name, account_number, account_holder, is_current, created_at, updated_at)
-VALUES (@id, @partner_id, @bank_bin, @bank_name, @account_number, @account_holder, true, @now, @now)
+INSERT INTO partner_bank_accounts (id, partner_id, bank_bin, bank_name, account_number, account_holder, is_current, created_by, created_at, updated_at)
+VALUES (@id, @partner_id, @bank_bin, @bank_name, @account_number, @account_holder, true, @created_by::uuid, @now, @now)
 RETURNING *;
 
 -- name: ListBankAccounts :many
@@ -119,3 +119,13 @@ ORDER BY created_at DESC, id DESC;
 
 -- name: CurrentBankAccount :one
 SELECT * FROM partner_bank_accounts WHERE partner_id = @partner_id AND is_current;
+
+-- The join on identity's users is an accepted read-only cross-module join
+-- (Ruling 12, DB §11): partner never writes or locks users. The earliest
+-- owner wins, as in OwnersOf.
+-- name: OwnerEmail :one
+SELECT u.email FROM partner_members m
+JOIN users u ON u.id = m.user_id
+WHERE m.partner_id = @partner_id AND m.role = 'owner'
+ORDER BY m.created_at, m.user_id
+LIMIT 1;

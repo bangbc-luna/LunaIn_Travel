@@ -24,12 +24,14 @@ import (
 	"github.com/bangbc-luna/lunain-travel/internal/listing"
 	"github.com/bangbc-luna/lunain-travel/internal/partner"
 	"github.com/bangbc-luna/lunain-travel/internal/payment"
+	"github.com/bangbc-luna/lunain-travel/internal/payout"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/auth"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/clock"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/db"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/httpx"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/storage"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/testutil"
+	"github.com/bangbc-luna/lunain-travel/internal/reconcile"
 	"github.com/bangbc-luna/lunain-travel/internal/settings"
 )
 
@@ -79,11 +81,18 @@ func newTestAppEnv(t *testing.T, appEnv string) *testApp {
 		Pool: pool, Clock: clk, Listings: listingSvc, Catalog: catSvc, Settings: settingsSvc,
 		Identity: idSvc, Payments: paymentSvc, Ledger: ledgerSvc,
 	})
+	payoutSvc := payout.NewService(payout.Deps{
+		Pool: pool, Clock: clk, Ledger: ledgerSvc, Partners: partnerSvc, Settings: settingsSvc, Files: fileSvc,
+	})
+	reconcileSvc := reconcile.NewService(reconcile.Deps{
+		Pool: pool, Clock: clk, Payments: paymentSvc, Ledger: ledgerSvc, Handler: bookingSvc, Identity: idSvc,
+	})
 	mux, patterns := buildMux(muxDeps{
 		Pool: pool, Issuer: issuer, ClientIP: httpx.ClientIPFunc(0),
 		Identity: idSvc, Settings: settingsSvc, Files: fileSvc,
 		Geo: geoSvc, Catalog: catSvc, Partner: partnerSvc, Listing: listingSvc,
-		Ledger: ledgerSvc, Payment: paymentSvc, Booking: bookingSvc, AppEnv: appEnv,
+		Ledger: ledgerSvc, Payment: paymentSvc, Booking: bookingSvc, Payout: payoutSvc, Reconcile: reconcileSvc,
+		AppEnv: appEnv,
 	})
 	return &testApp{
 		handler: httpx.Chain(mux, httpx.RequestID, httpx.Recover), issuer: issuer,
@@ -185,6 +194,8 @@ var adminRoutes = []route{
 	{"DELETE /v1/admin/partners/{id}/service-types/{code}", "/v1/admin/partners/" + uuid.Nil.String() + "/service-types/attraction_ticket"},
 	{"POST /v1/admin/partners/{id}/suspend", "/v1/admin/partners/" + uuid.Nil.String() + "/suspend"},
 	{"POST /v1/admin/partners/{id}/unsuspend", "/v1/admin/partners/" + uuid.Nil.String() + "/unsuspend"},
+	{"GET /v1/admin/partners/{id}/ledger", "/v1/admin/partners/" + uuid.Nil.String() + "/ledger"},
+	{"POST /v1/admin/partners/{id}/adjustments", "/v1/admin/partners/" + uuid.Nil.String() + "/adjustments"},
 	{"GET /v1/admin/listings", "/v1/admin/listings"},
 	{"GET /v1/admin/listings/{id}", "/v1/admin/listings/" + uuid.Nil.String()},
 	{"POST /v1/admin/listings/{id}/approve", "/v1/admin/listings/" + uuid.Nil.String() + "/approve"},
@@ -194,6 +205,21 @@ var adminRoutes = []route{
 	{"GET /v1/admin/bookings", "/v1/admin/bookings"},
 	{"GET /v1/admin/bookings/{id}", "/v1/admin/bookings/" + uuid.Nil.String()},
 	{"POST /v1/admin/bookings/{id}/cancel", "/v1/admin/bookings/" + uuid.Nil.String() + "/cancel"},
+	{"GET /v1/admin/payouts", "/v1/admin/payouts"},
+	{"GET /v1/admin/payouts/{id}", "/v1/admin/payouts/" + uuid.Nil.String()},
+	{"POST /v1/admin/payouts/{id}/approve", "/v1/admin/payouts/" + uuid.Nil.String() + "/approve"},
+	{"POST /v1/admin/payouts/{id}/mark-paid", "/v1/admin/payouts/" + uuid.Nil.String() + "/mark-paid"},
+	{"POST /v1/admin/payouts/{id}/reject", "/v1/admin/payouts/" + uuid.Nil.String() + "/reject"},
+	{"GET /v1/admin/refunds", "/v1/admin/refunds"},
+	{"GET /v1/admin/refunds/{id}", "/v1/admin/refunds/" + uuid.Nil.String()},
+	{"POST /v1/admin/refunds/{id}/complete", "/v1/admin/refunds/" + uuid.Nil.String() + "/complete"},
+	{"GET /v1/admin/payments", "/v1/admin/payments"},
+	{"GET /v1/admin/payments/{id}", "/v1/admin/payments/" + uuid.Nil.String()},
+	{"POST /v1/admin/payments/{id}/seen", "/v1/admin/payments/" + uuid.Nil.String() + "/seen"},
+	{"POST /v1/admin/payments/{id}/resolve", "/v1/admin/payments/" + uuid.Nil.String() + "/resolve"},
+	{"GET /v1/admin/reconciliations", "/v1/admin/reconciliations"},
+	{"GET /v1/admin/reconciliations/{run_date}", "/v1/admin/reconciliations/2026-11-04"},
+	{"POST /v1/admin/reconciliations/run", "/v1/admin/reconciliations/run"},
 }
 
 // partnerRoutes lists every /v1/partner/* route, like adminRoutes.
@@ -224,6 +250,10 @@ var partnerRoutes = []route{
 	{"GET /v1/partner/bookings", "/v1/partner/bookings"},
 	{"GET /v1/partner/bookings/{id}", "/v1/partner/bookings/" + uuid.Nil.String()},
 	{"POST /v1/partner/check-ins", "/v1/partner/check-ins"},
+	{"POST /v1/partner/payouts", "/v1/partner/payouts"},
+	{"GET /v1/partner/payouts", "/v1/partner/payouts"},
+	{"GET /v1/partner/payouts/preview", "/v1/partner/payouts/preview"},
+	{"GET /v1/partner/payouts/{id}", "/v1/partner/payouts/" + uuid.Nil.String()},
 }
 
 // recordedUnder returns the recorded patterns whose path starts with prefix.

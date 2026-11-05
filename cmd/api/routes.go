@@ -17,26 +17,30 @@ import (
 	"github.com/bangbc-luna/lunain-travel/internal/listing"
 	"github.com/bangbc-luna/lunain-travel/internal/partner"
 	"github.com/bangbc-luna/lunain-travel/internal/payment"
+	"github.com/bangbc-luna/lunain-travel/internal/payout"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/auth"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/httpx"
+	"github.com/bangbc-luna/lunain-travel/internal/reconcile"
 	"github.com/bangbc-luna/lunain-travel/internal/settings"
 )
 
 // muxDeps are the already-constructed services buildMux wires to routes.
 type muxDeps struct {
-	Pool     *pgxpool.Pool
-	Issuer   *auth.Issuer
-	ClientIP func(*http.Request) string
-	Identity *identity.Service
-	Settings *settings.Service
-	Files    *files.Service
-	Geo      *geo.Service
-	Catalog  *catalog.Service
-	Partner  *partner.Service
-	Listing  *listing.Service
-	Ledger   *ledger.Service
-	Payment  *payment.Service
-	Booking  *booking.Service
+	Pool      *pgxpool.Pool
+	Issuer    *auth.Issuer
+	ClientIP  func(*http.Request) string
+	Identity  *identity.Service
+	Settings  *settings.Service
+	Files     *files.Service
+	Geo       *geo.Service
+	Catalog   *catalog.Service
+	Partner   *partner.Service
+	Listing   *listing.Service
+	Ledger    *ledger.Service
+	Payment   *payment.Service
+	Booking   *booking.Service
+	Payout    *payout.Service
+	Reconcile *reconcile.Service
 	// AppEnv gates the dev-only payment simulation route (never in prod).
 	AppEnv string
 }
@@ -57,9 +61,14 @@ func buildMux(d muxDeps) (*http.ServeMux, []string) {
 	d.Listing.AdminRoutes(rr, d.Issuer)
 	d.Listing.PublicRoutes(rr)
 	d.Ledger.PartnerRoutes(rr, d.Issuer, d.Partner.RequireMember())
+	d.Ledger.AdminRoutes(rr, d.Issuer, d.Partner)
 	d.Booking.CustomerRoutes(rr, d.Issuer)
 	d.Booking.PartnerRoutes(rr, d.Issuer, d.Partner.RequireMember())
 	d.Booking.AdminRoutes(rr, d.Issuer)
+	d.Payout.PartnerRoutes(rr, d.Issuer, d.Partner.RequireMember())
+	d.Payout.AdminRoutes(rr, d.Issuer)
+	d.Payment.AdminRoutes(rr, d.Issuer)
+	d.Reconcile.AdminRoutes(rr, d.Issuer)
 	d.Payment.Routes(rr, payment.RouteDeps{Handler: d.Booking, ClientIP: d.ClientIP, AppEnv: d.AppEnv})
 	rr.HandleFunc("GET /healthz", healthz)
 	rr.HandleFunc("GET /readyz", readyz(d.Pool))

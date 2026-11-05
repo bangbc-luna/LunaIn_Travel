@@ -66,6 +66,24 @@ func (q *Queries) EnsurePartnerBalance(ctx context.Context, arg EnsurePartnerBal
 	return err
 }
 
+const getAvailableAfter = `-- name: GetAvailableAfter :one
+SELECT available_after FROM ledger_entries
+WHERE partner_id = $1 AND seq = $2
+`
+
+type GetAvailableAfterParams struct {
+	PartnerID uuid.UUID
+	Seq       int64
+}
+
+// available_after of one entry (statement opening / closing balances).
+func (q *Queries) GetAvailableAfter(ctx context.Context, arg GetAvailableAfterParams) (int64, error) {
+	row := q.db.QueryRow(ctx, getAvailableAfter, arg.PartnerID, arg.Seq)
+	var available_after int64
+	err := row.Scan(&available_after)
+	return available_after, err
+}
+
 const getPartnerBalance = `-- name: GetPartnerBalance :one
 SELECT partner_id, pending, available, last_seq, created_at, updated_at FROM partner_balances WHERE partner_id = $1
 `
@@ -98,8 +116,10 @@ func (q *Queries) GetPlatformCommission(ctx context.Context, bookingID uuid.UUID
 }
 
 const insertLedgerEntry = `-- name: InsertLedgerEntry :exec
-INSERT INTO ledger_entries (id, partner_id, seq, available_after, booking_id, kind, bucket, amount, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
+INSERT INTO ledger_entries (id, partner_id, seq, available_after, booking_id, payout_id, kind, bucket, amount,
+                            reason, created_by, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
+        $10, $11, $12, $12)
 `
 
 type InsertLedgerEntryParams struct {
@@ -108,9 +128,12 @@ type InsertLedgerEntryParams struct {
 	Seq            int64
 	AvailableAfter int64
 	BookingID      *uuid.UUID
+	PayoutID       *uuid.UUID
 	Kind           string
 	Bucket         string
 	Amount         int64
+	Reason         *string
+	CreatedBy      *uuid.UUID
 	Now            time.Time
 }
 
@@ -121,9 +144,12 @@ func (q *Queries) InsertLedgerEntry(ctx context.Context, arg InsertLedgerEntryPa
 		arg.Seq,
 		arg.AvailableAfter,
 		arg.BookingID,
+		arg.PayoutID,
 		arg.Kind,
 		arg.Bucket,
 		arg.Amount,
+		arg.Reason,
+		arg.CreatedBy,
 		arg.Now,
 	)
 	return err
@@ -177,6 +203,26 @@ func (q *Queries) InsertSettlement(ctx context.Context, arg InsertSettlementPara
 	return err
 }
 
+const keyShareBookingOfPartner = `-- name: KeyShareBookingOfPartner :one
+SELECT id FROM bookings WHERE id = $1 AND partner_id = $2 FOR KEY SHARE
+`
+
+type KeyShareBookingOfPartnerParams struct {
+	BookingID uuid.UUID
+	PartnerID uuid.UUID
+}
+
+// FK guard for an adjustment tied to a booking: takes, in the global lock
+// order (bookings before partner_balances, DB §1.1), the FOR KEY SHARE lock
+// the ledger_entries FK checks would otherwise take after partner_balances.
+// Reads the booking module's table on purpose (like the payments FK guard).
+func (q *Queries) KeyShareBookingOfPartner(ctx context.Context, arg KeyShareBookingOfPartnerParams) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, keyShareBookingOfPartner, arg.BookingID, arg.PartnerID)
+	var id uuid.UUID
+	err := row.Scan(&id)
+	return id, err
+}
+
 const lastAvailableAfter = `-- name: LastAvailableAfter :one
 SELECT available_after FROM ledger_entries
 WHERE partner_id = $1
@@ -189,6 +235,17 @@ func (q *Queries) LastAvailableAfter(ctx context.Context, partnerID uuid.UUID) (
 	var available_after int64
 	err := row.Scan(&available_after)
 	return available_after, err
+}
+
+const lastSeq = `-- name: LastSeq :one
+SELECT COALESCE(MAX(seq), 0)::bigint FROM ledger_entries WHERE partner_id = $1
+`
+
+func (q *Queries) LastSeq(ctx context.Context, partnerID uuid.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, lastSeq, partnerID)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
 }
 
 const ledgerTotals = `-- name: LedgerTotals :one
@@ -224,18 +281,20 @@ func (q *Queries) LedgerTotals(ctx context.Context, partnerID uuid.UUID) (Ledger
 const listDueReleases = `-- name: ListDueReleases :many
 SELECT booking_id FROM booking_settlements
 WHERE released_at IS NULL AND release_due_at <= $1::timestamptz
+  AND NOT (booking_id = ANY($2::uuid[]))
 ORDER BY release_due_at, booking_id
-LIMIT $2
+LIMIT $3
 `
 
 type ListDueReleasesParams struct {
-	Now time.Time
-	Lim int32
+	Now  time.Time
+	Skip []uuid.UUID
+	Lim  int32
 }
 
 // Release job: settlements due and not released (booking_settlements_release_due_idx).
 func (q *Queries) ListDueReleases(ctx context.Context, arg ListDueReleasesParams) ([]uuid.UUID, error) {
-	rows, err := q.db.Query(ctx, listDueReleases, arg.Now, arg.Lim)
+	rows, err := q.db.Query(ctx, listDueReleases, arg.Now, arg.Skip, arg.Lim)
 	if err != nil {
 		return nil, err
 	}
@@ -247,6 +306,145 @@ func (q *Queries) ListDueReleases(ctx context.Context, arg ListDueReleasesParams
 			return nil, err
 		}
 		items = append(items, booking_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listLedgerEntries = `-- name: ListLedgerEntries :many
+SELECT seq, kind, bucket, amount, available_after, booking_id, payout_id, reason, created_at
+FROM ledger_entries
+WHERE partner_id = $1 AND seq > $2::bigint
+ORDER BY seq
+LIMIT $3
+`
+
+type ListLedgerEntriesParams struct {
+	PartnerID uuid.UUID
+	AfterSeq  int64
+	Lim       int32
+}
+
+type ListLedgerEntriesRow struct {
+	Seq            int64
+	Kind           string
+	Bucket         string
+	Amount         int64
+	AvailableAfter int64
+	BookingID      *uuid.UUID
+	PayoutID       *uuid.UUID
+	Reason         *string
+	CreatedAt      time.Time
+}
+
+// Admin ledger page: every entry after a seq, by seq.
+func (q *Queries) ListLedgerEntries(ctx context.Context, arg ListLedgerEntriesParams) ([]ListLedgerEntriesRow, error) {
+	rows, err := q.db.Query(ctx, listLedgerEntries, arg.PartnerID, arg.AfterSeq, arg.Lim)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListLedgerEntriesRow
+	for rows.Next() {
+		var i ListLedgerEntriesRow
+		if err := rows.Scan(
+			&i.Seq,
+			&i.Kind,
+			&i.Bucket,
+			&i.Amount,
+			&i.AvailableAfter,
+			&i.BookingID,
+			&i.PayoutID,
+			&i.Reason,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listLedgerPartners = `-- name: ListLedgerPartners :many
+SELECT partner_id FROM partner_balances
+UNION
+SELECT DISTINCT partner_id FROM ledger_entries
+ORDER BY partner_id
+`
+
+// Every partner with a balance row or a ledger entry (VerifyAll).
+func (q *Queries) ListLedgerPartners(ctx context.Context) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listLedgerPartners)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var partner_id uuid.UUID
+		if err := rows.Scan(&partner_id); err != nil {
+			return nil, err
+		}
+		items = append(items, partner_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listStatementLines = `-- name: ListStatementLines :many
+SELECT seq, kind, amount, available_after, booking_id, payout_id, reason, created_at
+FROM ledger_entries
+WHERE partner_id = $1 AND bucket = 'available' AND seq BETWEEN $2::bigint AND $3::bigint
+ORDER BY seq
+`
+
+type ListStatementLinesParams struct {
+	PartnerID uuid.UUID
+	FromSeq   int64
+	ToSeq     int64
+}
+
+type ListStatementLinesRow struct {
+	Seq            int64
+	Kind           string
+	Amount         int64
+	AvailableAfter int64
+	BookingID      *uuid.UUID
+	PayoutID       *uuid.UUID
+	Reason         *string
+	CreatedAt      time.Time
+}
+
+// Statement lines: the available bucket between two seqs (inclusive), by seq.
+func (q *Queries) ListStatementLines(ctx context.Context, arg ListStatementLinesParams) ([]ListStatementLinesRow, error) {
+	rows, err := q.db.Query(ctx, listStatementLines, arg.PartnerID, arg.FromSeq, arg.ToSeq)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListStatementLinesRow
+	for rows.Next() {
+		var i ListStatementLinesRow
+		if err := rows.Scan(
+			&i.Seq,
+			&i.Kind,
+			&i.Amount,
+			&i.AvailableAfter,
+			&i.BookingID,
+			&i.PayoutID,
+			&i.Reason,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -310,6 +508,42 @@ func (q *Queries) MarkSettlementReleased(ctx context.Context, arg MarkSettlement
 	return err
 }
 
+const orphanPendingEntries = `-- name: OrphanPendingEntries :many
+SELECT e.booking_id::uuid AS booking_id, e.partner_id, SUM(e.amount)::bigint AS pending
+FROM ledger_entries e
+WHERE e.bucket = 'pending' AND e.booking_id IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM booking_settlements s WHERE s.booking_id = e.booking_id)
+GROUP BY e.booking_id, e.partner_id
+ORDER BY e.partner_id, e.booking_id
+`
+
+type OrphanPendingEntriesRow struct {
+	BookingID uuid.UUID
+	PartnerID uuid.UUID
+	Pending   int64
+}
+
+// Pending entries of bookings that have no settlement row at all (VerifyAll).
+func (q *Queries) OrphanPendingEntries(ctx context.Context) ([]OrphanPendingEntriesRow, error) {
+	rows, err := q.db.Query(ctx, orphanPendingEntries)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []OrphanPendingEntriesRow
+	for rows.Next() {
+		var i OrphanPendingEntriesRow
+		if err := rows.Scan(&i.BookingID, &i.PartnerID, &i.Pending); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const setSettlementReleaseDue = `-- name: SetSettlementReleaseDue :exec
 UPDATE booking_settlements
 SET release_due_at = $1::timestamptz, updated_at = $2
@@ -325,6 +559,58 @@ type SetSettlementReleaseDueParams struct {
 func (q *Queries) SetSettlementReleaseDue(ctx context.Context, arg SetSettlementReleaseDueParams) error {
 	_, err := q.db.Exec(ctx, setSettlementReleaseDue, arg.ReleaseDueAt, arg.Now, arg.BookingID)
 	return err
+}
+
+const settlementDrifts = `-- name: SettlementDrifts :many
+SELECT s.booking_id, s.partner_id, s.net_pending, (s.released_at IS NOT NULL)::bool AS released,
+       COALESCE(e.pending, 0)::bigint AS entries_pending
+FROM booking_settlements s
+LEFT JOIN (
+    SELECT booking_id, SUM(amount) AS pending
+    FROM ledger_entries
+    WHERE bucket = 'pending' AND booking_id IS NOT NULL
+    GROUP BY booking_id
+) e ON e.booking_id = s.booking_id
+WHERE (s.released_at IS NULL AND s.net_pending <> COALESCE(e.pending, 0))
+   OR (s.released_at IS NOT NULL AND COALESCE(e.pending, 0) <> 0)
+ORDER BY s.partner_id, s.booking_id
+`
+
+type SettlementDriftsRow struct {
+	BookingID      uuid.UUID
+	PartnerID      uuid.UUID
+	NetPending     int64
+	Released       bool
+	EntriesPending int64
+}
+
+// Settlements whose pending entries disagree with them: an open settlement's
+// net_pending must equal the sum of the booking's pending entries, a released
+// one must have that sum at 0 (spec §9).
+func (q *Queries) SettlementDrifts(ctx context.Context) ([]SettlementDriftsRow, error) {
+	rows, err := q.db.Query(ctx, settlementDrifts)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []SettlementDriftsRow
+	for rows.Next() {
+		var i SettlementDriftsRow
+		if err := rows.Scan(
+			&i.BookingID,
+			&i.PartnerID,
+			&i.NetPending,
+			&i.Released,
+			&i.EntriesPending,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const updatePartnerBalance = `-- name: UpdatePartnerBalance :exec

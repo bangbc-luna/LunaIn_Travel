@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -18,6 +19,8 @@ type fakeLink struct {
 	amount int64
 	paid   int64
 	state  string
+	// txs are the transfers marked paid, in order (Status.Transactions).
+	txs []StatusTransaction
 }
 
 // Fake is an in-memory Provider for tests and dev.
@@ -37,6 +40,11 @@ type Fake struct {
 	lagStatus int
 	// statusErrs are returned by the next GetStatus calls, in order.
 	statusErrs []error
+	// statusCalls counts GetStatus calls.
+	statusCalls int
+	// statusDelay: every GetStatus waits this long first, or until its ctx
+	// ends (a slow or hanging provider).
+	statusDelay time.Duration
 }
 
 // Fake provider error codes (PayOS-like).
@@ -81,6 +89,21 @@ func (f *Fake) FailNextStatus(err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.statusErrs = append(f.statusErrs, err)
+}
+
+// StatusCalls returns how many times GetStatus was called.
+func (f *Fake) StatusCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.statusCalls
+}
+
+// SetStatusDelay makes every following GetStatus wait d (or until its
+// context ends, returning the context's error) before answering.
+func (f *Fake) SetStatusDelay(d time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.statusDelay = d
 }
 
 // SetAmountPaid overrides the amount paid the provider reports for an order.
@@ -142,7 +165,20 @@ func (f *Fake) Request(orderCode int64) (LinkRequest, bool) {
 
 // GetStatus returns the recorded state; an unknown order is a
 // *ProviderError, as PayOS answers it.
-func (f *Fake) GetStatus(_ context.Context, orderCode int64) (Status, error) {
+func (f *Fake) GetStatus(ctx context.Context, orderCode int64) (Status, error) {
+	f.mu.Lock()
+	f.statusCalls++
+	delay := f.statusDelay
+	f.mu.Unlock()
+	if delay > 0 {
+		t := time.NewTimer(delay)
+		select {
+		case <-t.C:
+		case <-ctx.Done():
+			t.Stop()
+			return Status{}, fmt.Errorf("fake payos: order %d: %w", orderCode, ctx.Err())
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if len(f.statusErrs) > 0 {
@@ -159,7 +195,7 @@ func (f *Fake) GetStatus(_ context.Context, orderCode int64) (Status, error) {
 		f.lagStatus--
 		return Status{State: StatePending}, nil
 	}
-	return Status{State: l.state, AmountPaid: l.paid}, nil
+	return Status{State: l.state, AmountPaid: l.paid, Transactions: slices.Clone(l.txs)}, nil
 }
 
 // CancelLink cancels a pending link; paid links cannot be cancelled.
@@ -185,10 +221,16 @@ func (f *Fake) MarkPaid(orderCode, amount int64) []byte {
 }
 
 // MarkPaidRef is MarkPaid with the bank reference of the transfer; another
-// reference on the same order code is another transfer. Like PayOS,
+// reference on the same order code is another transfer. Each call is listed
+// as one transfer by GetStatus (an empty reference included). Like PayOS,
 // amountPaid accumulates over transfers and the link is UNDERPAID while it is
 // below the link amount, PAID once it is reached.
 func (f *Fake) MarkPaidRef(orderCode, amount int64, reference string) []byte {
+	now := f.Now
+	if now == nil {
+		now = time.Now
+	}
+	at := now()
 	f.mu.Lock()
 	l, ok := f.links[orderCode]
 	if !ok {
@@ -196,16 +238,13 @@ func (f *Fake) MarkPaidRef(orderCode, amount int64, reference string) []byte {
 		f.links[orderCode] = l
 	}
 	l.paid += amount
+	l.txs = append(l.txs, StatusTransaction{Reference: reference, Amount: amount, At: at})
 	l.state = StatePaid
 	if l.paid < l.amount {
 		l.state = StateUnderpaid
 	}
 	f.mu.Unlock()
 
-	now := f.Now
-	if now == nil {
-		now = time.Now
-	}
 	oc := strconv.FormatInt(orderCode, 10)
 	data := map[string]any{
 		"orderCode":              orderCode,
@@ -213,7 +252,7 @@ func (f *Fake) MarkPaidRef(orderCode, amount int64, reference string) []byte {
 		"description":            "FAKE" + oc,
 		"accountNumber":          "12345678",
 		"reference":              reference,
-		"transactionDateTime":    now().In(vnZone).Format(txTimeLayout),
+		"transactionDateTime":    at.In(vnZone).Format(txTimeLayout),
 		"currency":               "VND",
 		"paymentLinkId":          "fake-link-" + oc,
 		"code":                   "00",
