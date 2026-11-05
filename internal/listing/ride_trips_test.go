@@ -52,7 +52,7 @@ func TestCreateTrip_OneOff(t *testing.T) {
 	require.Equal(t, "scheduled", tr.Status)
 
 	for _, in := range []listing.TripInput{
-		{DepartureAt: rideNow, SeatCapacity: 10, PricePerSeat: 200_000},                     // not in the future
+		{DepartureAt: rideNow, SeatCapacity: 10, PricePerSeat: 200_000},                    // not in the future
 		{DepartureAt: rideNow.AddDate(0, 0, 366), SeatCapacity: 10, PricePerSeat: 200_000}, // beyond 365 days
 		{DepartureAt: at.Add(time.Hour), SeatCapacity: 0, PricePerSeat: 200_000},
 		{DepartureAt: at.Add(time.Hour), SeatCapacity: 81, PricePerSeat: 200_000},

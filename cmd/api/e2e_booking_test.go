@@ -43,15 +43,17 @@ import (
 )
 
 // e2eApp is the real mux wired like main (payment.Fake, BookingGuard,
-// release worker, payment ops, payout and reconcile services) over a fresh Postgres with a movable clock. The job client
+// release, no-show and complete-rides workers, payment ops, payout and reconcile services) over a fresh Postgres with a movable clock. The job client
 // is never started: emails stay in river_job, where the test reads the
 // verification code.
 type e2eApp struct {
-	handler http.Handler
-	pool    *pgxpool.Pool
-	clock   *clock.Fixed
-	ledger  *ledger.Service
-	release *booking.ReleaseWorker
+	handler  http.Handler
+	pool     *pgxpool.Pool
+	clock    *clock.Fixed
+	ledger   *ledger.Service
+	release  *booking.ReleaseWorker
+	noShow   *booking.NoShowWorker
+	complete *booking.CompleteRidesWorker
 }
 
 func newE2EApp(t *testing.T, now time.Time) *e2eApp {
@@ -110,6 +112,7 @@ func newE2EApp(t *testing.T, now time.Time) *e2eApp {
 	return &e2eApp{
 		handler: httpx.Chain(mux, httpx.RequestID, httpx.Recover), pool: pool, clock: clk,
 		ledger: ledgerSvc, release: &booking.ReleaseWorker{Service: bookingSvc},
+		noShow: &booking.NoShowWorker{Service: bookingSvc}, complete: &booking.CompleteRidesWorker{Service: bookingSvc},
 	}
 }
 
