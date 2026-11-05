@@ -60,7 +60,8 @@ type PaymentView struct {
 
 // BookingView is one booking as its customer, its partner or the admin sees
 // it. QRToken is only ever set for the owning customer of a confirmed or
-// completed booking (omitted otherwise); Payment only while pending_payment;
+// completed booking (omitted otherwise); Payment only for the owning
+// customer while pending_payment;
 // CommissionRateBps/CommissionAmount only for the partner and the admin.
 type BookingView struct {
 	ID                 uuid.UUID                  `json:"id"`
@@ -195,7 +196,8 @@ func (s *Service) load(ctx context.Context, row store.GetBookingDetailRow, aud a
 			UnitPrice: it.UnitPrice, Quantity: it.Quantity, LineTotal: it.LineTotal,
 		}
 	}
-	if b.Status == StatusPendingPayment {
+	// The payment link is the customer's only.
+	if aud == forCustomer && b.Status == StatusPendingPayment {
 		p, err := s.payments.PendingForCheckout(ctx, b.CheckoutID)
 		if err != nil {
 			return v, err

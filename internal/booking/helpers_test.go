@@ -7,6 +7,7 @@ import (
 	"errors"
 	"image"
 	"image/png"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -15,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/riverqueue/river"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bangbc-luna/lunain-travel/internal/booking"
@@ -22,6 +24,7 @@ import (
 	"github.com/bangbc-luna/lunain-travel/internal/files"
 	"github.com/bangbc-luna/lunain-travel/internal/geo"
 	"github.com/bangbc-luna/lunain-travel/internal/identity"
+	"github.com/bangbc-luna/lunain-travel/internal/ledger"
 	"github.com/bangbc-luna/lunain-travel/internal/listing"
 	"github.com/bangbc-luna/lunain-travel/internal/partner"
 	"github.com/bangbc-luna/lunain-travel/internal/payment"
@@ -29,6 +32,8 @@ import (
 	"github.com/bangbc-luna/lunain-travel/internal/platform/clock"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/db"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/httpx"
+	"github.com/bangbc-luna/lunain-travel/internal/platform/jobs"
+	"github.com/bangbc-luna/lunain-travel/internal/platform/mailer"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/storage"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/testutil"
 	"github.com/bangbc-luna/lunain-travel/internal/settings"
@@ -54,6 +59,7 @@ type env struct {
 	Catalog  *catalog.Service
 	Payments *payment.Service
 	Fake     *payment.Fake
+	Ledger   *ledger.Service
 	Files    *files.Service
 	Issuer   *auth.Issuer
 	Pool     *pgxpool.Pool
@@ -93,18 +99,25 @@ func newBareEnv(t *testing.T) *env {
 	fake := payment.NewFake()
 	fake.Now = clk.Now
 	paySvc := payment.NewService(pool, clk, fake, nil)
+	ledgerSvc := ledger.NewService(pool, clk)
+	// Never started: emails stay queued in river_job, where tests count them.
+	workers := river.NewWorkers()
+	river.AddWorker(workers, &mailer.SendEmailWorker{Mailer: &mailer.Recorder{}})
+	jobClient, err := jobs.NewClient(pool, workers, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
 	svc := booking.NewService(booking.Deps{
 		Pool: pool, Clock: clk, Listings: lSvc, Catalog: cat, Settings: settings.NewService(pool, clk),
-		Identity: idSvc, Payments: paySvc,
+		Identity: idSvc, Payments: paySvc, Ledger: ledgerSvc, Jobs: jobClient,
 	})
 	mux := http.NewServeMux()
 	svc.CustomerRoutes(mux, iss)
 	svc.PartnerRoutes(mux, iss, pSvc.RequireMember())
 	svc.AdminRoutes(mux, iss)
+	paySvc.Routes(mux, payment.RouteDeps{Handler: svc, ClientIP: httpx.ClientIPFunc(0), AppEnv: "test"})
 	mux.HandleFunc("/", httpx.NotFound)
 	e := &env{
 		Svc: svc, Listing: lSvc, Partner: pSvc, Identity: idSvc, Catalog: cat, Payments: paySvc, Fake: fake,
-		Files: fileSvc, Issuer: iss, Pool: pool, Clock: clk,
+		Ledger: ledgerSvc, Files: fileSvc, Issuer: iss, Pool: pool, Clock: clk,
 		Handler: httpx.Chain(mux, httpx.RequestID, httpx.Recover),
 	}
 	require.NoError(t, db.InTx(context.Background(), pool, func(tx pgx.Tx) error {

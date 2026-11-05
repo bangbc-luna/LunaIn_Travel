@@ -12,6 +12,20 @@ import (
 	"github.com/google/uuid"
 )
 
+const confirmBooking = `-- name: ConfirmBooking :exec
+UPDATE bookings SET status = 'confirmed', confirmed_at = $1::timestamptz, updated_at = $1 WHERE id = $2
+`
+
+type ConfirmBookingParams struct {
+	Now time.Time
+	ID  uuid.UUID
+}
+
+func (q *Queries) ConfirmBooking(ctx context.Context, arg ConfirmBookingParams) error {
+	_, err := q.db.Exec(ctx, confirmBooking, arg.Now, arg.ID)
+	return err
+}
+
 const getAttractionDetail = `-- name: GetAttractionDetail :one
 SELECT to_char(visit_date, 'YYYY-MM-DD')::text AS visit_date, time_slot_id,
        to_char(slot_start, 'HH24:MI')::text AS slot_start, to_char(slot_end, 'HH24:MI')::text AS slot_end
@@ -147,6 +161,25 @@ func (q *Queries) GetBookingDetail(ctx context.Context, id uuid.UUID) (GetBookin
 		&i.Booking.UpdatedAt,
 		&i.ListingTitle,
 		&i.ListingSlug,
+	)
+	return i, err
+}
+
+const getCheckout = `-- name: GetCheckout :one
+SELECT id, code, customer_id, total_amount, status, created_at, updated_at FROM checkouts WHERE id = $1
+`
+
+func (q *Queries) GetCheckout(ctx context.Context, id uuid.UUID) (Checkout, error) {
+	row := q.db.QueryRow(ctx, getCheckout, id)
+	var i Checkout
+	err := row.Scan(
+		&i.ID,
+		&i.Code,
+		&i.CustomerID,
+		&i.TotalAmount,
+		&i.Status,
+		&i.CreatedAt,
+		&i.UpdatedAt,
 	)
 	return i, err
 }
@@ -512,6 +545,85 @@ func (q *Queries) ListBookings(ctx context.Context, arg ListBookingsParams) ([]L
 	return items, nil
 }
 
+const listCheckoutBookings = `-- name: ListCheckoutBookings :many
+SELECT b.id, b.code, b.checkout_id, b.customer_id, b.partner_id, b.listing_id, b.service_type, b.booking_mode, b.status, b.service_start_at, b.service_end_at, b.original_service_start_at, b.gross_amount, b.commission_rate_bps, b.commission_amount, b.cancellation_policy_snapshot, b.contact_name, b.contact_phone, b.contact_email, b.customer_note, b.hold_expires_at, b.hold_release_at, b.response_due_at, b.payment_due_at, b.accepted_at, b.rejected_at, b.reject_reason, b.confirmed_at, b.checked_in_at, b.in_service_at, b.completed_at, b.no_show_at, b.cancelled_at, b.cancel_kind, b.cancel_reason, b.cancelled_by, b.qr_token, b.created_at, b.updated_at,
+       COALESCE(to_char(d.visit_date, 'YYYY-MM-DD'), '')::text AS visit_date,
+       d.time_slot_id
+FROM bookings b
+LEFT JOIN booking_attraction_details d ON d.booking_id = b.id
+WHERE b.checkout_id = $1
+ORDER BY b.id
+`
+
+type ListCheckoutBookingsRow struct {
+	Booking    Booking
+	VisitDate  string
+	TimeSlotID *uuid.UUID
+}
+
+// Unlocked read of a checkout's bookings with what re-confirmation needs.
+func (q *Queries) ListCheckoutBookings(ctx context.Context, checkoutID uuid.UUID) ([]ListCheckoutBookingsRow, error) {
+	rows, err := q.db.Query(ctx, listCheckoutBookings, checkoutID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListCheckoutBookingsRow
+	for rows.Next() {
+		var i ListCheckoutBookingsRow
+		if err := rows.Scan(
+			&i.Booking.ID,
+			&i.Booking.Code,
+			&i.Booking.CheckoutID,
+			&i.Booking.CustomerID,
+			&i.Booking.PartnerID,
+			&i.Booking.ListingID,
+			&i.Booking.ServiceType,
+			&i.Booking.BookingMode,
+			&i.Booking.Status,
+			&i.Booking.ServiceStartAt,
+			&i.Booking.ServiceEndAt,
+			&i.Booking.OriginalServiceStartAt,
+			&i.Booking.GrossAmount,
+			&i.Booking.CommissionRateBps,
+			&i.Booking.CommissionAmount,
+			&i.Booking.CancellationPolicySnapshot,
+			&i.Booking.ContactName,
+			&i.Booking.ContactPhone,
+			&i.Booking.ContactEmail,
+			&i.Booking.CustomerNote,
+			&i.Booking.HoldExpiresAt,
+			&i.Booking.HoldReleaseAt,
+			&i.Booking.ResponseDueAt,
+			&i.Booking.PaymentDueAt,
+			&i.Booking.AcceptedAt,
+			&i.Booking.RejectedAt,
+			&i.Booking.RejectReason,
+			&i.Booking.ConfirmedAt,
+			&i.Booking.CheckedInAt,
+			&i.Booking.InServiceAt,
+			&i.Booking.CompletedAt,
+			&i.Booking.NoShowAt,
+			&i.Booking.CancelledAt,
+			&i.Booking.CancelKind,
+			&i.Booking.CancelReason,
+			&i.Booking.CancelledBy,
+			&i.Booking.QrToken,
+			&i.Booking.CreatedAt,
+			&i.Booking.UpdatedAt,
+			&i.VisitDate,
+			&i.TimeSlotID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listStatusHistory = `-- name: ListStatusHistory :many
 SELECT id, booking_id, from_status, to_status, actor_kind, actor_user_id, reason, created_at, updated_at FROM booking_status_history WHERE booking_id = $1 ORDER BY created_at, id
 `
@@ -533,6 +645,91 @@ func (q *Queries) ListStatusHistory(ctx context.Context, bookingID uuid.UUID) ([
 			&i.ActorKind,
 			&i.ActorUserID,
 			&i.Reason,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const lockCheckout = `-- name: LockCheckout :one
+SELECT id, code, customer_id, total_amount, status, created_at, updated_at FROM checkouts WHERE id = $1 FOR UPDATE
+`
+
+// checkouts come before bookings in the lock order (DB §1.1).
+func (q *Queries) LockCheckout(ctx context.Context, id uuid.UUID) (Checkout, error) {
+	row := q.db.QueryRow(ctx, lockCheckout, id)
+	var i Checkout
+	err := row.Scan(
+		&i.ID,
+		&i.Code,
+		&i.CustomerID,
+		&i.TotalAmount,
+		&i.Status,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const lockCheckoutBookings = `-- name: LockCheckoutBookings :many
+SELECT id, code, checkout_id, customer_id, partner_id, listing_id, service_type, booking_mode, status, service_start_at, service_end_at, original_service_start_at, gross_amount, commission_rate_bps, commission_amount, cancellation_policy_snapshot, contact_name, contact_phone, contact_email, customer_note, hold_expires_at, hold_release_at, response_due_at, payment_due_at, accepted_at, rejected_at, reject_reason, confirmed_at, checked_in_at, in_service_at, completed_at, no_show_at, cancelled_at, cancel_kind, cancel_reason, cancelled_by, qr_token, created_at, updated_at FROM bookings WHERE checkout_id = $1 ORDER BY id FOR UPDATE
+`
+
+// Bookings of a checkout locked in id order (DB §1.1).
+func (q *Queries) LockCheckoutBookings(ctx context.Context, checkoutID uuid.UUID) ([]Booking, error) {
+	rows, err := q.db.Query(ctx, lockCheckoutBookings, checkoutID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Booking
+	for rows.Next() {
+		var i Booking
+		if err := rows.Scan(
+			&i.ID,
+			&i.Code,
+			&i.CheckoutID,
+			&i.CustomerID,
+			&i.PartnerID,
+			&i.ListingID,
+			&i.ServiceType,
+			&i.BookingMode,
+			&i.Status,
+			&i.ServiceStartAt,
+			&i.ServiceEndAt,
+			&i.OriginalServiceStartAt,
+			&i.GrossAmount,
+			&i.CommissionRateBps,
+			&i.CommissionAmount,
+			&i.CancellationPolicySnapshot,
+			&i.ContactName,
+			&i.ContactPhone,
+			&i.ContactEmail,
+			&i.CustomerNote,
+			&i.HoldExpiresAt,
+			&i.HoldReleaseAt,
+			&i.ResponseDueAt,
+			&i.PaymentDueAt,
+			&i.AcceptedAt,
+			&i.RejectedAt,
+			&i.RejectReason,
+			&i.ConfirmedAt,
+			&i.CheckedInAt,
+			&i.InServiceAt,
+			&i.CompletedAt,
+			&i.NoShowAt,
+			&i.CancelledAt,
+			&i.CancelKind,
+			&i.CancelReason,
+			&i.CancelledBy,
+			&i.QrToken,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
@@ -575,6 +772,21 @@ func (q *Queries) ReserveIdempotencyKey(ctx context.Context, arg ReserveIdempote
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const setCheckoutStatus = `-- name: SetCheckoutStatus :exec
+UPDATE checkouts SET status = $1, updated_at = $2 WHERE id = $3
+`
+
+type SetCheckoutStatusParams struct {
+	Status string
+	Now    time.Time
+	ID     uuid.UUID
+}
+
+func (q *Queries) SetCheckoutStatus(ctx context.Context, arg SetCheckoutStatusParams) error {
+	_, err := q.db.Exec(ctx, setCheckoutStatus, arg.Status, arg.Now, arg.ID)
+	return err
 }
 
 const storeIdempotencyResponse = `-- name: StoreIdempotencyResponse :exec

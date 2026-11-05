@@ -21,10 +21,12 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/riverqueue/river"
 
 	"github.com/bangbc-luna/lunain-travel/internal/booking/store"
 	"github.com/bangbc-luna/lunain-travel/internal/catalog"
 	"github.com/bangbc-luna/lunain-travel/internal/identity"
+	"github.com/bangbc-luna/lunain-travel/internal/ledger"
 	"github.com/bangbc-luna/lunain-travel/internal/listing"
 	"github.com/bangbc-luna/lunain-travel/internal/payment"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/clock"
@@ -85,7 +87,11 @@ type Deps struct {
 	Settings *settings.Service
 	Identity *identity.Service
 	Payments *payment.Service
-	Log      *slog.Logger
+	Ledger   *ledger.Service
+	// Jobs queues customer emails (outbox). May be nil in tests that send
+	// no email: emails are then only logged.
+	Jobs *river.Client[pgx.Tx]
+	Log  *slog.Logger
 }
 
 // Service implements the booking use cases.
@@ -97,6 +103,8 @@ type Service struct {
 	settings *settings.Service
 	identity *identity.Service
 	payments *payment.Service
+	ledger   *ledger.Service
+	jobs     *river.Client[pgx.Tx]
 	log      *slog.Logger
 }
 
@@ -108,7 +116,7 @@ func NewService(d Deps) *Service {
 	}
 	return &Service{
 		pool: d.Pool, clock: d.Clock, listings: d.Listings, catalog: d.Catalog, settings: d.Settings,
-		identity: d.Identity, payments: d.Payments, log: log,
+		identity: d.Identity, payments: d.Payments, ledger: d.Ledger, jobs: d.Jobs, log: log,
 	}
 }
 
@@ -327,14 +335,31 @@ func (s *Service) CreateAttraction(ctx context.Context, customerID uuid.UUID, id
 	if err != nil {
 		return BookingView{}, err
 	}
-	if !replay {
-		// Outside the tx: never call the provider with a tx open. A failure
-		// leaves the payment pending without URL (POST /pay retries).
-		if _, err := s.payments.ActivateLink(context.WithoutCancel(ctx), paymentID); err != nil {
-			s.log.Warn("booking: payment link not created", "booking_id", bookingID, "err", err)
-		}
+	// Outside the tx: never call the provider with a tx open. A failure
+	// leaves the payment pending without URL (POST /pay or a replay retries).
+	if replay {
+		s.activateMissingLink(ctx, bookingID)
+	} else if _, err := s.payments.ActivateLink(context.WithoutCancel(ctx), paymentID); err != nil {
+		s.log.Warn("booking: payment link not created", "booking_id", bookingID, "err", err)
 	}
 	return s.GetMine(ctx, customerID, bookingID)
+}
+
+// activateMissingLink retries the payment link of a replayed booking that is
+// still pending_payment and whose pending payment has no link yet (best
+// effort: the replay answers with the booking either way).
+func (s *Service) activateMissingLink(ctx context.Context, bookingID uuid.UUID) {
+	b, err := store.New(s.pool).GetBooking(ctx, bookingID)
+	if err != nil || b.Status != StatusPendingPayment {
+		return
+	}
+	p, err := s.payments.PendingForCheckout(ctx, b.CheckoutID)
+	if err != nil || p == nil || p.CheckoutURL != nil {
+		return
+	}
+	if _, err := s.payments.ActivateLink(context.WithoutCancel(ctx), p.ID); err != nil {
+		s.log.Warn("booking: payment link not created on replay", "booking_id", bookingID, "err", err)
+	}
 }
 
 // replayed resolves an already used Idempotency-Key to its booking.

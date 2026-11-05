@@ -49,6 +49,12 @@ type testApp struct {
 // a fixed clock.
 func newTestApp(t *testing.T) *testApp {
 	t.Helper()
+	return newTestAppEnv(t, "test")
+}
+
+// newTestAppEnv is newTestApp with APP_ENV = appEnv (payment.Fake provider).
+func newTestAppEnv(t *testing.T, appEnv string) *testApp {
+	t.Helper()
 	pool := testutil.Postgres(t)
 	clk := &clock.Fixed{T: testNow}
 	issuer := auth.NewIssuer([]byte("test-secret-test-secret-test-secret"), 15*time.Minute, clk)
@@ -66,15 +72,17 @@ func newTestApp(t *testing.T) *testApp {
 		Pool: pool, Clock: clk, Partners: partnerSvc, Catalog: catSvc, Geo: geoSvc, Files: fileSvc,
 	})
 	settingsSvc := settings.NewService(pool, clk)
+	paymentSvc := payment.NewService(pool, clk, payment.NewFake(), nil)
+	ledgerSvc := ledger.NewService(pool, clk)
 	bookingSvc := booking.NewService(booking.Deps{
 		Pool: pool, Clock: clk, Listings: listingSvc, Catalog: catSvc, Settings: settingsSvc,
-		Identity: idSvc, Payments: payment.NewService(pool, clk, payment.NewFake(), nil),
+		Identity: idSvc, Payments: paymentSvc, Ledger: ledgerSvc,
 	})
 	mux, patterns := buildMux(muxDeps{
 		Pool: pool, Issuer: issuer, ClientIP: httpx.ClientIPFunc(0),
 		Identity: idSvc, Settings: settingsSvc, Files: fileSvc,
 		Geo: geoSvc, Catalog: catSvc, Partner: partnerSvc, Listing: listingSvc,
-		Ledger: ledger.NewService(pool, clk), Booking: bookingSvc,
+		Ledger: ledgerSvc, Payment: paymentSvc, Booking: bookingSvc, AppEnv: appEnv,
 	})
 	return &testApp{
 		handler: httpx.Chain(mux, httpx.RequestID, httpx.Recover), issuer: issuer,
@@ -331,4 +339,22 @@ func TestCustomerBookingRoutesRequireCustomer(t *testing.T) {
 			requireAuthorized(t, app.do(m, r.sample, customer), "customer")
 		})
 	}
+}
+
+const simulatePaidRoute = "POST /v1/dev/payments/{order_code}/simulate-paid"
+
+func TestPaymentWebhookIsPublic(t *testing.T) {
+	app := newTestApp(t)
+	require.Contains(t, app.patterns, "POST /v1/payments/payos/webhook")
+	// No token needed: a bad body is rejected by the signature check, not auth.
+	requireError(t, app.do("POST", "/v1/payments/payos/webhook", ""), http.StatusBadRequest, "invalid_signature",
+		"webhook without token")
+}
+
+func TestDevSimulateRoute_FakeOutsideProdOnly(t *testing.T) {
+	require.Contains(t, newTestAppEnv(t, "dev").patterns, simulatePaidRoute)
+	require.Contains(t, newTestAppEnv(t, "test").patterns, simulatePaidRoute)
+	prod := newTestAppEnv(t, "prod")
+	require.NotContains(t, prod.patterns, simulatePaidRoute)
+	require.Equal(t, http.StatusNotFound, prod.do("POST", "/v1/dev/payments/100000/simulate-paid", "").Code)
 }

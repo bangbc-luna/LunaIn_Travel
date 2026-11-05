@@ -91,3 +91,30 @@ WHERE (sqlc.narg(customer_id)::uuid IS NULL OR b.customer_id = sqlc.narg(custome
   AND (sqlc.narg(cursor)::uuid IS NULL OR b.id < sqlc.narg(cursor))
 ORDER BY b.id DESC
 LIMIT @lim;
+
+-- name: GetCheckout :one
+SELECT * FROM checkouts WHERE id = @id;
+
+-- checkouts come before bookings in the lock order (DB §1.1).
+-- name: LockCheckout :one
+SELECT * FROM checkouts WHERE id = @id FOR UPDATE;
+
+-- Unlocked read of a checkout's bookings with what re-confirmation needs.
+-- name: ListCheckoutBookings :many
+SELECT sqlc.embed(b),
+       COALESCE(to_char(d.visit_date, 'YYYY-MM-DD'), '')::text AS visit_date,
+       d.time_slot_id
+FROM bookings b
+LEFT JOIN booking_attraction_details d ON d.booking_id = b.id
+WHERE b.checkout_id = @checkout_id
+ORDER BY b.id;
+
+-- Bookings of a checkout locked in id order (DB §1.1).
+-- name: LockCheckoutBookings :many
+SELECT * FROM bookings WHERE checkout_id = @checkout_id ORDER BY id FOR UPDATE;
+
+-- name: ConfirmBooking :exec
+UPDATE bookings SET status = 'confirmed', confirmed_at = @now::timestamptz, updated_at = @now WHERE id = @id;
+
+-- name: SetCheckoutStatus :exec
+UPDATE checkouts SET status = @status, updated_at = @now WHERE id = @id;

@@ -21,3 +21,53 @@ SELECT * FROM payments WHERE checkout_id = @checkout_id AND status = 'pending';
 UPDATE payments
 SET checkout_url = @checkout_url, qr_code = sqlc.narg(qr_code), updated_at = @now
 WHERE id = @id AND status = 'pending' AND checkout_url IS NULL;
+
+-- name: GetPaymentByOrderCode :one
+SELECT * FROM payments WHERE provider_order_code = @order_code;
+
+-- payments come after checkouts and bookings in the lock order (DB §1.1).
+-- name: LockPayment :one
+SELECT * FROM payments WHERE id = @id FOR UPDATE;
+
+-- Lock helpers for rotating a payment (checkout -> bookings -> payment).
+-- name: LockCheckoutRow :one
+SELECT id FROM checkouts WHERE id = @id FOR UPDATE;
+
+-- name: LockCheckoutBookingRows :many
+SELECT id FROM bookings WHERE checkout_id = @checkout_id ORDER BY id FOR UPDATE;
+
+-- name: CancelPayment :exec
+UPDATE payments SET status = 'cancelled', updated_at = @now WHERE id = @id;
+
+-- Money received on a payment: status paid or needs_review.
+-- name: RecordPaymentReceived :exec
+UPDATE payments
+SET status = @status, paid_at = @paid_at::timestamptz, provider_reference = @provider_reference::text,
+    raw = @raw, updated_at = @now
+WHERE id = @id;
+
+-- name: PaymentEventExists :one
+SELECT EXISTS (SELECT 1 FROM payment_events WHERE dedupe_key = @dedupe_key);
+
+-- A repeated delivery inserts nothing (0 rows). A concurrent insert of the
+-- same key waits for the first tx and then inserts nothing if it committed.
+-- name: InsertPaymentEvent :execrows
+INSERT INTO payment_events (id, payment_id, provider, dedupe_key, signature_valid, payload, received_at,
+                            processed_at, result, created_at, updated_at)
+VALUES (@id, sqlc.narg(payment_id), 'payos', @dedupe_key, true, @payload, @now,
+        sqlc.narg(processed_at), sqlc.narg(result), @now, @now)
+ON CONFLICT (dedupe_key) DO NOTHING;
+
+-- name: FinishPaymentEvent :exec
+UPDATE payment_events SET processed_at = @now::timestamptz, result = @result::text, updated_at = @now
+WHERE dedupe_key = @dedupe_key;
+
+-- name: GetRefundAccount :one
+SELECT * FROM customer_refund_accounts WHERE user_id = @user_id;
+
+-- name: InsertRefund :one
+INSERT INTO refunds (id, payment_id, checkout_id, booking_id, provider_reference, amount, reason, status,
+                     bank_bin, account_number, account_holder, created_at, updated_at)
+VALUES (@id, @payment_id, @checkout_id, sqlc.narg(booking_id), sqlc.narg(provider_reference), @amount, @reason,
+        @status, sqlc.narg(bank_bin), sqlc.narg(account_number), sqlc.narg(account_holder), @now, @now)
+RETURNING *;

@@ -215,16 +215,17 @@ func serve(log *slog.Logger) error {
 
 	settingsSvc := settings.NewService(pool, clock.Real{})
 	paymentSvc := payment.NewService(pool, clock.Real{}, paymentProvider(cfg), log)
+	ledgerSvc := ledger.NewService(pool, clock.Real{})
 	bookingSvc := booking.NewService(booking.Deps{
 		Pool: pool, Clock: clock.Real{}, Listings: listingSvc, Catalog: catSvc, Settings: settingsSvc,
-		Identity: idSvc, Payments: paymentSvc, Log: log,
+		Identity: idSvc, Payments: paymentSvc, Ledger: ledgerSvc, Jobs: jobClient, Log: log,
 	})
 
 	mux, _ := buildMux(muxDeps{
 		Pool: pool, Issuer: issuer, ClientIP: httpx.ClientIPFunc(cfg.TrustedProxyHops),
 		Identity: idSvc, Settings: settingsSvc, Files: fileSvc,
 		Geo: geoSvc, Catalog: catSvc, Partner: partnerSvc, Listing: listingSvc,
-		Ledger: ledger.NewService(pool, clock.Real{}), Booking: bookingSvc,
+		Ledger: ledgerSvc, Payment: paymentSvc, Booking: bookingSvc, AppEnv: cfg.AppEnv,
 	})
 
 	srv := &http.Server{

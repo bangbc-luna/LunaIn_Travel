@@ -12,12 +12,68 @@ import (
 	"github.com/google/uuid"
 )
 
+const cancelPayment = `-- name: CancelPayment :exec
+UPDATE payments SET status = 'cancelled', updated_at = $1 WHERE id = $2
+`
+
+type CancelPaymentParams struct {
+	Now time.Time
+	ID  uuid.UUID
+}
+
+func (q *Queries) CancelPayment(ctx context.Context, arg CancelPaymentParams) error {
+	_, err := q.db.Exec(ctx, cancelPayment, arg.Now, arg.ID)
+	return err
+}
+
+const finishPaymentEvent = `-- name: FinishPaymentEvent :exec
+UPDATE payment_events SET processed_at = $1::timestamptz, result = $2::text, updated_at = $1
+WHERE dedupe_key = $3
+`
+
+type FinishPaymentEventParams struct {
+	Now       time.Time
+	Result    string
+	DedupeKey string
+}
+
+func (q *Queries) FinishPaymentEvent(ctx context.Context, arg FinishPaymentEventParams) error {
+	_, err := q.db.Exec(ctx, finishPaymentEvent, arg.Now, arg.Result, arg.DedupeKey)
+	return err
+}
+
 const getPayment = `-- name: GetPayment :one
 SELECT id, checkout_id, provider, provider_order_code, amount, status, checkout_url, qr_code, expires_at, paid_at, provider_reference, raw, created_at, updated_at FROM payments WHERE id = $1
 `
 
 func (q *Queries) GetPayment(ctx context.Context, id uuid.UUID) (Payment, error) {
 	row := q.db.QueryRow(ctx, getPayment, id)
+	var i Payment
+	err := row.Scan(
+		&i.ID,
+		&i.CheckoutID,
+		&i.Provider,
+		&i.ProviderOrderCode,
+		&i.Amount,
+		&i.Status,
+		&i.CheckoutUrl,
+		&i.QrCode,
+		&i.ExpiresAt,
+		&i.PaidAt,
+		&i.ProviderReference,
+		&i.Raw,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getPaymentByOrderCode = `-- name: GetPaymentByOrderCode :one
+SELECT id, checkout_id, provider, provider_order_code, amount, status, checkout_url, qr_code, expires_at, paid_at, provider_reference, raw, created_at, updated_at FROM payments WHERE provider_order_code = $1
+`
+
+func (q *Queries) GetPaymentByOrderCode(ctx context.Context, orderCode int64) (Payment, error) {
+	row := q.db.QueryRow(ctx, getPaymentByOrderCode, orderCode)
 	var i Payment
 	err := row.Scan(
 		&i.ID,
@@ -99,6 +155,60 @@ func (q *Queries) GetPendingPaymentByCheckout(ctx context.Context, checkoutID uu
 	return i, err
 }
 
+const getRefundAccount = `-- name: GetRefundAccount :one
+SELECT user_id, bank_bin, account_number, account_holder, created_at, updated_at FROM customer_refund_accounts WHERE user_id = $1
+`
+
+func (q *Queries) GetRefundAccount(ctx context.Context, userID uuid.UUID) (CustomerRefundAccount, error) {
+	row := q.db.QueryRow(ctx, getRefundAccount, userID)
+	var i CustomerRefundAccount
+	err := row.Scan(
+		&i.UserID,
+		&i.BankBin,
+		&i.AccountNumber,
+		&i.AccountHolder,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const insertPaymentEvent = `-- name: InsertPaymentEvent :execrows
+INSERT INTO payment_events (id, payment_id, provider, dedupe_key, signature_valid, payload, received_at,
+                            processed_at, result, created_at, updated_at)
+VALUES ($1, $2, 'payos', $3, true, $4, $5,
+        $6, $7, $5, $5)
+ON CONFLICT (dedupe_key) DO NOTHING
+`
+
+type InsertPaymentEventParams struct {
+	ID          uuid.UUID
+	PaymentID   *uuid.UUID
+	DedupeKey   string
+	Payload     []byte
+	Now         time.Time
+	ProcessedAt *time.Time
+	Result      *string
+}
+
+// A repeated delivery inserts nothing (0 rows). A concurrent insert of the
+// same key waits for the first tx and then inserts nothing if it committed.
+func (q *Queries) InsertPaymentEvent(ctx context.Context, arg InsertPaymentEventParams) (int64, error) {
+	result, err := q.db.Exec(ctx, insertPaymentEvent,
+		arg.ID,
+		arg.PaymentID,
+		arg.DedupeKey,
+		arg.Payload,
+		arg.Now,
+		arg.ProcessedAt,
+		arg.Result,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const insertPendingPayment = `-- name: InsertPendingPayment :one
 INSERT INTO payments (id, checkout_id, amount, status, expires_at, created_at, updated_at)
 VALUES ($1, $2, $3, 'pending', $4, $5, $5)
@@ -140,6 +250,170 @@ func (q *Queries) InsertPendingPayment(ctx context.Context, arg InsertPendingPay
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const insertRefund = `-- name: InsertRefund :one
+INSERT INTO refunds (id, payment_id, checkout_id, booking_id, provider_reference, amount, reason, status,
+                     bank_bin, account_number, account_holder, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7,
+        $8, $9, $10, $11, $12, $12)
+RETURNING id, payment_id, checkout_id, booking_id, provider_reference, amount, reason, status, bank_bin, account_number, account_holder, transfer_reference, proof_file_id, completed_by, completed_at, created_at, updated_at
+`
+
+type InsertRefundParams struct {
+	ID                uuid.UUID
+	PaymentID         uuid.UUID
+	CheckoutID        uuid.UUID
+	BookingID         *uuid.UUID
+	ProviderReference *string
+	Amount            int64
+	Reason            string
+	Status            string
+	BankBin           *string
+	AccountNumber     *string
+	AccountHolder     *string
+	Now               time.Time
+}
+
+func (q *Queries) InsertRefund(ctx context.Context, arg InsertRefundParams) (Refund, error) {
+	row := q.db.QueryRow(ctx, insertRefund,
+		arg.ID,
+		arg.PaymentID,
+		arg.CheckoutID,
+		arg.BookingID,
+		arg.ProviderReference,
+		arg.Amount,
+		arg.Reason,
+		arg.Status,
+		arg.BankBin,
+		arg.AccountNumber,
+		arg.AccountHolder,
+		arg.Now,
+	)
+	var i Refund
+	err := row.Scan(
+		&i.ID,
+		&i.PaymentID,
+		&i.CheckoutID,
+		&i.BookingID,
+		&i.ProviderReference,
+		&i.Amount,
+		&i.Reason,
+		&i.Status,
+		&i.BankBin,
+		&i.AccountNumber,
+		&i.AccountHolder,
+		&i.TransferReference,
+		&i.ProofFileID,
+		&i.CompletedBy,
+		&i.CompletedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const lockCheckoutBookingRows = `-- name: LockCheckoutBookingRows :many
+SELECT id FROM bookings WHERE checkout_id = $1 ORDER BY id FOR UPDATE
+`
+
+func (q *Queries) LockCheckoutBookingRows(ctx context.Context, checkoutID uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, lockCheckoutBookingRows, checkoutID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const lockCheckoutRow = `-- name: LockCheckoutRow :one
+SELECT id FROM checkouts WHERE id = $1 FOR UPDATE
+`
+
+// Lock helpers for rotating a payment (checkout -> bookings -> payment).
+func (q *Queries) LockCheckoutRow(ctx context.Context, id uuid.UUID) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, lockCheckoutRow, id)
+	var id_2 uuid.UUID
+	err := row.Scan(&id_2)
+	return id_2, err
+}
+
+const lockPayment = `-- name: LockPayment :one
+SELECT id, checkout_id, provider, provider_order_code, amount, status, checkout_url, qr_code, expires_at, paid_at, provider_reference, raw, created_at, updated_at FROM payments WHERE id = $1 FOR UPDATE
+`
+
+// payments come after checkouts and bookings in the lock order (DB §1.1).
+func (q *Queries) LockPayment(ctx context.Context, id uuid.UUID) (Payment, error) {
+	row := q.db.QueryRow(ctx, lockPayment, id)
+	var i Payment
+	err := row.Scan(
+		&i.ID,
+		&i.CheckoutID,
+		&i.Provider,
+		&i.ProviderOrderCode,
+		&i.Amount,
+		&i.Status,
+		&i.CheckoutUrl,
+		&i.QrCode,
+		&i.ExpiresAt,
+		&i.PaidAt,
+		&i.ProviderReference,
+		&i.Raw,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const paymentEventExists = `-- name: PaymentEventExists :one
+SELECT EXISTS (SELECT 1 FROM payment_events WHERE dedupe_key = $1)
+`
+
+func (q *Queries) PaymentEventExists(ctx context.Context, dedupeKey string) (bool, error) {
+	row := q.db.QueryRow(ctx, paymentEventExists, dedupeKey)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
+const recordPaymentReceived = `-- name: RecordPaymentReceived :exec
+UPDATE payments
+SET status = $1, paid_at = $2::timestamptz, provider_reference = $3::text,
+    raw = $4, updated_at = $5
+WHERE id = $6
+`
+
+type RecordPaymentReceivedParams struct {
+	Status            string
+	PaidAt            time.Time
+	ProviderReference string
+	Raw               []byte
+	Now               time.Time
+	ID                uuid.UUID
+}
+
+// Money received on a payment: status paid or needs_review.
+func (q *Queries) RecordPaymentReceived(ctx context.Context, arg RecordPaymentReceivedParams) error {
+	_, err := q.db.Exec(ctx, recordPaymentReceived,
+		arg.Status,
+		arg.PaidAt,
+		arg.ProviderReference,
+		arg.Raw,
+		arg.Now,
+		arg.ID,
+	)
+	return err
 }
 
 const setPaymentLink = `-- name: SetPaymentLink :execrows

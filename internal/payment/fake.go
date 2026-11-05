@@ -3,6 +3,7 @@ package payment
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"sync"
@@ -28,7 +29,16 @@ type Fake struct {
 	links map[int64]*fakeLink
 	// createErr, when set, makes CreateLink fail (simulates PayOS down).
 	createErr error
+	// loseResponses > 0: CreateLink creates the link but returns an error,
+	// as if its response had been lost on the way back.
+	loseResponses int
 }
+
+// Fake provider error codes (PayOS-like).
+const (
+	fakeCodeOrderExists   = "231"
+	fakeCodeOrderNotFound = "101"
+)
 
 var _ Provider = (*Fake)(nil)
 
@@ -45,7 +55,25 @@ func (f *Fake) FailCreateLink(err error) {
 	f.createErr = err
 }
 
-// CreateLink records a pending link.
+// LoseNextCreateResponse makes the next CreateLink create the link but
+// return an error (the response was lost).
+func (f *Fake) LoseNextCreateResponse() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.loseResponses++
+}
+
+// SetState overrides the provider-side state of a known order.
+func (f *Fake) SetState(orderCode int64, state string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if l, ok := f.links[orderCode]; ok {
+		l.state = state
+	}
+}
+
+// CreateLink records a pending link. Like PayOS, an order code can only be
+// used once: a second CreateLink with it is a *ProviderError.
 func (f *Fake) CreateLink(_ context.Context, req LinkRequest) (Link, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -55,7 +83,15 @@ func (f *Fake) CreateLink(_ context.Context, req LinkRequest) (Link, error) {
 	if err := validateDescription(req.Description); err != nil {
 		return Link{}, err
 	}
+	if _, ok := f.links[req.OrderCode]; ok {
+		return Link{}, fmt.Errorf("fake payos: create link: %w",
+			&ProviderError{Code: fakeCodeOrderExists, Desc: "Đơn thanh toán đã tồn tại"})
+	}
 	f.links[req.OrderCode] = &fakeLink{req: req, amount: req.Amount, state: StatePending}
+	if f.loseResponses > 0 {
+		f.loseResponses--
+		return Link{}, errors.New("fake payos: create link: response lost")
+	}
 	oc := strconv.FormatInt(req.OrderCode, 10)
 	return Link{
 		CheckoutURL:    "http://localhost/fake-pay/" + oc,
@@ -75,13 +111,15 @@ func (f *Fake) Request(orderCode int64) (LinkRequest, bool) {
 	return l.req, true
 }
 
-// GetStatus returns the recorded state.
+// GetStatus returns the recorded state; an unknown order is a
+// *ProviderError, as PayOS answers it.
 func (f *Fake) GetStatus(_ context.Context, orderCode int64) (Status, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	l, ok := f.links[orderCode]
 	if !ok {
-		return Status{}, fmt.Errorf("fake payos: order %d not found", orderCode)
+		return Status{}, fmt.Errorf("fake payos: order %d: %w", orderCode,
+			&ProviderError{Code: fakeCodeOrderNotFound, Desc: "Không tìm thấy đơn thanh toán"})
 	}
 	return Status{State: l.state, AmountPaid: l.paid}, nil
 }
@@ -102,8 +140,15 @@ func (f *Fake) CancelLink(_ context.Context, orderCode int64) error {
 }
 
 // MarkPaid marks the order paid (creating it if unknown) and returns a
-// webhook body signed with FakeChecksumKey.
+// webhook body signed with FakeChecksumKey, with reference
+// "FAKE-REF-<orderCode>" (the same for every call: a repeated delivery).
 func (f *Fake) MarkPaid(orderCode, amount int64) []byte {
+	return f.MarkPaidRef(orderCode, amount, "FAKE-REF-"+strconv.FormatInt(orderCode, 10))
+}
+
+// MarkPaidRef is MarkPaid with the bank reference of the transfer; another
+// reference on the same order code is another transfer.
+func (f *Fake) MarkPaidRef(orderCode, amount int64, reference string) []byte {
 	f.mu.Lock()
 	l, ok := f.links[orderCode]
 	if !ok {
@@ -123,7 +168,7 @@ func (f *Fake) MarkPaid(orderCode, amount int64) []byte {
 		"amount":                 amount,
 		"description":            "FAKE" + oc,
 		"accountNumber":          "12345678",
-		"reference":              "FAKE-REF-" + oc,
+		"reference":              reference,
 		"transactionDateTime":    now().In(vnZone).Format(txTimeLayout),
 		"currency":               "VND",
 		"paymentLinkId":          "fake-link-" + oc,
