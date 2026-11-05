@@ -363,6 +363,10 @@ func TestPublicRoutes(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, rec.Code)
 	require.Contains(t, rec.Body.String(), `"not_found"`)
 	require.Equal(t, []string{"GET /v1/listings", "GET /v1/listings/{slug}"}, recordedUnder(app.patterns, "/v1/listings"))
+	// The rental vehicle search needs no token: missing parameters are a 400,
+	// not a 401.
+	require.Equal(t, []string{"GET /v1/rental-vehicles"}, recordedUnder(app.patterns, "/v1/rental-vehicles"))
+	requireError(t, app.do("GET", "/v1/rental-vehicles", ""), http.StatusBadRequest, "invalid_request", "rental search without parameters")
 	rec = app.do("GET", "/nope", "")
 	require.Equal(t, http.StatusNotFound, rec.Code)
 	require.Contains(t, rec.Body.String(), `"error"`)
