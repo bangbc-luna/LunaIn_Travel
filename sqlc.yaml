@@ -151,3 +151,96 @@ sql:
             go_type:
               type: float64
               pointer: true
+  - engine: postgresql
+    schema: internal/platform/db/migrations
+    queries: internal/booking/queries.sql
+    gen:
+      go:
+        package: store
+        out: internal/booking/store
+        sql_package: pgx/v5
+        emit_json_tags: false
+        emit_pointers_for_null_types: true
+        overrides:
+          - db_type: uuid
+            go_type: github.com/google/uuid.UUID
+          - db_type: uuid
+            nullable: true
+            go_type:
+              import: github.com/google/uuid
+              type: UUID
+              pointer: true
+          - db_type: timestamptz
+            go_type: time.Time
+          - db_type: timestamptz
+            nullable: true
+            go_type:
+              type: time.Time
+              pointer: true
+          - db_type: pg_catalog.numeric
+            nullable: true
+            go_type:
+              type: float64
+              pointer: true
+  - engine: postgresql
+    schema: internal/platform/db/migrations
+    queries: internal/payment/queries.sql
+    gen:
+      go:
+        package: store
+        out: internal/payment/store
+        sql_package: pgx/v5
+        emit_json_tags: false
+        emit_pointers_for_null_types: true
+        overrides:
+          - db_type: uuid
+            go_type: github.com/google/uuid.UUID
+          - db_type: uuid
+            nullable: true
+            go_type:
+              import: github.com/google/uuid
+              type: UUID
+              pointer: true
+          - db_type: timestamptz
+            go_type: time.Time
+          - db_type: timestamptz
+            nullable: true
+            go_type:
+              type: time.Time
+              pointer: true
+          - db_type: pg_catalog.numeric
+            nullable: true
+            go_type:
+              type: float64
+              pointer: true
+  - engine: postgresql
+    schema: internal/platform/db/migrations
+    queries: internal/ledger/queries.sql
+    gen:
+      go:
+        package: store
+        out: internal/ledger/store
+        sql_package: pgx/v5
+        emit_json_tags: false
+        emit_pointers_for_null_types: true
+        overrides:
+          - db_type: uuid
+            go_type: github.com/google/uuid.UUID
+          - db_type: uuid
+            nullable: true
+            go_type:
+              import: github.com/google/uuid
+              type: UUID
+              pointer: true
+          - db_type: timestamptz
+            go_type: time.Time
+          - db_type: timestamptz
+            nullable: true
+            go_type:
+              type: time.Time
+              pointer: true
+          - db_type: pg_catalog.numeric
+            nullable: true
+            go_type:
+              type: float64
+              pointer: true
