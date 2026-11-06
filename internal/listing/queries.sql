@@ -231,7 +231,8 @@ LIMIT 20;
 
 -- Public search over visible_listings (the single visibility rule, see
 -- migration 00010). price_from is the cheapest active ticket type or, for a
--- ride, the cheapest active schedule, for a rental the cheapest active model in
+-- ride, the cheapest active schedule, for a charter the cheapest active class
+-- for its first km (base_fare + price_per_km), for a rental the cheapest active model in
 -- stock (rentals without an active pickup point are unbookable and hidden from
 -- the search), 0 when there is none (prices are > 0 by
 -- CHECK; sqlc cannot type a nullable
@@ -247,6 +248,8 @@ SELECT sqlc.embed(l),
                 (SELECT min(m.price_per_day) FROM rental_vehicle_models m
                  WHERE m.listing_id = l.id AND m.active AND m.quantity > 0
                    AND EXISTS (SELECT 1 FROM rental_pickup_points pp WHERE pp.listing_id = l.id AND pp.active)),
+                (SELECT min(c.base_fare + c.price_per_km) FROM charter_vehicle_classes c
+                 WHERE c.listing_id = l.id AND c.active),
                 0)::bigint AS price_from
 FROM visible_listings l
 WHERE (l.service_type <> 'self_drive_rental'
@@ -270,6 +273,8 @@ SELECT sqlc.embed(l),
                 (SELECT min(m.price_per_day) FROM rental_vehicle_models m
                  WHERE m.listing_id = l.id AND m.active AND m.quantity > 0
                    AND EXISTS (SELECT 1 FROM rental_pickup_points pp WHERE pp.listing_id = l.id AND pp.active)),
+                (SELECT min(c.base_fare + c.price_per_km) FROM charter_vehicle_classes c
+                 WHERE c.listing_id = l.id AND c.active),
                 0)::bigint AS price_from
 FROM visible_listings l
 WHERE l.slug = @slug;
@@ -625,17 +630,80 @@ LIMIT @cap;
 -- name: RequestPaymentHours :one
 SELECT request_payment_hours FROM platform_settings WHERE id = 1;
 
+-- Private charter: service, areas, vehicle classes and surcharges.
 -- name: GetCharterService :one
-SELECT listing_id, max_distance_km::float8 AS max_distance_km, night_start, night_end
+-- sqlc cannot type a nullable expression: 0 tenths and '' mean NULL (the
+-- column is > 0 by CHECK).
+SELECT listing_id, COALESCE(round(max_distance_km * 10), 0)::bigint AS max_distance_tenths,
+       COALESCE(to_char(night_start, 'HH24:MI'), '')::text AS night_start,
+       COALESCE(to_char(night_end, 'HH24:MI'), '')::text AS night_end
 FROM charter_services WHERE listing_id = @listing_id;
+
+-- name: UpsertCharterService :exec
+INSERT INTO charter_services (listing_id, max_distance_km, night_start, night_end, created_at, updated_at)
+VALUES (@listing_id, (sqlc.narg(max_distance_tenths)::bigint / 10.0)::numeric(7,1),
+        sqlc.narg(night_start)::text::time, sqlc.narg(night_end)::text::time, @now, @now)
+ON CONFLICT (listing_id) DO UPDATE
+SET max_distance_km = EXCLUDED.max_distance_km, night_start = EXCLUDED.night_start,
+    night_end = EXCLUDED.night_end, updated_at = EXCLUDED.updated_at;
+
+-- name: CountProvincesIn :one
+SELECT count(*) FROM provinces WHERE code = ANY(@codes::text[]);
 
 -- name: ListCharterServiceAreas :many
 SELECT province_code FROM charter_service_areas WHERE listing_id = @listing_id ORDER BY province_code;
 
--- name: ListCharterVehicleClasses :many
-SELECT * FROM charter_vehicle_classes WHERE listing_id = @listing_id ORDER BY created_at, id;
+-- name: DeleteCharterAreasNotIn :exec
+DELETE FROM charter_service_areas
+WHERE listing_id = @listing_id AND NOT (province_code = ANY(@codes::text[]));
 
+-- name: InsertCharterAreas :exec
+INSERT INTO charter_service_areas (listing_id, province_code)
+SELECT @listing_id, unnest(@codes::text[])
+ON CONFLICT DO NOTHING;
+
+-- name: CountActiveCharterClasses :one
+SELECT count(*) FROM charter_vehicle_classes WHERE listing_id = @listing_id AND active;
+
+-- name: InsertCharterClass :one
+INSERT INTO charter_vehicle_classes (id, listing_id, name, seats, base_fare, price_per_km, active, created_at, updated_at)
+VALUES (@id, @listing_id, @name, @seats, @base_fare, @price_per_km, true, @now, @now)
+RETURNING *;
+
+-- name: LockCharterClass :one
+SELECT * FROM charter_vehicle_classes WHERE id = @id AND listing_id = @listing_id FOR UPDATE;
+
+-- name: UpdateCharterClass :one
+UPDATE charter_vehicle_classes
+SET name = @name, seats = @seats, base_fare = @base_fare, price_per_km = @price_per_km,
+    active = @active, updated_at = @now
+WHERE id = @id
+RETURNING *;
+
+-- name: ListCharterVehicleClasses :many
+SELECT * FROM charter_vehicle_classes
+WHERE listing_id = @listing_id AND (@include_inactive::bool OR active)
+ORDER BY created_at, id;
+
+-- Surcharges of every class of a listing in kind order. Without
+-- include_inactive only the ones that apply (active and > 0).
 -- name: ListCharterSurcharges :many
 SELECT s.* FROM charter_surcharges s
 JOIN charter_vehicle_classes c ON c.id = s.vehicle_class_id
-WHERE c.listing_id = @listing_id ORDER BY s.vehicle_class_id, s.kind;
+WHERE c.listing_id = @listing_id AND (@include_inactive::bool OR (s.active AND s.amount > 0))
+ORDER BY s.vehicle_class_id,
+         array_position(ARRAY['night','weekend','holiday','round_trip_waiting'], s.kind);
+
+-- name: ListCharterSurchargesOfClass :many
+SELECT * FROM charter_surcharges WHERE vehicle_class_id = @vehicle_class_id
+ORDER BY array_position(ARRAY['night','weekend','holiday','round_trip_waiting'], kind);
+
+-- name: UpsertCharterSurcharge :exec
+INSERT INTO charter_surcharges (id, vehicle_class_id, kind, calc, amount, active, created_at, updated_at)
+VALUES (@id, @vehicle_class_id, @kind, @calc, @amount, @active, @now, @now)
+ON CONFLICT (vehicle_class_id, kind) DO UPDATE
+SET calc = EXCLUDED.calc, amount = EXCLUDED.amount, active = EXCLUDED.active, updated_at = EXCLUDED.updated_at;
+
+-- name: DeactivateCharterSurchargesNotIn :exec
+UPDATE charter_surcharges SET active = false, updated_at = @now
+WHERE vehicle_class_id = @vehicle_class_id AND active AND NOT (kind = ANY(@kinds::text[]));

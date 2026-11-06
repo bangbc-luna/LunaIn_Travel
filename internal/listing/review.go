@@ -186,6 +186,22 @@ func (s *Service) requireComplete(ctx context.Context, tx pgx.Tx, cur store.List
 		if points == 0 {
 			missing = append(missing, "ít nhất 1 điểm nhận xe đang hoạt động")
 		}
+	case charterServiceType:
+		// The location items above are the operator's address.
+		areas, err := q.ListCharterServiceAreas(ctx, cur.ID)
+		if err != nil {
+			return fmt.Errorf("list charter areas: %w", err)
+		}
+		if len(areas) == 0 {
+			missing = append(missing, "khu vực phục vụ (ít nhất 1 tỉnh)")
+		}
+		classes, err := q.CountActiveCharterClasses(ctx, cur.ID)
+		if err != nil {
+			return fmt.Errorf("count charter classes: %w", err)
+		}
+		if classes == 0 {
+			missing = append(missing, "ít nhất 1 loại xe đang hoạt động")
+		}
 	case rideServiceType:
 		if _, err := q.GetRideRoute(ctx, cur.ID); errors.Is(err, pgx.ErrNoRows) {
 			missing = append(missing, "tuyến (điểm đi, điểm đến)")
@@ -398,6 +414,7 @@ type AdminListingDetail struct {
 	Attraction         *AttractionDetail  `json:"attraction"`
 	Ride               *RideDetail        `json:"ride"`
 	Rental             *RentalDetail      `json:"rental"`
+	Charter            *CharterDetail     `json:"charter"`
 	AuditLog           []AuditEntry       `json:"audit_log"`
 }
 
@@ -439,6 +456,12 @@ func (s *Service) AdminGet(ctx context.Context, id uuid.UUID) (AdminListingDetai
 			return out, err
 		}
 		out.Rental = &d
+	case charterServiceType:
+		d, err := s.charterDetail(ctx, s.pool, id, true)
+		if err != nil {
+			return out, err
+		}
+		out.Charter = &d
 	default:
 		return AdminListingDetail{}, ErrServiceTypeNotSupported
 	}

@@ -14,8 +14,15 @@ var (
 	ErrListingIncomplete     = httpx.NewError(http.StatusUnprocessableEntity, "listing_incomplete", "Listing chưa đủ thông tin để gửi duyệt")
 	ErrServiceTypeNotEnabled = httpx.NewError(http.StatusUnprocessableEntity, "service_type_not_enabled", "Loại dịch vụ này chưa được bật cho đối tác")
 	// ErrServiceTypeNotSupported: the catalog knows the type but listing has
-	// no detail model for it yet (private_charter today).
+	// no detail model for it yet.
 	ErrServiceTypeNotSupported = httpx.NewError(http.StatusUnprocessableEntity, "service_type_not_supported", "Loại dịch vụ này chưa hỗ trợ đăng bán")
+)
+
+var (
+	ErrNotCharterListing      = httpx.NewError(http.StatusUnprocessableEntity, "wrong_service_type", "Thao tác này chỉ áp dụng cho Listing xe bao chuyến")
+	ErrInvalidCharter         = httpx.NewError(http.StatusUnprocessableEntity, "invalid_charter", "Thông tin xe bao chuyến không hợp lệ")
+	ErrCharterServiceRequired = httpx.NewError(http.StatusUnprocessableEntity, "charter_service_required", "Cần khai báo khu vực phục vụ trước")
+	ErrCharterClassNotFound   = httpx.NewError(http.StatusNotFound, "not_found", "Không tìm thấy loại xe")
 )
 
 // supportedServiceType reports whether listing can sell serviceType. Every
@@ -23,7 +30,7 @@ var (
 // ErrServiceTypeNotSupported, so a new type fails closed until it is wired.
 func supportedServiceType(serviceType string) bool {
 	switch serviceType {
-	case attractionServiceType, rideServiceType, rentalServiceType:
+	case attractionServiceType, rideServiceType, rentalServiceType, charterServiceType:
 		return true
 	default:
 		return false

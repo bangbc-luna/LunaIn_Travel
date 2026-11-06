@@ -71,6 +71,7 @@ type PublicDetail struct {
 	Attraction         *AttractionDetail  `json:"attraction"`
 	Ride               *RideDetail        `json:"ride"`
 	Rental             *RentalDetail      `json:"rental"`
+	Charter            *CharterDetail     `json:"charter"`
 }
 
 func blankToNil(s *string) *string {
@@ -204,6 +205,12 @@ func (s *Service) PublicDetail(ctx context.Context, slug string) (PublicDetail, 
 				return err
 			}
 			out.Rental = &d
+		case charterServiceType:
+			d, err := s.charterDetail(ctx, tx, r.ID, false)
+			if err != nil {
+				return err
+			}
+			out.Charter = &d
 		default:
 			return ErrServiceTypeNotSupported
 		}
