@@ -70,7 +70,12 @@ var _ payment.PaymentHandler = (*Service)(nil)
 // then locks its trips (id order), releases other checkouts' overdue holds on
 // them (releaseOverdueOnTrips; their links are cancelled after commit),
 // re-reads its bookings and runs rideChecks (trip still scheduled at the hour
-// sold, seats free again for an expired leg, both legs or none). Only then the
+// sold, seats free again for an expired leg, both legs or none). A rental
+// checkout locks its vehicle models (id order), re-reads its bookings and
+// runs rentalChecks (awaiting_payment in time: yes; late: accepted, not yet
+// picked up, model active and one vehicle still free by peak, excluding the
+// booking itself); a confirmed rental then holds its vehicle with no end
+// (hold_until NULL), also when re-confirmed. Only then the
 // checkout and its bookings (id order) are locked FOR UPDATE, its payments
 // (id order) FOR NO KEY UPDATE, and the state is decided from the locked rows:
 //
@@ -145,6 +150,34 @@ func (s *Service) HandlePaid(ctx context.Context, tx pgx.Tx, ev payment.PaidEven
 			return payment.PaidOutcome{}, err
 		}
 	}
+	// A rental checkout: its vehicle models are locked before the checkout
+	// (DB §1.1), then its bookings re-read under them (every status or hold
+	// change of a rental booking holds its model lock) for rentalChecks.
+	if modelIDs := rentalModelIDs(rows); len(modelIDs) > 0 {
+		if s.beforeRentalLock != nil {
+			s.beforeRentalLock()
+		}
+		locked, err := s.listings.LockRentalModels(ctx, tx, modelIDs)
+		if err != nil {
+			return payment.PaidOutcome{}, err
+		}
+		// A rental hold lapses only by time (hold_until > now), never by a
+		// status change another tx makes: "on time" must be decided with the
+		// time read after waiting on the model lock, or a request committed
+		// meanwhile could have re-sold the vehicle (final review I1). A
+		// booking that became late since reconfirmChecks is errStateChanged.
+		now = s.clock.Now()
+		models := make(map[uuid.UUID]listing.RentalModel, len(locked))
+		for _, m := range locked {
+			models[m.ID] = m
+		}
+		if rows, err = q.ListCheckoutBookings(ctx, ev.CheckoutID); err != nil {
+			return payment.PaidOutcome{}, fmt.Errorf("list checkout bookings: %w", err)
+		}
+		if err := s.rentalChecks(ctx, tx, rows, models, rebookable, now); err != nil {
+			return payment.PaidOutcome{}, err
+		}
+	}
 
 	co, err := q.LockCheckout(ctx, ev.CheckoutID)
 	if err != nil {
@@ -194,14 +227,14 @@ func (s *Service) HandlePaid(ctx context.Context, tx pgx.Tx, ev payment.PaidEven
 	return out, nil
 }
 
-// lateBooking: expired, or pending_payment with the hold already past
-// release at now, or a pending_payment ride booking whose trip has already
-// departed.
+// lateBooking: expired, or unpaid (pending_payment, or an accepted request
+// awaiting_payment) with the hold already past release at now, or a
+// pending_payment ride booking whose trip has already departed.
 func lateBooking(b store.Booking, now time.Time) bool {
 	switch {
 	case b.Status == StatusExpired:
 		return true
-	case b.Status != StatusPendingPayment:
+	case b.Status != StatusPendingPayment && b.Status != StatusAwaitingPayment:
 		return false
 	case b.HoldReleaseAt != nil && !b.HoldReleaseAt.After(now):
 		return true
@@ -225,9 +258,9 @@ func rideTripIDs(rows []store.ListCheckoutBookingsRow) []uuid.UUID {
 
 // reconfirmChecks evaluates, before any checkout lock, whether each late
 // booking could still be (re-)confirmed. Bookings that are not late are
-// absent from the map. For a ride booking only the listing is checked here
-// (bookable listing, active partner); rideChecks adds the trip under its
-// lock.
+// absent from the map. For a ride or rental booking only the listing is
+// checked here (bookable listing, active partner); rideChecks adds the trip
+// and rentalChecks the vehicle model under their locks.
 func (s *Service) reconfirmChecks(ctx context.Context, tx pgx.Tx, rows []store.ListCheckoutBookingsRow, now time.Time) (map[uuid.UUID]bool, error) {
 	out := map[uuid.UUID]bool{}
 	var listingIDs []uuid.UUID
@@ -256,7 +289,7 @@ func (s *Service) reconfirmChecks(ctx context.Context, tx pgx.Tx, rows []store.L
 	}
 	for _, r := range check {
 		ok := bookable[r.Booking.ListingID]
-		if ok && r.Booking.ServiceType != serviceTypeRide {
+		if ok && r.Booking.ServiceType == serviceTypeAttraction {
 			var err error
 			if ok, err = s.slotStillOffered(ctx, tx, r, now); err != nil {
 				return nil, err
@@ -379,7 +412,7 @@ func (c *confirmation) eligible(b store.Booking) (bool, error) {
 	case lateBooking(b, c.now):
 		return false, errStateChanged
 	default:
-		return b.Status == StatusPendingPayment, nil
+		return b.Status == StatusPendingPayment || b.Status == StatusAwaitingPayment, nil
 	}
 }
 
@@ -424,8 +457,11 @@ func (c *confirmation) canTakeMoney(ctx context.Context) (bool, error) {
 	default:
 		return false, nil
 	}
+	// A request still requested, rejected or withdrawn (cancelled, above)
+	// cannot take money: only an accepted one (awaiting_payment, or expired
+	// after acceptance, see rentalChecks) can.
 	for _, b := range c.bookings {
-		if b.Status != StatusPendingPayment && b.Status != StatusExpired {
+		if b.Status != StatusPendingPayment && b.Status != StatusAwaitingPayment && b.Status != StatusExpired {
 			return false, nil
 		}
 		ok, err := c.eligible(b)
@@ -501,16 +537,25 @@ func (c *confirmation) confirm(ctx context.Context) (payment.PaidOutcome, error)
 			return c.out, err
 		}
 		switch {
-		case ok && b.Status == StatusPendingPayment:
+		case ok && (b.Status == StatusPendingPayment || b.Status == StatusAwaitingPayment):
 			if err := c.confirmBooking(ctx, b, nil); err != nil {
+				return c.out, err
+			}
+			// A confirmed rental holds its vehicle without end.
+			if err := c.s.holdForService(ctx, c.tx, b); err != nil {
 				return c.out, err
 			}
 			toPost = append(toPost, b)
 			results = appendOnce(results, ResultConfirmed)
 		case ok:
-			// An expired ride booking takes its seats again (rideChecks saw
-			// them free under the trip lock still held).
+			// An expired booking takes its capacity again: a ride booking
+			// its seats (rideChecks saw them free under the trip lock still
+			// held), a rental booking its vehicle (rentalChecks saw one free
+			// under the model lock still held).
 			if err := c.s.reserveRideSeats(ctx, c.tx, b, c.now); err != nil {
+				return c.out, err
+			}
+			if err := c.s.holdForService(ctx, c.tx, b); err != nil {
 				return c.out, err
 			}
 			reason := reasonLateReconfirm
@@ -520,7 +565,7 @@ func (c *confirmation) confirm(ctx context.Context) (payment.PaidOutcome, error)
 			toPost = append(toPost, b)
 			results = appendOnce(results, ResultReconfirmed)
 		default:
-			if b.Status == StatusPendingPayment {
+			if b.Status == StatusPendingPayment || b.Status == StatusAwaitingPayment {
 				if err := c.expireBooking(ctx, b); err != nil {
 					return c.out, err
 				}
@@ -610,18 +655,31 @@ func (c *confirmation) expireBooking(ctx context.Context, b store.Booking) error
 	if err := c.history(ctx, b, StatusExpired, &reason); err != nil {
 		return err
 	}
-	return c.s.releaseRideSeats(ctx, c.tx, b)
+	return c.s.releaseHold(ctx, c.tx, b)
 }
 
-// confirmBooking moves a locked booking to confirmed (from pending_payment,
-// or from expired with lateReason), writes its history and emails the
-// customer. The ledger posting follows in postLedger.
+// confirmBooking moves a locked booking to confirmed (from pending_payment
+// or awaiting_payment, or from expired with lateReason), writes its history
+// and emails the customer, and the partner of a Request Booking (it accepted
+// the request and must now serve it). The ledger posting follows in
+// postLedger.
 func (c *confirmation) confirmBooking(ctx context.Context, b store.Booking, lateReason *string) error {
 	if err := c.q.ConfirmBooking(ctx, store.ConfirmBookingParams{Now: c.now, ID: b.ID}); err != nil {
 		return fmt.Errorf("confirm booking: %w", err)
 	}
 	if err := c.history(ctx, b, StatusConfirmed, lateReason); err != nil {
 		return err
+	}
+	if b.BookingMode == bookingModeRequest {
+		text := "Xin chào,\n\n" +
+			"Đơn " + b.Code + " (sử dụng lúc " + vnTime(b.ServiceStartAt) + ") đã được khách thanh toán " +
+			formatVND(b.GrossAmount) + " và đã được xác nhận.\n"
+		if b.Status == StatusExpired {
+			text += "Lưu ý: đơn đã được thanh toán trễ; bạn vẫn phải phục vụ vì đã chấp nhận yêu cầu.\n"
+		}
+		if err := c.s.emailPartner(ctx, c.tx, b.PartnerID, "Đơn "+b.Code+" đã được thanh toán", text); err != nil {
+			return err
+		}
 	}
 	return c.s.enqueueEmail(ctx, c.tx, mailer.Message{
 		To:      b.ContactEmail,

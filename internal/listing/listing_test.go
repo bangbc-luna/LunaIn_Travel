@@ -96,8 +96,8 @@ func TestCreate_RejectsUnknownServiceType(t *testing.T) {
 // Ruling 5: only attraction_ticket can be listed for now.
 func TestCreate_UnsupportedServiceType422(t *testing.T) {
 	e := newEnv(t)
-	p := e.partner(t, "Alpha", attraction, "self_drive_rental")
-	_, err := e.Svc.Create(context.Background(), p.ID, p.OwnerUserID, listing.CreateInput{ServiceType: "self_drive_rental", Title: "Xe"})
+	p := e.partner(t, "Alpha", attraction, "private_charter")
+	_, err := e.Svc.Create(context.Background(), p.ID, p.OwnerUserID, listing.CreateInput{ServiceType: "private_charter", Title: "Xe"})
 	requireErr(t, err, http.StatusUnprocessableEntity, "service_type_not_supported")
 	require.Contains(t, err.Error(), "Loại dịch vụ này chưa hỗ trợ đăng bán")
 	require.Zero(t, e.count(t, `SELECT count(*) FROM listings`))
@@ -109,8 +109,8 @@ func TestCreate_UnsupportedServiceType422(t *testing.T) {
 func TestUnsupportedServiceType_FailsClosed(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
-	p := e.partner(t, "Alpha", attraction, "self_drive_rental")
-	id := e.rawListing(t, p, "self_drive_rental", "Xe")
+	p := e.partner(t, "Alpha", attraction, "private_charter")
+	id := e.rawListing(t, p, "private_charter", "Xe")
 	_, _, err := e.Svc.SetImages(ctx, p.ID, p.OwnerUserID, id, []uuid.UUID{e.upload(t, p.OwnerUserID, "listing_image")}, nil)
 	require.NoError(t, err)
 

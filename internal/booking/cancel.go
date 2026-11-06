@@ -89,7 +89,9 @@ type cancellation struct {
 	bank         *BankAccount // customer only: refund account, saved as default
 }
 
-// CancelByCustomer cancels the customer's own confirmed booking. Another
+// CancelByCustomer cancels the customer's own confirmed booking, or
+// withdraws for free an unpaid Request Booking (requested or
+// awaiting_payment, see withdrawRequest; bank is then ignored). Another
 // customer's booking is ErrBookingNotFound; any other status is
 // ErrInvalidBookingState. The refund follows the policy snapshot against
 // original_service_start_at; with bank the refund is pending (and the account
@@ -152,7 +154,8 @@ func normalizeAdminReason(reason string) (string, error) {
 // cancelRideCheckout (both legs of a round trip together).
 //
 // Lock order (DB §1.1): the customer's refund account (a users child) is
-// saved first, then the checkout and the booking are locked FOR UPDATE and
+// saved first, then the capacity rows (lockCheckoutCapacity), then the
+// checkout and the booking are locked FOR UPDATE and
 // the state re-checked, then cancelLocked does the rest.
 func (s *Service) cancel(ctx context.Context, bookingID uuid.UUID, owner *uuid.UUID, c cancellation) error {
 	b, err := store.New(s.pool).GetBooking(ctx, bookingID)
@@ -164,6 +167,11 @@ func (s *Service) cancel(ctx context.Context, bookingID uuid.UUID, owner *uuid.U
 	}
 	if b.ServiceType == serviceTypeRide {
 		return s.cancelRideCheckout(ctx, bookingID, owner, c)
+	}
+	// An unpaid Request Booking is withdrawn by its customer for free; the
+	// bank account is ignored (nothing to refund).
+	if c.kind == cancelKindCustomer && owner != nil && requestWithdrawable(b) {
+		return s.withdrawRequest(ctx, *owner, b.CheckoutID, bookingID)
 	}
 	// Ownership (404) first, then the bank account (422), then the state (409).
 	if c.bank != nil {
@@ -182,6 +190,10 @@ func (s *Service) cancel(ctx context.Context, bookingID uuid.UUID, owner *uuid.U
 			if _, err := s.payments.SaveRefundAccountTx(ctx, tx, b.CustomerID, *c.bank); err != nil {
 				return err
 			}
+		}
+		// The capacity rows (a rental's model) come before the checkout.
+		if err := s.lockCheckoutCapacity(ctx, tx, b.CheckoutID); err != nil {
+			return err
 		}
 		co, err := q.LockCheckout(ctx, b.CheckoutID)
 		if err != nil {
@@ -256,9 +268,10 @@ func (s *Service) cancelLocked(ctx context.Context, tx pgx.Tx, co store.Checkout
 	if err := s.ledger.Release(ctx, tx, b.ID); err != nil {
 		return 0, fmt.Errorf("release: %w", err)
 	}
-	// A ride booking's seats go back to its trip (the caller holds the trip
-	// lock); nothing for an attraction.
-	if err := s.releaseRideSeats(ctx, tx, b); err != nil {
+	// A ride booking's seats go back to its trip, a rental's vehicle is no
+	// longer held (the caller holds the capacity lock); nothing for an
+	// attraction.
+	if err := s.releaseHold(ctx, tx, b); err != nil {
 		return 0, err
 	}
 	if c.actorKind == actorAdmin {

@@ -165,6 +165,27 @@ func (s *Service) requireComplete(ctx context.Context, tx pgx.Tx, cur store.List
 		if slots == 0 {
 			missing = append(missing, "ít nhất 1 khung giờ đang hoạt động")
 		}
+	case rentalServiceType:
+		// The location items above are the store address.
+		if _, err := q.GetRentalStore(ctx, cur.ID); errors.Is(err, pgx.ErrNoRows) {
+			missing = append(missing, "thông tin cửa hàng (giờ giao nhận)")
+		} else if err != nil {
+			return fmt.Errorf("get rental store: %w", err)
+		}
+		models, err := q.CountRentableRentalModels(ctx, cur.ID)
+		if err != nil {
+			return fmt.Errorf("count rental models: %w", err)
+		}
+		if models == 0 {
+			missing = append(missing, "ít nhất 1 mẫu xe đang cho thuê")
+		}
+		points, err := q.CountActiveRentalPickupPoints(ctx, cur.ID)
+		if err != nil {
+			return fmt.Errorf("count rental pickup points: %w", err)
+		}
+		if points == 0 {
+			missing = append(missing, "ít nhất 1 điểm nhận xe đang hoạt động")
+		}
 	case rideServiceType:
 		if _, err := q.GetRideRoute(ctx, cur.ID); errors.Is(err, pgx.ErrNoRows) {
 			missing = append(missing, "tuyến (điểm đi, điểm đến)")
@@ -376,6 +397,7 @@ type AdminListingDetail struct {
 	CancellationPolicy []CancellationTier `json:"cancellation_policy"`
 	Attraction         *AttractionDetail  `json:"attraction"`
 	Ride               *RideDetail        `json:"ride"`
+	Rental             *RentalDetail      `json:"rental"`
 	AuditLog           []AuditEntry       `json:"audit_log"`
 }
 
@@ -411,6 +433,12 @@ func (s *Service) AdminGet(ctx context.Context, id uuid.UUID) (AdminListingDetai
 			return out, err
 		}
 		out.Ride = &d
+	case rentalServiceType:
+		d, err := s.rentalDetail(ctx, s.pool, id, true)
+		if err != nil {
+			return out, err
+		}
+		out.Rental = &d
 	default:
 		return AdminListingDetail{}, ErrServiceTypeNotSupported
 	}

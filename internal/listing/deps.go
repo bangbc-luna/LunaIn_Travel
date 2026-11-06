@@ -44,7 +44,8 @@ type FileChecker interface {
 }
 
 // BookingGuard counts active (pending_payment or confirmed) bookings so the
-// partner cannot move or close a schedule that customers already hold.
+// partner cannot move or close a schedule that customers already hold, nor
+// lower a rental quantity below the vehicles held.
 // Implemented by booking.Guard. Callers hold the listing FOR NO KEY UPDATE in
 // tx before asking (see AddClosedDate). date and from are read as Vietnam
 // calendar dates.
@@ -53,6 +54,11 @@ type BookingGuard interface {
 	// weekdays is a mask (Monday = bit 0 ... Sunday = bit 6): only visit
 	// dates on those weekdays count.
 	ActiveBookingsForSlot(ctx context.Context, tx pgx.Tx, slotID uuid.UUID, from time.Time, weekdays int) (int, error)
+	// RentalPeakHeld returns, per vehicle model, the peak number of bookings
+	// holding a vehicle at the same instant inside [from, to) (to nil:
+	// open-ended), as seen at now; a model without holds is absent. The
+	// caller holds the models FOR UPDATE in tx.
+	RentalPeakHeld(ctx context.Context, tx pgx.Tx, modelIDs []uuid.UUID, from time.Time, to *time.Time, now time.Time) (map[uuid.UUID]int, error)
 }
 
 // Deps are the collaborators of Service.

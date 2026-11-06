@@ -45,6 +45,9 @@ type Fake struct {
 	// statusDelay: every GetStatus waits this long first, or until its ctx
 	// ends (a slow or hanging provider).
 	statusDelay time.Duration
+	// onCreateLink, when set, runs once at the start of the next CreateLink,
+	// before the link exists (a race injected by tests).
+	onCreateLink func(LinkRequest)
 }
 
 // Fake provider error codes (PayOS-like).
@@ -66,6 +69,14 @@ func (f *Fake) FailCreateLink(err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.createErr = err
+}
+
+// OnNextCreateLink makes the next CreateLink run hook first, outside the
+// Fake's lock and before the link exists; the hook runs once.
+func (f *Fake) OnNextCreateLink(hook func(LinkRequest)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.onCreateLink = hook
 }
 
 // LoseNextCreateResponse makes the next CreateLink create the link but
@@ -128,6 +139,13 @@ func (f *Fake) SetState(orderCode int64, state string) {
 // used once: a second CreateLink with it is a *ProviderError.
 func (f *Fake) CreateLink(_ context.Context, req LinkRequest) (Link, error) {
 	f.mu.Lock()
+	if hook := f.onCreateLink; hook != nil {
+		// Run outside the lock: the hook may call back into the Fake.
+		f.onCreateLink = nil
+		f.mu.Unlock()
+		hook(req)
+		f.mu.Lock()
+	}
 	defer f.mu.Unlock()
 	if f.createErr != nil {
 		return Link{}, f.createErr

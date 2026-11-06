@@ -231,7 +231,9 @@ LIMIT 20;
 
 -- Public search over visible_listings (the single visibility rule, see
 -- migration 00010). price_from is the cheapest active ticket type or, for a
--- ride, the cheapest active schedule, 0 when there is none (prices are > 0 by
+-- ride, the cheapest active schedule, for a rental the cheapest active model in
+-- stock (rentals without an active pickup point are unbookable and hidden from
+-- the search), 0 when there is none (prices are > 0 by
 -- CHECK; sqlc cannot type a nullable
 -- aggregate, so 0 means NULL). With q: ILIKE on the escaped pattern
 -- (ESCAPE '\') or trigram similarity >= 0.3, best match first; without q:
@@ -242,9 +244,14 @@ SELECT sqlc.embed(l),
                  WHERE tt.listing_id = l.id AND tt.active),
                 (SELECT min(rs.price_per_seat) FROM ride_schedules rs
                  WHERE rs.listing_id = l.id AND rs.active),
+                (SELECT min(m.price_per_day) FROM rental_vehicle_models m
+                 WHERE m.listing_id = l.id AND m.active AND m.quantity > 0
+                   AND EXISTS (SELECT 1 FROM rental_pickup_points pp WHERE pp.listing_id = l.id AND pp.active)),
                 0)::bigint AS price_from
 FROM visible_listings l
-WHERE (sqlc.narg(service_type)::text IS NULL OR l.service_type = sqlc.narg(service_type))
+WHERE (l.service_type <> 'self_drive_rental'
+       OR EXISTS (SELECT 1 FROM rental_pickup_points pp WHERE pp.listing_id = l.id AND pp.active))
+  AND (sqlc.narg(service_type)::text IS NULL OR l.service_type = sqlc.narg(service_type))
   AND (sqlc.narg(province_code)::text IS NULL OR l.province_code = sqlc.narg(province_code))
   AND (sqlc.narg(q)::text IS NULL
        OR public.f_unaccent(lower(l.title)) ILIKE '%' || public.f_unaccent(lower(sqlc.narg(pattern)::text)) || '%' ESCAPE '\'
@@ -260,6 +267,9 @@ SELECT sqlc.embed(l),
                  WHERE tt.listing_id = l.id AND tt.active),
                 (SELECT min(rs.price_per_seat) FROM ride_schedules rs
                  WHERE rs.listing_id = l.id AND rs.active),
+                (SELECT min(m.price_per_day) FROM rental_vehicle_models m
+                 WHERE m.listing_id = l.id AND m.active AND m.quantity > 0
+                   AND EXISTS (SELECT 1 FROM rental_pickup_points pp WHERE pp.listing_id = l.id AND pp.active)),
                 0)::bigint AS price_from
 FROM visible_listings l
 WHERE l.slug = @slug;
@@ -511,3 +521,106 @@ WHERE t.status = 'scheduled'
   AND t.seat_capacity - t.seats_reserved >= @seats::int
 ORDER BY t.departure_at, t.price_per_seat, t.id
 LIMIT @lim OFFSET @off;
+
+-- name: GetRentalStore :one
+SELECT * FROM rental_stores WHERE listing_id = @listing_id;
+
+-- name: UpsertRentalStore :one
+INSERT INTO rental_stores (listing_id, handover_open, handover_close, delivery_available,
+    deposit_terms, documents_terms, late_fee_terms, allowed_area_terms, other_terms, created_at, updated_at)
+VALUES (@listing_id, @handover_open, @handover_close, @delivery_available,
+    sqlc.narg(deposit_terms), sqlc.narg(documents_terms), sqlc.narg(late_fee_terms),
+    sqlc.narg(allowed_area_terms), sqlc.narg(other_terms), @now, @now)
+ON CONFLICT (listing_id) DO UPDATE
+SET handover_open = EXCLUDED.handover_open, handover_close = EXCLUDED.handover_close,
+    delivery_available = EXCLUDED.delivery_available, deposit_terms = EXCLUDED.deposit_terms,
+    documents_terms = EXCLUDED.documents_terms, late_fee_terms = EXCLUDED.late_fee_terms,
+    allowed_area_terms = EXCLUDED.allowed_area_terms, other_terms = EXCLUDED.other_terms,
+    updated_at = EXCLUDED.updated_at
+RETURNING *;
+
+-- name: InsertRentalPickupPoint :one
+INSERT INTO rental_pickup_points (id, listing_id, name, address, province_code, ward_code, delivery_fee,
+    active, created_at, updated_at)
+VALUES (@id, @listing_id, @name, @address, @province_code, @ward_code, @delivery_fee, true, @now, @now)
+RETURNING *;
+
+-- name: LockRentalPickupPoint :one
+SELECT * FROM rental_pickup_points WHERE id = @id AND listing_id = @listing_id FOR UPDATE;
+
+-- name: GetRentalPickupPoint :one
+SELECT * FROM rental_pickup_points WHERE id = @id AND listing_id = @listing_id;
+
+-- name: ListRentalPickupPoints :many
+SELECT * FROM rental_pickup_points
+WHERE listing_id = @listing_id AND (@include_inactive::bool OR active)
+ORDER BY created_at, id;
+
+-- name: UpdateRentalPickupPoint :one
+UPDATE rental_pickup_points
+SET name = @name, address = @address, delivery_fee = @delivery_fee, active = @active, updated_at = @now
+WHERE id = @id
+RETURNING *;
+
+-- name: CountActiveRentalPickupPoints :one
+SELECT count(*) FROM rental_pickup_points WHERE listing_id = @listing_id AND active;
+
+-- name: CountRentableRentalModels :one
+SELECT count(*) FROM rental_vehicle_models WHERE listing_id = @listing_id AND active AND quantity > 0;
+
+-- name: InsertRentalModel :one
+INSERT INTO rental_vehicle_models (id, listing_id, vehicle_kind, name, model_year, seats, included_items, tags,
+    price_per_day, quantity, cover_file_id, active, created_at, updated_at)
+VALUES (@id, @listing_id, @vehicle_kind, @name, @model_year, @seats, sqlc.narg(included_items), @tags::text[],
+    @price_per_day, @quantity, sqlc.narg(cover_file_id), true, @now, @now)
+RETURNING *;
+
+-- name: LockRentalModel :one
+SELECT * FROM rental_vehicle_models WHERE id = @id AND listing_id = @listing_id FOR UPDATE;
+
+-- name: UpdateRentalModel :one
+UPDATE rental_vehicle_models
+SET name = @name, model_year = @model_year, seats = @seats, included_items = sqlc.narg(included_items),
+    tags = @tags::text[], price_per_day = @price_per_day, quantity = @quantity,
+    cover_file_id = sqlc.narg(cover_file_id), active = @active, updated_at = @now
+WHERE id = @id
+RETURNING *;
+
+-- name: ListRentalModels :many
+SELECT * FROM rental_vehicle_models
+WHERE listing_id = @listing_id AND (@include_inactive::bool OR active)
+ORDER BY created_at, id;
+
+-- name: GetRentalModelListingID :one
+SELECT listing_id FROM rental_vehicle_models WHERE id = @id;
+
+-- Lock order (DB §1.1): id ascending.
+-- name: LockRentalModels :many
+SELECT * FROM rental_vehicle_models WHERE id = ANY(@ids::uuid[]) ORDER BY id FOR UPDATE;
+
+-- Candidates of the public rental search: active in-stock models of visible
+-- rental listings in the province whose store handover window (Vietnam time,
+-- both ends included) covers both the pickup and the return time and that
+-- have an active pickup point. request_payment_hours is read separately by
+-- RequestPaymentHours (same tx) for the period check.
+-- name: ListRentalCandidates :many
+SELECT sqlc.embed(m),
+       l.slug AS listing_slug, l.title AS listing_title, l.address AS listing_address,
+       l.cover_file_id AS listing_cover_file_id,
+       s.handover_open, s.handover_close
+FROM rental_vehicle_models m
+JOIN visible_listings l ON l.id = m.listing_id
+JOIN rental_stores s ON s.listing_id = l.id
+WHERE l.service_type = 'self_drive_rental'
+  AND l.province_code = @province_code
+  AND m.active AND m.quantity > 0
+  AND m.seats >= @min_seats::int
+  AND (sqlc.narg(vehicle_kind)::text IS NULL OR m.vehicle_kind = sqlc.narg(vehicle_kind))
+  AND (sqlc.arg(pickup_at)::timestamptz AT TIME ZONE 'Asia/Ho_Chi_Minh')::time BETWEEN s.handover_open AND s.handover_close
+  AND (sqlc.arg(return_at)::timestamptz AT TIME ZONE 'Asia/Ho_Chi_Minh')::time BETWEEN s.handover_open AND s.handover_close
+  AND EXISTS (SELECT 1 FROM rental_pickup_points pp WHERE pp.listing_id = l.id AND pp.active)
+ORDER BY m.price_per_day, m.id
+LIMIT @cap;
+
+-- name: RequestPaymentHours :one
+SELECT request_payment_hours FROM platform_settings WHERE id = 1;

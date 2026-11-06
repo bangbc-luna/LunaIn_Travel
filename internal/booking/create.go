@@ -59,6 +59,7 @@ const (
 	codeInsertTries    = 5
 	endpointAttraction = "POST /v1/bookings/attraction"
 	endpointRide       = "POST /v1/bookings/ride"
+	endpointRental     = "POST /v1/bookings/rental"
 )
 
 var (
@@ -90,6 +91,9 @@ type Deps struct {
 	Identity *identity.Service
 	Payments *payment.Service
 	Ledger   *ledger.Service
+	// Partners finds the partner owner's email (*partner.Service). May be
+	// nil in tests: partner emails are then only logged.
+	Partners PartnerContact
 	// Jobs queues customer emails (outbox). May be nil in tests that send
 	// no email: emails are then only logged.
 	Jobs *river.Client[pgx.Tx]
@@ -106,16 +110,20 @@ type Service struct {
 	identity *identity.Service
 	payments *payment.Service
 	ledger   *ledger.Service
+	partners PartnerContact
 	jobs     *river.Client[pgx.Tx]
 	log      *slog.Logger
 
 	// Periodic jobs: rows backing off after a failure, one tracker per job.
-	holdBackoff, noShowBackoff, completeBackoff, releaseBackoff jobBackoff
+	holdBackoff, noShowBackoff, completeBackoff, releaseBackoff, requestBackoff, finishBackoff jobBackoff
 	// batchSize overrides jobBatchSize when > 0 (tests).
 	batchSize int32
 	// beforeItem, when set (tests), runs inside each job item's transaction
 	// before any work; an error fails the item.
 	beforeItem func(id uuid.UUID) error
+	// beforeRentalLock, when set (tests), runs in HandlePaid just before it
+	// locks a rental checkout's vehicle models.
+	beforeRentalLock func()
 }
 
 // NewService builds a Service.
@@ -126,7 +134,7 @@ func NewService(d Deps) *Service {
 	}
 	return &Service{
 		pool: d.Pool, clock: d.Clock, listings: d.Listings, catalog: d.Catalog, settings: d.Settings,
-		identity: d.Identity, payments: d.Payments, ledger: d.Ledger, jobs: d.Jobs, log: log,
+		identity: d.Identity, payments: d.Payments, ledger: d.Ledger, partners: d.Partners, jobs: d.Jobs, log: log,
 	}
 }
 
@@ -621,8 +629,8 @@ func (s *Service) insertCheckout(ctx context.Context, q *store.Queries, customer
 	return uuid.Nil, errors.New("checkout code: too many collisions")
 }
 
-// Pay (re)creates the payment link of the customer's pending_payment
-// booking and returns the booking. Without a pending payment (a refunded
+// Pay (re)creates the payment link of the customer's pending_payment (or
+// awaiting_payment) booking and returns the booking. Without a pending payment (a refunded
 // underpayment) payment.ReissueAfterMismatch reserves a new one first.
 // Another customer's booking is ErrBookingNotFound. No DB tx is open while the provider is called.
 func (s *Service) Pay(ctx context.Context, customerID, id uuid.UUID) (BookingView, error) {
@@ -633,19 +641,34 @@ func (s *Service) Pay(ctx context.Context, customerID, id uuid.UUID) (BookingVie
 	if err != nil {
 		return BookingView{}, fmt.Errorf("get booking: %w", err)
 	}
-	if b.Status != StatusPendingPayment {
+	// An accepted request is paid like a pending_payment booking, before its
+	// hold_expires_at (= payment_due_at); past it the hold has lapsed even if
+	// ExpireHolds has not run yet.
+	if b.Status != StatusPendingPayment && b.Status != StatusAwaitingPayment {
 		return BookingView{}, ErrBookingNotPayable
 	}
 	if b.HoldExpiresAt == nil || !s.clock.Now().Before(*b.HoldExpiresAt) {
 		return BookingView{}, ErrHoldExpired
 	}
-	_, err = s.payments.StartPayment(ctx, b.CheckoutID)
+	p, err := s.payments.StartPayment(ctx, b.CheckoutID)
 	if errors.Is(err, payment.ErrPaymentNotFound) {
 		// No pending payment: after a refunded underpayment a new one is
 		// reserved with the same deadline (M-4), then its link created.
 		if _, err = s.payments.ReissueAfterMismatch(ctx, b.CheckoutID); err == nil {
-			_, err = s.payments.StartPayment(ctx, b.CheckoutID)
+			p, err = s.payments.StartPayment(ctx, b.CheckoutID)
 		}
+	}
+	if err == nil && (p.Status == payment.StatusCancelled || p.Status == payment.StatusExpired) {
+		// The payment was cancelled (a withdraw) or expired while its link
+		// was being created: the link may now be live at the provider, after
+		// the withdraw or expiry already cancelled links. Cancel it (money
+		// paid on it anyway is refunded by the webhook). An expired payment
+		// answers like the pre-check: the hold has lapsed.
+		s.cancelLink(ctx, p.OrderCode)
+		if p.Status == payment.StatusExpired {
+			return BookingView{}, ErrHoldExpired
+		}
+		return BookingView{}, ErrBookingNotPayable
 	}
 	if err != nil {
 		if errors.Is(err, payment.ErrPaymentExpired) {

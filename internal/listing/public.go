@@ -70,6 +70,7 @@ type PublicDetail struct {
 	CancellationPolicy []CancellationTier `json:"cancellation_policy"`
 	Attraction         *AttractionDetail  `json:"attraction"`
 	Ride               *RideDetail        `json:"ride"`
+	Rental             *RentalDetail      `json:"rental"`
 }
 
 func blankToNil(s *string) *string {
@@ -197,6 +198,12 @@ func (s *Service) PublicDetail(ctx context.Context, slug string) (PublicDetail, 
 				return err
 			}
 			out.Ride = &d
+		case rentalServiceType:
+			d, err := s.rentalDetail(ctx, tx, r.ID, false)
+			if err != nil {
+				return err
+			}
+			out.Rental = &d
 		default:
 			return ErrServiceTypeNotSupported
 		}

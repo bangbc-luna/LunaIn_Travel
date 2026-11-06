@@ -12,6 +12,33 @@ import (
 	"github.com/google/uuid"
 )
 
+const acceptRequest = `-- name: AcceptRequest :exec
+UPDATE bookings
+SET status = 'awaiting_payment', accepted_at = $1::timestamptz,
+    payment_due_at = $2::timestamptz, hold_expires_at = $2::timestamptz,
+    hold_release_at = $3::timestamptz, updated_at = $1
+WHERE id = $4
+`
+
+type AcceptRequestParams struct {
+	Now           time.Time
+	PaymentDueAt  time.Time
+	HoldReleaseAt time.Time
+	ID            uuid.UUID
+}
+
+// The partner accepts a Request Booking: the customer pays before
+// payment_due_at (= hold_expires_at); the hold is released at hold_release_at.
+func (q *Queries) AcceptRequest(ctx context.Context, arg AcceptRequestParams) error {
+	_, err := q.db.Exec(ctx, acceptRequest,
+		arg.Now,
+		arg.PaymentDueAt,
+		arg.HoldReleaseAt,
+		arg.ID,
+	)
+	return err
+}
+
 const cancelBooking = `-- name: CancelBooking :exec
 UPDATE bookings
 SET status = 'cancelled', cancelled_at = $1::timestamptz, cancel_kind = $2::text,
@@ -342,6 +369,34 @@ func (q *Queries) GetIdempotencyKey(ctx context.Context, arg GetIdempotencyKeyPa
 	return i, err
 }
 
+const getRentalDetails = `-- name: GetRentalDetails :one
+SELECT booking_id, listing_id, vehicle_model_id, pickup_point_id, pickup_at, return_at, period, days, model_name, pickup_point_name, pickup_address, destination_province_code, holds_vehicle, hold_until, created_at, updated_at FROM booking_rental_details WHERE booking_id = $1
+`
+
+func (q *Queries) GetRentalDetails(ctx context.Context, bookingID uuid.UUID) (BookingRentalDetail, error) {
+	row := q.db.QueryRow(ctx, getRentalDetails, bookingID)
+	var i BookingRentalDetail
+	err := row.Scan(
+		&i.BookingID,
+		&i.ListingID,
+		&i.VehicleModelID,
+		&i.PickupPointID,
+		&i.PickupAt,
+		&i.ReturnAt,
+		&i.Period,
+		&i.Days,
+		&i.ModelName,
+		&i.PickupPointName,
+		&i.PickupAddress,
+		&i.DestinationProvinceCode,
+		&i.HoldsVehicle,
+		&i.HoldUntil,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getRideDetails = `-- name: GetRideDetails :one
 SELECT booking_id, listing_id, trip_id, seats, direction, origin_name, dest_name, created_at, updated_at FROM booking_ride_details WHERE booking_id = $1
 `
@@ -361,6 +416,25 @@ func (q *Queries) GetRideDetails(ctx context.Context, bookingID uuid.UUID) (Book
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const handOverRental = `-- name: HandOverRental :exec
+UPDATE bookings
+SET status = 'in_service', in_service_at = $1::timestamptz, checked_in_at = $1::timestamptz, updated_at = $1
+WHERE id = $2
+`
+
+type HandOverRentalParams struct {
+	Now time.Time
+	ID  uuid.UUID
+}
+
+// Rental handover (QR): the confirmed booking is in_service; checked_in_at is
+// set too so a second scan answers "already" (checked_in is forbidden for
+// Request Bookings).
+func (q *Queries) HandOverRental(ctx context.Context, arg HandOverRentalParams) error {
+	_, err := q.db.Exec(ctx, handOverRental, arg.Now, arg.ID)
+	return err
 }
 
 const hasReschedule = `-- name: HasReschedule :one
@@ -524,6 +598,123 @@ func (q *Queries) InsertPendingBooking(ctx context.Context, arg InsertPendingBoo
 		arg.CustomerNote,
 		arg.HoldExpiresAt,
 		arg.HoldReleaseAt,
+		arg.QrToken,
+		arg.Now,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const insertRentalDetail = `-- name: InsertRentalDetail :exec
+INSERT INTO booking_rental_details (
+    booking_id, listing_id, vehicle_model_id, pickup_point_id, pickup_at, return_at, days,
+    model_name, pickup_point_name, pickup_address, destination_province_code,
+    holds_vehicle, hold_until, created_at, updated_at
+) VALUES (
+    $1, $2, $3, $4, $5, $6, $7::int,
+    $8, $9, $10, $11,
+    true, $12, $13, $13
+)
+`
+
+type InsertRentalDetailParams struct {
+	BookingID               uuid.UUID
+	ListingID               uuid.UUID
+	VehicleModelID          uuid.UUID
+	PickupPointID           uuid.UUID
+	PickupAt                time.Time
+	ReturnAt                time.Time
+	Days                    int32
+	ModelName               string
+	PickupPointName         string
+	PickupAddress           string
+	DestinationProvinceCode string
+	HoldUntil               *time.Time
+	Now                     time.Time
+}
+
+func (q *Queries) InsertRentalDetail(ctx context.Context, arg InsertRentalDetailParams) error {
+	_, err := q.db.Exec(ctx, insertRentalDetail,
+		arg.BookingID,
+		arg.ListingID,
+		arg.VehicleModelID,
+		arg.PickupPointID,
+		arg.PickupAt,
+		arg.ReturnAt,
+		arg.Days,
+		arg.ModelName,
+		arg.PickupPointName,
+		arg.PickupAddress,
+		arg.DestinationProvinceCode,
+		arg.HoldUntil,
+		arg.Now,
+	)
+	return err
+}
+
+const insertRequestedBooking = `-- name: InsertRequestedBooking :execrows
+INSERT INTO bookings (
+    id, code, checkout_id, customer_id, partner_id, listing_id, service_type, booking_mode, status,
+    service_start_at, service_end_at, original_service_start_at,
+    gross_amount, commission_rate_bps, commission_amount, cancellation_policy_snapshot,
+    contact_name, contact_phone, contact_email, customer_note,
+    response_due_at, qr_token, created_at, updated_at
+) VALUES (
+    $1, $2, $3, $4, $5, $6, $7, 'request', 'requested',
+    $8, $9, $8,
+    $10, $11, $12, $13,
+    $14, $15, $16, $17,
+    $18, $19, $20, $20
+)
+ON CONFLICT (code) DO NOTHING
+`
+
+type InsertRequestedBookingParams struct {
+	ID                         uuid.UUID
+	Code                       string
+	CheckoutID                 uuid.UUID
+	CustomerID                 uuid.UUID
+	PartnerID                  uuid.UUID
+	ListingID                  uuid.UUID
+	ServiceType                string
+	ServiceStartAt             time.Time
+	ServiceEndAt               time.Time
+	GrossAmount                int64
+	CommissionRateBps          int32
+	CommissionAmount           int64
+	CancellationPolicySnapshot []byte
+	ContactName                string
+	ContactPhone               string
+	ContactEmail               string
+	CustomerNote               *string
+	ResponseDueAt              *time.Time
+	QrToken                    string
+	Now                        time.Time
+}
+
+// A Request Booking awaiting the partner: no hold columns, no payment yet.
+func (q *Queries) InsertRequestedBooking(ctx context.Context, arg InsertRequestedBookingParams) (int64, error) {
+	result, err := q.db.Exec(ctx, insertRequestedBooking,
+		arg.ID,
+		arg.Code,
+		arg.CheckoutID,
+		arg.CustomerID,
+		arg.PartnerID,
+		arg.ListingID,
+		arg.ServiceType,
+		arg.ServiceStartAt,
+		arg.ServiceEndAt,
+		arg.GrossAmount,
+		arg.CommissionRateBps,
+		arg.CommissionAmount,
+		arg.CancellationPolicySnapshot,
+		arg.ContactName,
+		arg.ContactPhone,
+		arg.ContactEmail,
+		arg.CustomerNote,
+		arg.ResponseDueAt,
 		arg.QrToken,
 		arg.Now,
 	)
@@ -785,22 +976,29 @@ SELECT b.id, b.code, b.checkout_id, b.customer_id, b.partner_id, b.listing_id, b
        COALESCE(to_char(d.slot_start, 'HH24:MI'), '')::text AS slot_start,
        COALESCE(to_char(d.slot_end, 'HH24:MI'), '')::text AS slot_end,
        r.trip_id,
-       r.seats
+       r.seats,
+       rd.vehicle_model_id,
+       rd.pickup_at AS rental_pickup_at,
+       rd.return_at AS rental_return_at
 FROM bookings b
 LEFT JOIN booking_attraction_details d ON d.booking_id = b.id
 LEFT JOIN booking_ride_details r ON r.booking_id = b.id
+LEFT JOIN booking_rental_details rd ON rd.booking_id = b.id
 WHERE b.checkout_id = $1
 ORDER BY b.id
 `
 
 type ListCheckoutBookingsRow struct {
-	Booking    Booking
-	VisitDate  string
-	TimeSlotID *uuid.UUID
-	SlotStart  string
-	SlotEnd    string
-	TripID     *uuid.UUID
-	Seats      *int32
+	Booking        Booking
+	VisitDate      string
+	TimeSlotID     *uuid.UUID
+	SlotStart      string
+	SlotEnd        string
+	TripID         *uuid.UUID
+	Seats          *int32
+	VehicleModelID *uuid.UUID
+	RentalPickupAt *time.Time
+	RentalReturnAt *time.Time
 }
 
 // Unlocked read of a checkout's bookings with what re-confirmation needs.
@@ -859,10 +1057,42 @@ func (q *Queries) ListCheckoutBookings(ctx context.Context, checkoutID uuid.UUID
 			&i.SlotEnd,
 			&i.TripID,
 			&i.Seats,
+			&i.VehicleModelID,
+			&i.RentalPickupAt,
+			&i.RentalReturnAt,
 		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listCheckoutRentalModels = `-- name: ListCheckoutRentalModels :many
+SELECT DISTINCT d.vehicle_model_id FROM booking_rental_details d
+JOIN bookings b ON b.id = d.booking_id
+WHERE b.checkout_id = $1
+ORDER BY d.vehicle_model_id
+`
+
+// Models of a checkout's rental bookings, unlocked (a booking's model never
+// changes), so the caller can lock them before the checkout.
+func (q *Queries) ListCheckoutRentalModels(ctx context.Context, checkoutID uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listCheckoutRentalModels, checkoutID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var vehicle_model_id uuid.UUID
+		if err := rows.Scan(&vehicle_model_id); err != nil {
+			return nil, err
+		}
+		items = append(items, vehicle_model_id)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -935,7 +1165,7 @@ func (q *Queries) ListCheckoutsRideBookings(ctx context.Context, checkoutIds []u
 
 const listHoldsToRelease = `-- name: ListHoldsToRelease :many
 SELECT id, checkout_id FROM bookings
-WHERE status = 'pending_payment' AND hold_release_at <= $1::timestamptz
+WHERE status IN ('pending_payment', 'awaiting_payment') AND hold_release_at <= $1::timestamptz
   AND NOT (checkout_id = ANY($2::uuid[]))
 ORDER BY hold_release_at, id
 LIMIT $3
@@ -952,7 +1182,8 @@ type ListHoldsToReleaseRow struct {
 	CheckoutID uuid.UUID
 }
 
-// Hold expiry job: bookings past their hold release (bookings_hold_release_idx).
+// Hold expiry job: unpaid bookings (Instant pending_payment, accepted
+// Request awaiting_payment) past their hold release (bookings_hold_release_idx).
 func (q *Queries) ListHoldsToRelease(ctx context.Context, arg ListHoldsToReleaseParams) ([]ListHoldsToReleaseRow, error) {
 	rows, err := q.db.Query(ctx, listHoldsToRelease, arg.Now, arg.Skip, arg.Lim)
 	if err != nil {
@@ -1078,6 +1309,119 @@ func (q *Queries) ListPairedRideBookings(ctx context.Context, arg ListPairedRide
 			return nil, err
 		}
 		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRentalAutoComplete = `-- name: ListRentalAutoComplete :many
+SELECT id FROM bookings
+WHERE status = 'in_service' AND service_type = 'self_drive_rental' AND service_end_at <= $1::timestamptz
+  AND NOT (id = ANY($2::uuid[]))
+ORDER BY service_end_at, id
+LIMIT $3
+`
+
+type ListRentalAutoCompleteParams struct {
+	Cutoff time.Time
+	Skip   []uuid.UUID
+	Lim    int32
+}
+
+// FinishRentals: handed-over rentals never marked returned by @cutoff =
+// now − 24h (bookings_service_end_idx).
+func (q *Queries) ListRentalAutoComplete(ctx context.Context, arg ListRentalAutoCompleteParams) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listRentalAutoComplete, arg.Cutoff, arg.Skip, arg.Lim)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRentalAutoNoShow = `-- name: ListRentalAutoNoShow :many
+SELECT id FROM bookings
+WHERE status = 'confirmed' AND service_type = 'self_drive_rental' AND service_end_at <= $1::timestamptz
+  AND NOT (id = ANY($2::uuid[]))
+ORDER BY service_end_at, id
+LIMIT $3
+`
+
+type ListRentalAutoNoShowParams struct {
+	Now  time.Time
+	Skip []uuid.UUID
+	Lim  int32
+}
+
+// FinishRentals: confirmed rentals never handed over by their return time
+// (bookings_service_end_idx).
+func (q *Queries) ListRentalAutoNoShow(ctx context.Context, arg ListRentalAutoNoShowParams) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listRentalAutoNoShow, arg.Now, arg.Skip, arg.Lim)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRequestsToExpire = `-- name: ListRequestsToExpire :many
+SELECT id, checkout_id FROM bookings
+WHERE status = 'requested' AND response_due_at <= $1::timestamptz
+  AND NOT (checkout_id = ANY($2::uuid[]))
+ORDER BY response_due_at, id
+LIMIT $3
+`
+
+type ListRequestsToExpireParams struct {
+	Now  time.Time
+	Skip []uuid.UUID
+	Lim  int32
+}
+
+type ListRequestsToExpireRow struct {
+	ID         uuid.UUID
+	CheckoutID uuid.UUID
+}
+
+// Request expiry job: requests the partner did not answer by response_due_at
+// (bookings_response_due_idx).
+func (q *Queries) ListRequestsToExpire(ctx context.Context, arg ListRequestsToExpireParams) ([]ListRequestsToExpireRow, error) {
+	rows, err := q.db.Query(ctx, listRequestsToExpire, arg.Now, arg.Skip, arg.Lim)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListRequestsToExpireRow
+	for rows.Next() {
+		var i ListRequestsToExpireRow
+		if err := rows.Scan(&i.ID, &i.CheckoutID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -1553,6 +1897,74 @@ func (q *Queries) MarkNoShow(ctx context.Context, arg MarkNoShowParams) error {
 	return err
 }
 
+const peakRentalHolds = `-- name: PeakRentalHolds :many
+WITH win AS (SELECT tstzrange($1::timestamptz, $2::timestamptz, '[)') AS r),
+held AS (
+  SELECT d.vehicle_model_id AS m, d.period * win.r AS p
+  FROM booking_rental_details d, win
+  WHERE d.vehicle_model_id = ANY($3::uuid[]) AND d.holds_vehicle
+    AND (d.hold_until IS NULL OR d.hold_until > $4::timestamptz) AND d.booking_id <> $5::uuid
+    AND d.period && win.r)
+SELECT h1.m AS vehicle_model_id,
+       max((SELECT count(*) FROM held h2 WHERE h2.m = h1.m AND h2.p @> lower(h1.p)))::int AS peak
+FROM held h1 GROUP BY h1.m
+`
+
+type PeakRentalHoldsParams struct {
+	WindowFrom      time.Time
+	WindowTo        *time.Time
+	ModelIds        []uuid.UUID
+	Now             time.Time
+	ExceptBookingID uuid.UUID
+}
+
+type PeakRentalHoldsRow struct {
+	VehicleModelID uuid.UUID
+	Peak           int32
+}
+
+// Peak number of bookings holding a vehicle of each model at the same instant
+// inside the window [from, to) (to NULL: open-ended). Each holding period is
+// clipped to the window; the peak is always reached at the lower bound of a
+// clipped period, so counting the periods that contain each lower bound is
+// enough. Models without holds are absent. Callers hold the models FOR UPDATE.
+func (q *Queries) PeakRentalHolds(ctx context.Context, arg PeakRentalHoldsParams) ([]PeakRentalHoldsRow, error) {
+	rows, err := q.db.Query(ctx, peakRentalHolds,
+		arg.WindowFrom,
+		arg.WindowTo,
+		arg.ModelIds,
+		arg.Now,
+		arg.ExceptBookingID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []PeakRentalHoldsRow
+	for rows.Next() {
+		var i PeakRentalHoldsRow
+		if err := rows.Scan(&i.VehicleModelID, &i.Peak); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const provinceExists = `-- name: ProvinceExists :one
+SELECT EXISTS (SELECT 1 FROM provinces WHERE code = $1)
+`
+
+func (q *Queries) ProvinceExists(ctx context.Context, code string) (bool, error) {
+	row := q.db.QueryRow(ctx, provinceExists, code)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const purgeIdempotencyKeys = `-- name: PurgeIdempotencyKeys :execrows
 DELETE FROM idempotency_keys
 WHERE ctid IN (
@@ -1576,6 +1988,23 @@ func (q *Queries) PurgeIdempotencyKeys(ctx context.Context, arg PurgeIdempotency
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const rejectRequest = `-- name: RejectRequest :exec
+UPDATE bookings
+SET status = 'rejected', rejected_at = $1::timestamptz, reject_reason = $2::text, updated_at = $1
+WHERE id = $3
+`
+
+type RejectRequestParams struct {
+	Now          time.Time
+	RejectReason string
+	ID           uuid.UUID
+}
+
+func (q *Queries) RejectRequest(ctx context.Context, arg RejectRequestParams) error {
+	_, err := q.db.Exec(ctx, rejectRequest, arg.Now, arg.RejectReason, arg.ID)
+	return err
 }
 
 const rescheduleBooking = `-- name: RescheduleBooking :exec
@@ -1660,6 +2089,31 @@ type SetCheckoutStatusParams struct {
 
 func (q *Queries) SetCheckoutStatus(ctx context.Context, arg SetCheckoutStatusParams) error {
 	_, err := q.db.Exec(ctx, setCheckoutStatus, arg.Status, arg.Now, arg.ID)
+	return err
+}
+
+const setRentalHold = `-- name: SetRentalHold :exec
+UPDATE booking_rental_details
+SET holds_vehicle = $1, hold_until = $2, updated_at = $3
+WHERE booking_id = $4
+`
+
+type SetRentalHoldParams struct {
+	HoldsVehicle bool
+	HoldUntil    *time.Time
+	Now          time.Time
+	BookingID    uuid.UUID
+}
+
+// holds_vehicle / hold_until follow the booking status and change in the tx
+// that changes it; the caller holds the model lock.
+func (q *Queries) SetRentalHold(ctx context.Context, arg SetRentalHoldParams) error {
+	_, err := q.db.Exec(ctx, setRentalHold,
+		arg.HoldsVehicle,
+		arg.HoldUntil,
+		arg.Now,
+		arg.BookingID,
+	)
 	return err
 }
 

@@ -3,6 +3,7 @@ package listing
 import (
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/bangbc-luna/lunain-travel/internal/platform/httpx"
 )
@@ -74,6 +75,43 @@ func (s *Service) PublicRoutes(mux httpx.Router) {
 		w.Header().Set("Cache-Control", publicCacheControl)
 		httpx.WriteJSON(w, http.StatusOK, struct {
 			Items []TripCard `json:"items"`
+		}{items})
+	})
+
+	// Availability depends on the current time and on the bookings, so the
+	// result is never cached.
+	mux.HandleFunc("GET /v1/rental-vehicles", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		f := RentalSearchFilter{ProvinceCode: q.Get("province")}
+		for key, dst := range map[string]*time.Time{"pickup_at": &f.PickupAt, "return_at": &f.ReturnAt} {
+			t, err := time.Parse(time.RFC3339, q.Get(key))
+			if err != nil {
+				httpx.WriteError(w, r, httpx.ErrInvalidRequest)
+				return
+			}
+			*dst = t
+		}
+		if v := q.Get("vehicle_kind"); v != "" {
+			f.VehicleKind = &v
+		}
+		for key, dst := range map[string]*int{"min_seats": &f.MinSeats, "limit": &f.Limit, "offset": &f.Offset} {
+			if v := q.Get(key); v != "" {
+				n, err := strconv.Atoi(v)
+				if err != nil {
+					httpx.WriteError(w, r, httpx.ErrInvalidRequest)
+					return
+				}
+				*dst = n
+			}
+		}
+		items, err := s.SearchRentalVehicles(r.Context(), f)
+		if err != nil {
+			httpx.WriteError(w, r, err)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		httpx.WriteJSON(w, http.StatusOK, struct {
+			Items []RentalVehicleCard `json:"items"`
 		}{items})
 	})
 

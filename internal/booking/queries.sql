@@ -39,6 +39,23 @@ INSERT INTO bookings (
 )
 ON CONFLICT (code) DO NOTHING;
 
+-- A Request Booking awaiting the partner: no hold columns, no payment yet.
+-- name: InsertRequestedBooking :execrows
+INSERT INTO bookings (
+    id, code, checkout_id, customer_id, partner_id, listing_id, service_type, booking_mode, status,
+    service_start_at, service_end_at, original_service_start_at,
+    gross_amount, commission_rate_bps, commission_amount, cancellation_policy_snapshot,
+    contact_name, contact_phone, contact_email, customer_note,
+    response_due_at, qr_token, created_at, updated_at
+) VALUES (
+    @id, @code, @checkout_id, @customer_id, @partner_id, @listing_id, @service_type, 'request', 'requested',
+    @service_start_at, @service_end_at, @service_start_at,
+    @gross_amount, @commission_rate_bps, @commission_amount, @cancellation_policy_snapshot,
+    @contact_name, @contact_phone, @contact_email, sqlc.narg(customer_note),
+    @response_due_at, @qr_token, @now, @now
+)
+ON CONFLICT (code) DO NOTHING;
+
 -- name: InsertBookingItem :exec
 INSERT INTO booking_items (id, booking_id, line_kind, description, unit_price, quantity, line_total, created_at, updated_at)
 VALUES (@id, @booking_id, @line_kind, @description, @unit_price, @quantity::int, @line_total, @now, @now);
@@ -109,10 +126,14 @@ SELECT sqlc.embed(b),
        COALESCE(to_char(d.slot_start, 'HH24:MI'), '')::text AS slot_start,
        COALESCE(to_char(d.slot_end, 'HH24:MI'), '')::text AS slot_end,
        r.trip_id,
-       r.seats
+       r.seats,
+       rd.vehicle_model_id,
+       rd.pickup_at AS rental_pickup_at,
+       rd.return_at AS rental_return_at
 FROM bookings b
 LEFT JOIN booking_attraction_details d ON d.booking_id = b.id
 LEFT JOIN booking_ride_details r ON r.booking_id = b.id
+LEFT JOIN booking_rental_details rd ON rd.booking_id = b.id
 WHERE b.checkout_id = @checkout_id
 ORDER BY b.id;
 
@@ -133,10 +154,11 @@ UPDATE checkouts SET status = @status, updated_at = @now WHERE id = @id;
 -- name: ExpireBooking :exec
 UPDATE bookings SET status = 'expired', updated_at = @now WHERE id = @id;
 
--- Hold expiry job: bookings past their hold release (bookings_hold_release_idx).
+-- Hold expiry job: unpaid bookings (Instant pending_payment, accepted
+-- Request awaiting_payment) past their hold release (bookings_hold_release_idx).
 -- name: ListHoldsToRelease :many
 SELECT id, checkout_id FROM bookings
-WHERE status = 'pending_payment' AND hold_release_at <= @now::timestamptz
+WHERE status IN ('pending_payment', 'awaiting_payment') AND hold_release_at <= @now::timestamptz
   AND NOT (checkout_id = ANY(@skip::uuid[]))
 ORDER BY hold_release_at, id
 LIMIT @lim;
@@ -305,3 +327,101 @@ SELECT b.id, b.checkout_id, d.trip_id FROM bookings b
 JOIN booking_ride_details d ON d.booking_id = b.id
 WHERE b.checkout_id = ANY(@checkout_ids::uuid[])
 ORDER BY b.id;
+
+-- name: GetRentalDetails :one
+SELECT * FROM booking_rental_details WHERE booking_id = @booking_id;
+
+-- Peak number of bookings holding a vehicle of each model at the same instant
+-- inside the window [from, to) (to NULL: open-ended). Each holding period is
+-- clipped to the window; the peak is always reached at the lower bound of a
+-- clipped period, so counting the periods that contain each lower bound is
+-- enough. Models without holds are absent. Callers hold the models FOR UPDATE.
+-- name: PeakRentalHolds :many
+WITH win AS (SELECT tstzrange(@window_from::timestamptz, sqlc.narg(window_to)::timestamptz, '[)') AS r),
+held AS (
+  SELECT d.vehicle_model_id AS m, d.period * win.r AS p
+  FROM booking_rental_details d, win
+  WHERE d.vehicle_model_id = ANY(@model_ids::uuid[]) AND d.holds_vehicle
+    AND (d.hold_until IS NULL OR d.hold_until > @now::timestamptz) AND d.booking_id <> @except_booking_id::uuid
+    AND d.period && win.r)
+SELECT h1.m AS vehicle_model_id,
+       max((SELECT count(*) FROM held h2 WHERE h2.m = h1.m AND h2.p @> lower(h1.p)))::int AS peak
+FROM held h1 GROUP BY h1.m;
+
+-- name: InsertRentalDetail :exec
+INSERT INTO booking_rental_details (
+    booking_id, listing_id, vehicle_model_id, pickup_point_id, pickup_at, return_at, days,
+    model_name, pickup_point_name, pickup_address, destination_province_code,
+    holds_vehicle, hold_until, created_at, updated_at
+) VALUES (
+    @booking_id, @listing_id, @vehicle_model_id, @pickup_point_id, @pickup_at, @return_at, @days::int,
+    @model_name, @pickup_point_name, @pickup_address, @destination_province_code,
+    true, @hold_until, @now, @now
+);
+
+-- holds_vehicle / hold_until follow the booking status and change in the tx
+-- that changes it; the caller holds the model lock.
+-- name: SetRentalHold :exec
+UPDATE booking_rental_details
+SET holds_vehicle = @holds_vehicle, hold_until = sqlc.narg(hold_until), updated_at = @now
+WHERE booking_id = @booking_id;
+
+-- Models of a checkout's rental bookings, unlocked (a booking's model never
+-- changes), so the caller can lock them before the checkout.
+-- name: ListCheckoutRentalModels :many
+SELECT DISTINCT d.vehicle_model_id FROM booking_rental_details d
+JOIN bookings b ON b.id = d.booking_id
+WHERE b.checkout_id = @checkout_id
+ORDER BY d.vehicle_model_id;
+
+-- name: ProvinceExists :one
+SELECT EXISTS (SELECT 1 FROM provinces WHERE code = @code);
+
+-- The partner accepts a Request Booking: the customer pays before
+-- payment_due_at (= hold_expires_at); the hold is released at hold_release_at.
+-- name: AcceptRequest :exec
+UPDATE bookings
+SET status = 'awaiting_payment', accepted_at = @now::timestamptz,
+    payment_due_at = @payment_due_at::timestamptz, hold_expires_at = @payment_due_at::timestamptz,
+    hold_release_at = @hold_release_at::timestamptz, updated_at = @now
+WHERE id = @id;
+
+-- name: RejectRequest :exec
+UPDATE bookings
+SET status = 'rejected', rejected_at = @now::timestamptz, reject_reason = @reject_reason::text, updated_at = @now
+WHERE id = @id;
+
+-- Request expiry job: requests the partner did not answer by response_due_at
+-- (bookings_response_due_idx).
+-- name: ListRequestsToExpire :many
+SELECT id, checkout_id FROM bookings
+WHERE status = 'requested' AND response_due_at <= @now::timestamptz
+  AND NOT (checkout_id = ANY(@skip::uuid[]))
+ORDER BY response_due_at, id
+LIMIT @lim;
+
+-- Rental handover (QR): the confirmed booking is in_service; checked_in_at is
+-- set too so a second scan answers "already" (checked_in is forbidden for
+-- Request Bookings).
+-- name: HandOverRental :exec
+UPDATE bookings
+SET status = 'in_service', in_service_at = @now::timestamptz, checked_in_at = @now::timestamptz, updated_at = @now
+WHERE id = @id;
+
+-- FinishRentals: handed-over rentals never marked returned by @cutoff =
+-- now − 24h (bookings_service_end_idx).
+-- name: ListRentalAutoComplete :many
+SELECT id FROM bookings
+WHERE status = 'in_service' AND service_type = 'self_drive_rental' AND service_end_at <= @cutoff::timestamptz
+  AND NOT (id = ANY(@skip::uuid[]))
+ORDER BY service_end_at, id
+LIMIT @lim;
+
+-- FinishRentals: confirmed rentals never handed over by their return time
+-- (bookings_service_end_idx).
+-- name: ListRentalAutoNoShow :many
+SELECT id FROM bookings
+WHERE status = 'confirmed' AND service_type = 'self_drive_rental' AND service_end_at <= @now::timestamptz
+  AND NOT (id = ANY(@skip::uuid[]))
+ORDER BY service_end_at, id
+LIMIT @lim;

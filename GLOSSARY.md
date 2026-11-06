@@ -82,6 +82,27 @@ Booking được xác nhận ngay khi khách thanh toán xong (Attraction Ticket
 Booking mà đối tác phải chấp nhận trước, rồi khách mới thanh toán (Private Charter, Self-Drive Rental).
 _Avoid_: Inquiry, quote request
 
+**Response Deadline** (Hạn phản hồi):
+Mốc đối tác phải chấp nhận hoặc từ chối một Request Booking: sớm hơn trong hai mốc "12 giờ sau khi khách gửi" và "2 giờ trước giờ bắt đầu dịch vụ"; quá hạn thì yêu cầu hết hiệu lực.
+
+**Accept** (Chấp nhận):
+Việc đối tác nhận một Request Booking còn trong Response Deadline; từ lúc đó khách có 2 giờ để thanh toán (Payment Deadline). Đã chấp nhận thì đối tác không rút lại được.
+
+**Reject** (Từ chối):
+Việc đối tác không nhận một Request Booking chưa được chấp nhận, kèm lý do; chỗ được nhả ngay.
+
+**Payment Deadline** (Hạn thanh toán):
+Mốc khách phải thanh toán một Request Booking đã được chấp nhận; quá hạn (cộng thời gian đệm) thì Booking hết hiệu lực.
+
+**Withdraw** (Rút yêu cầu):
+Việc khách tự hủy miễn phí một Request Booking chưa thanh toán (đang chờ đối tác hoặc đang chờ thanh toán); chỗ được nhả ngay. Không nhầm với Payout.
+
+**Handover** (Giao xe):
+Check-in của Self-Drive Rental: đối tác quét QR khi giao xe cho khách, từ 2 giờ trước giờ nhận đến trước giờ trả; Booking chuyển sang đang thuê.
+
+**Vehicle Return** (Nhận lại xe):
+Việc đối tác xác nhận đã nhận lại xe thuê, sớm hay đúng hạn; Booking hoàn thành, xe trống lại ngay, trả sớm không hoàn tiền. Đối tác quên bấm thì hệ thống tự hoàn thành sau giờ trả 24 giờ.
+
 **Hold** (Giữ chỗ):
 Khoảng thời gian ghế hoặc xe được giữ cho một Booking chưa thanh toán; quá hạn thì Booking hết hiệu lực và chỗ được nhả.
 
@@ -89,7 +110,7 @@ Khoảng thời gian ghế hoặc xe được giữ cho một Booking chưa than
 Việc đối tác quét mã QR của Booking để xác nhận khách đã đến sử dụng dịch vụ.
 
 **No-show** (Bỏ vé):
-Booking vé tham quan đã qua ngày tham quan mà chưa Check-in; không hoàn tiền, tính như đã hoàn thành.
+Booking đã thanh toán mà khách không đến sử dụng dịch vụ; không hoàn tiền, đối tác vẫn nhận tiền như đã hoàn thành. Vé tham quan: qua ngày tham quan mà chưa Check-in. Xe tuyến: quá giờ khởi hành một khoảng mà chưa Check-in. Thuê xe tự lái: đối tác đánh dấu khách không đến nhận xe (từ giờ nhận xe trở đi), hoặc tới giờ trả mà xe chưa được giao.
 
 **Reschedule** (Đổi lịch):
 Việc khách đổi ngày hoặc khung giờ của một Booking vé tham quan; tối đa một lần, phải làm trong 14 ngày kể từ lúc thanh toán.

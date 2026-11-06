@@ -249,6 +249,12 @@ var partnerRoutes = []route{
 	{"PUT /v1/partner/listings/{id}/ride-route", "/v1/partner/listings/" + uuid.Nil.String() + "/ride-route"},
 	{"POST /v1/partner/listings/{id}/ride-schedules", "/v1/partner/listings/" + uuid.Nil.String() + "/ride-schedules"},
 	{"PATCH /v1/partner/listings/{id}/ride-schedules/{scheduleID}", "/v1/partner/listings/" + uuid.Nil.String() + "/ride-schedules/" + uuid.Nil.String()},
+	{"GET /v1/partner/listings/{id}/rental", "/v1/partner/listings/" + uuid.Nil.String() + "/rental"},
+	{"PUT /v1/partner/listings/{id}/rental-store", "/v1/partner/listings/" + uuid.Nil.String() + "/rental-store"},
+	{"POST /v1/partner/listings/{id}/rental-pickup-points", "/v1/partner/listings/" + uuid.Nil.String() + "/rental-pickup-points"},
+	{"PATCH /v1/partner/listings/{id}/rental-pickup-points/{pointID}", "/v1/partner/listings/" + uuid.Nil.String() + "/rental-pickup-points/" + uuid.Nil.String()},
+	{"POST /v1/partner/listings/{id}/rental-models", "/v1/partner/listings/" + uuid.Nil.String() + "/rental-models"},
+	{"PATCH /v1/partner/listings/{id}/rental-models/{modelID}", "/v1/partner/listings/" + uuid.Nil.String() + "/rental-models/" + uuid.Nil.String()},
 	{"GET /v1/partner/listings/{id}/ride-trips", "/v1/partner/listings/" + uuid.Nil.String() + "/ride-trips"},
 	{"POST /v1/partner/listings/{id}/ride-trips", "/v1/partner/listings/" + uuid.Nil.String() + "/ride-trips"},
 	{"PATCH /v1/partner/listings/{id}/ride-trips/{tripID}", "/v1/partner/listings/" + uuid.Nil.String() + "/ride-trips/" + uuid.Nil.String()},
@@ -259,6 +265,10 @@ var partnerRoutes = []route{
 	{"GET /v1/partner/balance", "/v1/partner/balance"},
 	{"GET /v1/partner/bookings", "/v1/partner/bookings"},
 	{"GET /v1/partner/bookings/{id}", "/v1/partner/bookings/" + uuid.Nil.String()},
+	{"POST /v1/partner/bookings/{id}/accept", "/v1/partner/bookings/" + uuid.Nil.String() + "/accept"},
+	{"POST /v1/partner/bookings/{id}/reject", "/v1/partner/bookings/" + uuid.Nil.String() + "/reject"},
+	{"POST /v1/partner/bookings/{id}/no-show", "/v1/partner/bookings/" + uuid.Nil.String() + "/no-show"},
+	{"POST /v1/partner/bookings/{id}/return", "/v1/partner/bookings/" + uuid.Nil.String() + "/return"},
 	{"POST /v1/partner/check-ins", "/v1/partner/check-ins"},
 	{"POST /v1/partner/payouts", "/v1/partner/payouts"},
 	{"GET /v1/partner/payouts", "/v1/partner/payouts"},
@@ -353,6 +363,10 @@ func TestPublicRoutes(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, rec.Code)
 	require.Contains(t, rec.Body.String(), `"not_found"`)
 	require.Equal(t, []string{"GET /v1/listings", "GET /v1/listings/{slug}"}, recordedUnder(app.patterns, "/v1/listings"))
+	// The rental vehicle search needs no token: missing parameters are a 400,
+	// not a 401.
+	require.Equal(t, []string{"GET /v1/rental-vehicles"}, recordedUnder(app.patterns, "/v1/rental-vehicles"))
+	requireError(t, app.do("GET", "/v1/rental-vehicles", ""), http.StatusBadRequest, "invalid_request", "rental search without parameters")
 	rec = app.do("GET", "/nope", "")
 	require.Equal(t, http.StatusNotFound, rec.Code)
 	require.Contains(t, rec.Body.String(), `"error"`)
@@ -362,6 +376,7 @@ func TestPublicRoutes(t *testing.T) {
 var customerBookingRoutes = []route{
 	{"POST /v1/bookings/attraction", "/v1/bookings/attraction"},
 	{"POST /v1/bookings/ride", "/v1/bookings/ride"},
+	{"POST /v1/bookings/rental", "/v1/bookings/rental"},
 	{"GET /v1/bookings", "/v1/bookings"},
 	{"GET /v1/bookings/{id}", "/v1/bookings/" + uuid.Nil.String()},
 	{"POST /v1/bookings/{id}/pay", "/v1/bookings/" + uuid.Nil.String() + "/pay"},
