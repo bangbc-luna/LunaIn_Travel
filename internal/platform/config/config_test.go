@@ -84,6 +84,7 @@ func TestLoad_ProdRequiresExplicitTrustedProxyHops(t *testing.T) {
 	t.Setenv("SMTP_HOST", "smtp.example.com")
 	setS3(t)
 	setPayOS(t)
+	t.Setenv("GOONG_API_KEY", "k")
 	t.Setenv("TRUSTED_PROXY_HOPS", "") // registers restore
 	os.Unsetenv("TRUSTED_PROXY_HOPS")
 

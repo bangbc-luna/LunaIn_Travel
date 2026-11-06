@@ -76,6 +76,7 @@ func TestConfig_PaymentProvider(t *testing.T) {
 		t.Setenv("PAYOS_CHECKSUM_KEY", "s")
 		t.Setenv("PAYOS_RETURN_URL", "https://x/return")
 		t.Setenv("PAYOS_CANCEL_URL", "https://x/cancel")
+		t.Setenv("GOONG_API_KEY", "k")
 		cfg, err := config.Load()
 		if err != nil {
 			t.Fatal(err)

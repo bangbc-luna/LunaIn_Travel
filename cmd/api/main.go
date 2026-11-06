@@ -33,6 +33,7 @@ import (
 	"github.com/bangbc-luna/lunain-travel/internal/platform/httpx"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/jobs"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/mailer"
+	"github.com/bangbc-luna/lunain-travel/internal/platform/maps"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/storage"
 	"github.com/bangbc-luna/lunain-travel/internal/reconcile"
 	"github.com/bangbc-luna/lunain-travel/internal/settings"
@@ -129,6 +130,18 @@ func paymentProvider(cfg config.Config) payment.Provider {
 	}, nil)
 }
 
+// mapProvider is the deterministic fake when MAP_PROVIDER=fake (never in prod:
+// config.Load refuses it), otherwise the Goong client; both are cached.
+func mapProvider(cfg config.Config) maps.Provider {
+	var p maps.Provider
+	if cfg.MapProvider == "fake" {
+		p = maps.NewFake()
+	} else {
+		p = maps.NewGoong(maps.GoongConfig{APIKey: cfg.GoongAPIKey, BaseURL: cfg.GoongBaseURL}, nil)
+	}
+	return maps.NewCached(p, 6*time.Hour, 10000, time.Now)
+}
+
 func serve(log *slog.Logger) error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -139,6 +152,10 @@ func serve(log *slog.Logger) error {
 	for _, w := range cfg.PaymentWarnings() {
 		log.Warn(w)
 	}
+	for _, w := range cfg.MapWarnings() {
+		log.Warn(w)
+	}
+	_ = mapProvider(cfg) // consumed by the charter service in a later task
 
 	connectCtx, cancelConnect := context.WithTimeout(context.Background(), 30*time.Second)
 	pool, err := db.Connect(connectCtx, cfg.DatabaseURL)
