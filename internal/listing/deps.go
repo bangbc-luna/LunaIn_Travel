@@ -14,6 +14,7 @@ import (
 
 	"github.com/bangbc-luna/lunain-travel/internal/catalog"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/clock"
+	"github.com/bangbc-luna/lunain-travel/internal/platform/maps"
 )
 
 // PartnerChecker reads a partner's status and enabled service types inside the
@@ -61,6 +62,12 @@ type BookingGuard interface {
 	RentalPeakHeld(ctx context.Context, tx pgx.Tx, modelIDs []uuid.UUID, from time.Time, to *time.Time, now time.Time) (map[uuid.UUID]int, error)
 }
 
+// HolidayChecker reports, inside the caller's tx, whether the Vietnam calendar
+// date of d is a holiday. Implemented by *settings.Service.
+type HolidayChecker interface {
+	IsHoliday(ctx context.Context, tx pgx.Tx, d time.Time) (bool, error)
+}
+
 // Deps are the collaborators of Service.
 type Deps struct {
 	Pool     *pgxpool.Pool
@@ -71,6 +78,12 @@ type Deps struct {
 	Files    FileChecker
 	// BookingGuard may be nil (tests without bookings): the checks are skipped.
 	BookingGuard BookingGuard
+	// Maps prices private charters (road distance). Never called inside a
+	// transaction. May be nil when charters are not quoted: quotes then fail
+	// with ErrMapUnavailable.
+	Maps maps.Provider
+	// Holidays may be nil when charters are not quoted.
+	Holidays HolidayChecker
 	// Log may be nil: slog.Default() is used.
 	Log *slog.Logger
 }
@@ -84,6 +97,8 @@ type Service struct {
 	geo      LocationValidator
 	files    FileChecker
 	bookings BookingGuard
+	maps     maps.Provider
+	holidays HolidayChecker
 	log      *slog.Logger
 }
 
@@ -93,5 +108,6 @@ func NewService(d Deps) *Service {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Service{pool: d.Pool, clock: d.Clock, partners: d.Partners, catalog: d.Catalog, geo: d.Geo, files: d.Files, bookings: d.BookingGuard, log: log}
+	return &Service{pool: d.Pool, clock: d.Clock, partners: d.Partners, catalog: d.Catalog, geo: d.Geo, files: d.Files, bookings: d.BookingGuard,
+		maps: d.Maps, holidays: d.Holidays, log: log}
 }

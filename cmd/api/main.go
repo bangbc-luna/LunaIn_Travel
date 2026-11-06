@@ -155,7 +155,6 @@ func serve(log *slog.Logger) error {
 	for _, w := range cfg.MapWarnings() {
 		log.Warn(w)
 	}
-	_ = mapProvider(cfg) // consumed by the charter service in a later task
 
 	connectCtx, cancelConnect := context.WithTimeout(context.Background(), 30*time.Second)
 	pool, err := db.Connect(connectCtx, cfg.DatabaseURL)
@@ -239,13 +238,13 @@ func serve(log *slog.Logger) error {
 		Pool: pool, Clock: clock.Real{}, Users: idSvc, Catalog: catSvc, Geo: geoSvc, Files: fileSvc,
 	})
 
+	settingsSvc := settings.NewService(pool, clock.Real{})
 	listingSvc := listing.NewService(listing.Deps{
 		Pool: pool, Clock: clock.Real{}, Partners: partnerSvc, Catalog: catSvc, Geo: geoSvc, Files: fileSvc,
-		BookingGuard: booking.Guard{}, Log: log,
+		BookingGuard: booking.Guard{}, Maps: mapProvider(cfg), Holidays: settingsSvc, Log: log,
 	})
 	generateTrips.Service = listingSvc
 
-	settingsSvc := settings.NewService(pool, clock.Real{})
 	paymentSvc := payment.NewService(pool, clock.Real{}, paymentProvider(cfg), log)
 	paymentSvc.SetOps(payment.OpsDeps{Jobs: jobClient, Users: idSvc, Files: fileSvc})
 	ledgerSvc := ledger.NewService(pool, clock.Real{})

@@ -254,8 +254,15 @@ SELECT sqlc.embed(l),
 FROM visible_listings l
 WHERE (l.service_type <> 'self_drive_rental'
        OR EXISTS (SELECT 1 FROM rental_pickup_points pp WHERE pp.listing_id = l.id AND pp.active))
+  -- A charter without an active vehicle class cannot be quoted.
+  AND (l.service_type <> 'private_charter'
+       OR EXISTS (SELECT 1 FROM charter_vehicle_classes c WHERE c.listing_id = l.id AND c.active))
   AND (sqlc.narg(service_type)::text IS NULL OR l.service_type = sqlc.narg(service_type))
-  AND (sqlc.narg(province_code)::text IS NULL OR l.province_code = sqlc.narg(province_code))
+  -- A charter also matches every province it picks up in.
+  AND (sqlc.narg(province_code)::text IS NULL OR l.province_code = sqlc.narg(province_code)
+       OR (l.service_type = 'private_charter'
+           AND EXISTS (SELECT 1 FROM charter_service_areas a
+                       WHERE a.listing_id = l.id AND a.province_code = sqlc.narg(province_code))))
   AND (sqlc.narg(q)::text IS NULL
        OR public.f_unaccent(lower(l.title)) ILIKE '%' || public.f_unaccent(lower(sqlc.narg(pattern)::text)) || '%' ESCAPE '\'
        OR similarity(public.f_unaccent(lower(l.title)), public.f_unaccent(lower(sqlc.narg(q)))) >= 0.3)
@@ -289,6 +296,9 @@ SELECT * FROM listings WHERE id = @id FOR SHARE;
 
 -- name: IsListingVisible :one
 SELECT EXISTS (SELECT 1 FROM visible_listings WHERE id = @id);
+
+-- name: VisibleListingServiceType :one
+SELECT service_type FROM visible_listings WHERE id = @id;
 
 -- name: GetRideTrip :one
 SELECT * FROM ride_trips WHERE id = @id;

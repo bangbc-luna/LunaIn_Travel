@@ -29,6 +29,7 @@ import (
 	"github.com/bangbc-luna/lunain-travel/internal/platform/clock"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/db"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/httpx"
+	"github.com/bangbc-luna/lunain-travel/internal/platform/maps"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/storage"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/testutil"
 	"github.com/bangbc-luna/lunain-travel/internal/reconcile"
@@ -70,11 +71,11 @@ func newTestAppEnv(t *testing.T, appEnv string) *testApp {
 	partnerSvc := partner.NewService(partner.Deps{
 		Pool: pool, Clock: clk, Users: idSvc, Catalog: catSvc, Geo: geoSvc, Files: fileSvc,
 	})
+	settingsSvc := settings.NewService(pool, clk)
 	listingSvc := listing.NewService(listing.Deps{
 		Pool: pool, Clock: clk, Partners: partnerSvc, Catalog: catSvc, Geo: geoSvc, Files: fileSvc,
-		BookingGuard: booking.Guard{},
+		BookingGuard: booking.Guard{}, Maps: maps.NewFake(), Holidays: settingsSvc,
 	})
-	settingsSvc := settings.NewService(pool, clk)
 	paymentSvc := payment.NewService(pool, clk, payment.NewFake(), nil)
 	ledgerSvc := ledger.NewService(pool, clk)
 	bookingSvc := booking.NewService(booking.Deps{
@@ -372,6 +373,9 @@ func TestPublicRoutes(t *testing.T) {
 	// not a 401.
 	require.Equal(t, []string{"GET /v1/rental-vehicles"}, recordedUnder(app.patterns, "/v1/rental-vehicles"))
 	requireError(t, app.do("GET", "/v1/rental-vehicles", ""), http.StatusBadRequest, "invalid_request", "rental search without parameters")
+	// The charter quote needs no token: an empty quote is a 422, not a 401.
+	require.Equal(t, []string{"POST /v1/charter-quotes"}, recordedUnder(app.patterns, "/v1/charter-quotes"))
+	requireError(t, app.do("POST", "/v1/charter-quotes", ""), http.StatusUnprocessableEntity, "invalid_location", "empty charter quote")
 	rec = app.do("GET", "/nope", "")
 	require.Equal(t, http.StatusNotFound, rec.Code)
 	require.Contains(t, rec.Body.String(), `"error"`)

@@ -81,3 +81,28 @@ func (s *Service) charterRoutes(mux httpx.Router, withID func(h func(w http.Resp
 		reply(w, r, http.StatusOK, c, err)
 	}))
 }
+
+// Public quotes call the paid map API, so they are rate limited per client IP.
+const charterQuotesPerMinute = 20
+
+// CharterQuoteRoutes registers the public (unauthenticated) charter quote:
+// POST /v1/charter-quotes, limited to 20 requests a minute per client IP
+// (clientIP, see httpx.ClientIPFunc). A quote depends on the time and the
+// route, so it is never cached.
+func (s *Service) CharterQuoteRoutes(mux httpx.Router, clientIP func(*http.Request) string) {
+	quote := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		var in CharterQuoteInput
+		if err := httpx.DecodeJSON(r, &in); err != nil {
+			httpx.WriteError(w, r, err)
+			return
+		}
+		res, err := s.QuoteCharter(r.Context(), in)
+		if err != nil {
+			httpx.WriteError(w, r, err)
+			return
+		}
+		httpx.WriteJSON(w, http.StatusOK, res)
+	})
+	mux.Handle("POST /v1/charter-quotes", httpx.RateLimit(charterQuotesPerMinute, charterQuotesPerMinute, clientIP)(quote))
+}

@@ -2809,8 +2809,15 @@ SELECT l.id, l.partner_id, l.service_type, l.title, l.slug, l.summary, l.descrip
 FROM visible_listings l
 WHERE (l.service_type <> 'self_drive_rental'
        OR EXISTS (SELECT 1 FROM rental_pickup_points pp WHERE pp.listing_id = l.id AND pp.active))
+  -- A charter without an active vehicle class cannot be quoted.
+  AND (l.service_type <> 'private_charter'
+       OR EXISTS (SELECT 1 FROM charter_vehicle_classes c WHERE c.listing_id = l.id AND c.active))
   AND ($1::text IS NULL OR l.service_type = $1)
-  AND ($2::text IS NULL OR l.province_code = $2)
+  -- A charter also matches every province it picks up in.
+  AND ($2::text IS NULL OR l.province_code = $2
+       OR (l.service_type = 'private_charter'
+           AND EXISTS (SELECT 1 FROM charter_service_areas a
+                       WHERE a.listing_id = l.id AND a.province_code = $2)))
   AND ($3::text IS NULL
        OR public.f_unaccent(lower(l.title)) ILIKE '%' || public.f_unaccent(lower($4::text)) || '%' ESCAPE '\'
        OR similarity(public.f_unaccent(lower(l.title)), public.f_unaccent(lower($3))) >= 0.3)
@@ -3967,4 +3974,15 @@ func (q *Queries) UpsertRideRoute(ctx context.Context, arg UpsertRideRouteParams
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const visibleListingServiceType = `-- name: VisibleListingServiceType :one
+SELECT service_type FROM visible_listings WHERE id = $1
+`
+
+func (q *Queries) VisibleListingServiceType(ctx context.Context, id uuid.UUID) (string, error) {
+	row := q.db.QueryRow(ctx, visibleListingServiceType, id)
+	var service_type string
+	err := row.Scan(&service_type)
+	return service_type, err
 }
