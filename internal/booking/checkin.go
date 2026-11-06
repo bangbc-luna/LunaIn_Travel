@@ -50,7 +50,8 @@ type CheckInResult struct {
 // release_delay_days later. It must be the visit date in Vietnam
 // (ErrCheckInWrongDate); a booking that is not confirmed is
 // ErrCheckInNotAllowed. A scheduled ride booking follows checkInRide instead,
-// a self-drive rental checkInRental (the vehicle handover).
+// a self-drive rental checkInRental (the vehicle handover) and a private
+// charter checkInCharter (the customer pickup).
 // Checking in again returns Already with the first check-in time.
 func (s *Service) CheckIn(ctx context.Context, partnerID, userID uuid.UUID, qrToken string) (CheckInResult, error) {
 	return s.checkIn(ctx, partnerID, userID, func(q *store.Queries) (store.Booking, error) {
@@ -91,6 +92,10 @@ func (s *Service) checkIn(ctx context.Context, partnerID, userID uuid.UUID, lock
 		case serviceTypeRental:
 			var err error
 			res, err = s.checkInRental(ctx, tx, q, b, userID, now)
+			return err
+		case serviceTypeCharter:
+			var err error
+			res, err = s.checkInCharter(ctx, tx, q, b, userID, now)
 			return err
 		}
 		if b.Status != StatusConfirmed || b.ServiceType != serviceTypeAttraction {

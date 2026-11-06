@@ -33,6 +33,7 @@ import (
 	"github.com/bangbc-luna/lunain-travel/internal/platform/httpx"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/jobs"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/mailer"
+	"github.com/bangbc-luna/lunain-travel/internal/platform/maps"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/storage"
 	"github.com/bangbc-luna/lunain-travel/internal/reconcile"
 	"github.com/bangbc-luna/lunain-travel/internal/settings"
@@ -129,6 +130,18 @@ func paymentProvider(cfg config.Config) payment.Provider {
 	}, nil)
 }
 
+// mapProvider is the deterministic fake when MAP_PROVIDER=fake (never in prod:
+// config.Load refuses it), otherwise the Goong client; both are cached.
+func mapProvider(cfg config.Config) maps.Provider {
+	var p maps.Provider
+	if cfg.MapProvider == "fake" {
+		p = maps.NewFake()
+	} else {
+		p = maps.NewGoong(maps.GoongConfig{APIKey: cfg.GoongAPIKey, BaseURL: cfg.GoongBaseURL}, nil)
+	}
+	return maps.NewCached(p, 6*time.Hour, 10000, time.Now)
+}
+
 func serve(log *slog.Logger) error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -137,6 +150,9 @@ func serve(log *slog.Logger) error {
 
 	log.Info("config loaded", "env", cfg.AppEnv, "trusted_proxy_hops", cfg.TrustedProxyHops)
 	for _, w := range cfg.PaymentWarnings() {
+		log.Warn(w)
+	}
+	for _, w := range cfg.MapWarnings() {
 		log.Warn(w)
 	}
 
@@ -166,7 +182,7 @@ func serve(log *slog.Logger) error {
 	// started only after that.
 	expireHolds, noShow, release := &booking.ExpireHoldsWorker{}, &booking.NoShowWorker{}, &booking.ReleaseWorker{}
 	completeRides, expireRequests := &booking.CompleteRidesWorker{}, &booking.ExpireRequestsWorker{}
-	finishRentals := &booking.FinishRentalsWorker{}
+	finishRentals, finishCharters := &booking.FinishRentalsWorker{}, &booking.FinishChartersWorker{}
 	purgeIdem := &booking.PurgeIdempotencyWorker{}
 	reconcileDaily, remindRefunds := &reconcile.DailyWorker{}, &reconcile.RemindRefundsWorker{}
 	generateTrips := &listing.GenerateTripsWorker{}
@@ -177,6 +193,7 @@ func serve(log *slog.Logger) error {
 	river.AddWorker(workers, noShow)
 	river.AddWorker(workers, completeRides)
 	river.AddWorker(workers, finishRentals)
+	river.AddWorker(workers, finishCharters)
 	river.AddWorker(workers, release)
 	river.AddWorker(workers, purgeIdem)
 	river.AddWorker(workers, reconcileDaily)
@@ -222,13 +239,13 @@ func serve(log *slog.Logger) error {
 		Pool: pool, Clock: clock.Real{}, Users: idSvc, Catalog: catSvc, Geo: geoSvc, Files: fileSvc,
 	})
 
+	settingsSvc := settings.NewService(pool, clock.Real{})
 	listingSvc := listing.NewService(listing.Deps{
 		Pool: pool, Clock: clock.Real{}, Partners: partnerSvc, Catalog: catSvc, Geo: geoSvc, Files: fileSvc,
-		BookingGuard: booking.Guard{}, Log: log,
+		BookingGuard: booking.Guard{}, Maps: mapProvider(cfg), Holidays: settingsSvc, Log: log,
 	})
 	generateTrips.Service = listingSvc
 
-	settingsSvc := settings.NewService(pool, clock.Real{})
 	paymentSvc := payment.NewService(pool, clock.Real{}, paymentProvider(cfg), log)
 	paymentSvc.SetOps(payment.OpsDeps{Jobs: jobClient, Users: idSvc, Files: fileSvc})
 	ledgerSvc := ledger.NewService(pool, clock.Real{})
@@ -238,6 +255,7 @@ func serve(log *slog.Logger) error {
 	})
 	expireHolds.Service, noShow.Service, release.Service, purgeIdem.Service = bookingSvc, bookingSvc, bookingSvc, bookingSvc
 	completeRides.Service, expireRequests.Service, finishRentals.Service = bookingSvc, bookingSvc, bookingSvc
+	finishCharters.Service = bookingSvc
 	payoutSvc := payout.NewService(payout.Deps{
 		Pool: pool, Clock: clock.Real{}, Ledger: ledgerSvc, Partners: partnerSvc, Settings: settingsSvc,
 		Files: fileSvc, Jobs: jobClient, Log: log,

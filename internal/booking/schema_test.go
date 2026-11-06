@@ -718,3 +718,121 @@ func TestBookingRejectedNeedsReason(t *testing.T) {
 	requireViolation(t, err, "23514", "bookings_reject_reason_check")
 	require.NoError(t, f.exec(t, `UPDATE bookings SET status = 'rejected', rejected_at = now(), reject_reason = 'hết xe' WHERE id = $1`, id))
 }
+
+// --- private charter (00019) ---
+
+func (f *fixture) newCharterService(t *testing.T, partner uuid.UUID) uuid.UUID {
+	t.Helper()
+	listing := newID(t)
+	f.mustExec(t, `INSERT INTO listings (id, partner_id, service_type, title, slug)
+		VALUES ($1, $2, 'private_charter', 'Xe bao chuyến', $3)`, listing, partner, "slug-"+listing.String())
+	f.mustExec(t, `INSERT INTO charter_services (listing_id) VALUES ($1)`, listing)
+	return listing
+}
+
+func (f *fixture) insertCharterClass(t *testing.T, id, listing uuid.UUID, seats int, baseFare, perKm int64) error {
+	t.Helper()
+	return f.exec(t, `INSERT INTO charter_vehicle_classes (id, listing_id, name, seats, base_fare, price_per_km)
+		VALUES ($1, $2, 'Xe 4 chỗ', $3, $4, $5)`, id, listing, seats, baseFare, perKm)
+}
+
+func (f *fixture) insertCharterSurcharge(t *testing.T, class uuid.UUID, kind, calc string, amount int64) error {
+	t.Helper()
+	return f.exec(t, `INSERT INTO charter_surcharges (id, vehicle_class_id, kind, calc, amount)
+		VALUES ($1, $2, $3, $4, $5)`, newID(t), class, kind, calc, amount)
+}
+
+// insertCharterBooking inserts a request-mode private_charter booking.
+func (f *fixture) insertCharterBooking(t *testing.T, id, listing uuid.UUID) {
+	t.Helper()
+	f.mustExec(t, `INSERT INTO bookings (
+		id, code, checkout_id, customer_id, partner_id, listing_id, service_type, booking_mode, status,
+		service_start_at, service_end_at, original_service_start_at,
+		gross_amount, commission_rate_bps, commission_amount, cancellation_policy_snapshot,
+		contact_name, contact_phone, contact_email, response_due_at, qr_token
+	) VALUES ($1, $2, $3, $4, $5, $6, 'private_charter', 'request', 'requested',
+		'2026-12-01 01:00:00Z', '2026-12-01 05:00:00Z', '2026-12-01 01:00:00Z',
+		1000000, 1000, 100000, '[]', 'A', '0900000000', 'a@customer.test', now(), $7)`,
+		id, randCode(t, "LT"), f.checkout, f.customer, f.partner, listing, randToken(t))
+}
+
+func (f *fixture) insertCharterDetail(t *testing.T, booking, listing, class uuid.UUID, distance string, roundTrip bool, returnAt any) error {
+	t.Helper()
+	return f.exec(t, `INSERT INTO booking_charter_details (
+		booking_id, listing_id, vehicle_class_id, pickup_at, pickup_address, pickup_lat, pickup_lng,
+		dropoff_address, dropoff_lat, dropoff_lng, distance_km, is_round_trip, return_at, quote,
+		pickup_province_code, duration_minutes, vehicle_class_name, seats)
+		VALUES ($1, $2, $3, '2026-12-01 01:00:00Z', '1 A', 21.028511, 105.804817,
+		        '2 B', 20.8449, 106.6881, $4::numeric, $5, $6::timestamptz, '{}',
+		        (SELECT code FROM provinces ORDER BY code LIMIT 1), 120, 'Xe 4 chỗ', 4)`,
+		booking, listing, class, distance, roundTrip, returnAt)
+}
+
+func charterDetailFixture(t *testing.T) (f *fixture, booking, listing, class uuid.UUID) {
+	f = newFixture(t)
+	listing = f.newCharterService(t, f.partner)
+	class, booking = newID(t), newID(t)
+	require.NoError(t, f.insertCharterClass(t, class, listing, 4, 0, 12000))
+	f.insertCharterBooking(t, booking, listing)
+	return
+}
+
+func TestCharterSurchargeCalcRules(t *testing.T) {
+	f := newFixture(t)
+	listing := f.newCharterService(t, f.partner)
+	class := newID(t)
+	require.NoError(t, f.insertCharterClass(t, class, listing, 4, 0, 12000))
+	requireViolation(t, f.insertCharterSurcharge(t, class, "night", "percent", 1000), "23514", "")
+	requireViolation(t, f.insertCharterSurcharge(t, class, "round_trip_waiting", "percent", 1000), "23514", "")
+	requireViolation(t, f.insertCharterSurcharge(t, class, "weekend", "percent", 10001), "23514", "")
+	require.NoError(t, f.insertCharterSurcharge(t, class, "weekend", "percent", 10000))
+	requireViolation(t, f.insertCharterSurcharge(t, class, "weekend", "fixed", 5), "23505", "")
+}
+
+func TestCharterClassPricePerKmPositive(t *testing.T) {
+	f := newFixture(t)
+	listing := f.newCharterService(t, f.partner)
+	requireViolation(t, f.insertCharterClass(t, newID(t), listing, 4, 500000, 0), "23514", "")
+	require.NoError(t, f.insertCharterClass(t, newID(t), listing, 4, 0, 12000))
+	requireViolation(t, f.insertCharterClass(t, newID(t), listing, 0, 0, 12000), "23514", "")
+}
+
+func TestCharterServiceNightPair(t *testing.T) {
+	f := newFixture(t)
+	mk := func(sql string) error {
+		listing := newID(t)
+		f.mustExec(t, `INSERT INTO listings (id, partner_id, service_type, title, slug)
+			VALUES ($1, $2, 'private_charter', 'Xe', $3)`, listing, f.partner, "slug-"+listing.String())
+		return f.exec(t, sql, listing)
+	}
+	requireViolation(t, mk(`INSERT INTO charter_services (listing_id, night_start) VALUES ($1, '22:00')`), "23514", "")
+	requireViolation(t, mk(`INSERT INTO charter_services (listing_id, night_start, night_end) VALUES ($1, '22:00', '22:00')`), "23514", "")
+	require.NoError(t, mk(`INSERT INTO charter_services (listing_id, night_start, night_end) VALUES ($1, '22:00', '05:00')`))
+}
+
+func TestCharterDetailClassMustMatchListing(t *testing.T) {
+	f, booking, listing, _ := charterDetailFixture(t)
+	other := f.newCharterService(t, f.partner)
+	otherClass := newID(t)
+	require.NoError(t, f.insertCharterClass(t, otherClass, other, 4, 0, 12000))
+	err := f.insertCharterDetail(t, booking, listing, otherClass, "30", false, nil)
+	requireViolation(t, err, "23503", "booking_charter_details_vehicle_class_id_listing_id_fkey")
+}
+
+func TestCharterDetailRoundTripNeedsReturn(t *testing.T) {
+	f, booking, listing, class := charterDetailFixture(t)
+	requireViolation(t, f.insertCharterDetail(t, booking, listing, class, "30", true, nil), "23514", "")
+	requireViolation(t, f.insertCharterDetail(t, booking, listing, class, "30", false, "2026-12-01 05:00:00Z"), "23514", "")
+	requireViolation(t, f.insertCharterDetail(t, booking, listing, class, "30", true, "2026-12-01 01:00:00Z"), "23514", "")
+	require.NoError(t, f.insertCharterDetail(t, booking, listing, class, "30", true, "2026-12-01 05:00:00Z"))
+}
+
+func TestCharterDetailDistancePositive(t *testing.T) {
+	f, booking, listing, class := charterDetailFixture(t)
+	requireViolation(t, f.insertCharterDetail(t, booking, listing, class, "0", false, nil), "23514", "")
+	require.NoError(t, f.insertCharterDetail(t, booking, listing, class, "30.25", false, nil))
+	var km string
+	require.NoError(t, f.pool.QueryRow(context.Background(),
+		`SELECT distance_km::text FROM booking_charter_details WHERE booking_id = $1`, booking).Scan(&km))
+	require.Equal(t, "30.3", km)
+}

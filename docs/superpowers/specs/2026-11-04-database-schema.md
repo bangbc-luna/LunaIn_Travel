@@ -48,6 +48,10 @@ users → partners → listings
 - ✅ Plan 7: **khóa mẫu xe trước mọi checkout có thuê xe**. Mọi transaction khóa một checkout có booking thuê xe đều khóa trước dòng `rental_vehicle_models` của booking đó (`FOR UPDATE`, theo id tăng dần): tạo yêu cầu, đối tác chấp nhận hoặc từ chối, khách rút yêu cầu, job `ExpireRequests`, job `ExpireHolds`, `HandlePaid` (kể cả xác nhận lại khi tiền về trễ), hủy đơn. Các transaction chỉ khóa booking mà làm đổi việc giữ xe (đối tác bấm nhận lại xe hoặc No-show, job `FinishRentals`) cũng khóa mẫu xe trước booking: đọc `vehicle_model_id` không khóa (cột này không bao giờ đổi), khóa mẫu xe, rồi khóa booking và kiểm tra lại trạng thái. Giao xe bằng QR (`confirmed → in_service`) không đổi việc giữ xe nên không khóa mẫu xe. Đối tác sửa `quantity` khóa listing rồi mẫu xe trước khi đếm xe đang giữ (mục 5.7).
   - Một checkout chỉ có một loại dịch vụ. Nếu sau này một checkout có cả xe tuyến và thuê xe thì khóa `ride_trips` trước `rental_vehicle_models`.
   - Hai ngoại lệ của plan 6 (`ReissueAfterMismatch`, `replaceLostLink` khóa checkout mà không khóa sức chứa) cũng áp cho thuê xe, với cùng lý do: không đụng xe và không bao giờ chờ khóa mẫu xe khi đang giữ checkout.
+- ✅ Plan 8: **xe bao chuyến không có dòng sức chứa**. Giữa `listings` và `checkouts` không khóa gì: thứ tự là `partners → listings FOR SHARE → checkouts → bookings → booking_charter_details → payments → partner_balances`.
+  - Bảng giá (`charter_services`, `charter_service_areas`, `charter_vehicle_classes`, `charter_surcharges`) chỉ được đọc khi đã giữ `listings FOR SHARE` (`BookableListing`, khi tạo yêu cầu). Đối tác sửa bảng giá giữ `listings FOR NO KEY UPDATE`. Hai mức khóa này xung đột nhau, nên giá dùng để tạo đơn hoặc đã commit trước, hoặc phải chờ bản sửa commit rồi đọc giá mới.
+  - Các transaction chỉ khóa booking (đón khách bằng QR, "hoàn thành chuyến", No-show, job `FinishCharters`) khóa thẳng dòng `bookings` rồi kiểm tra lại trạng thái.
+  - **Không bao giờ gọi API bản đồ (hay PayOS) khi đang mở transaction.** Báo giá và tạo yêu cầu gọi bản đồ trước (qua cache), rồi mới mở transaction để đọc bảng giá và tính giá.
 - Dòng con của booking (`booking_settlements`, `refunds`, ...) chỉ được khóa sau khi đã khóa dòng `bookings`. Job giải phóng tiền cũng phải khóa booking trước.
 - Các dòng khác khóa bằng `FOR UPDATE`.
 
@@ -246,16 +250,32 @@ Trước khi giữ ghế, transaction đã khóa chuyến **[Builder]**. Ngay l�
 
 **[Builder]** Trigger `ride_trips_booked_immutable` (`BEFORE UPDATE`) chặn sửa `departure_at` và `price_per_seat` khi `seats_reserved > 0` (raise `ride_trip_booked`). App kiểm tra trước và trả lỗi rõ ràng; trigger là lưới an toàn. Đối tác không đổi được giờ của chuyến đã có người đặt, phù hợp với quy tắc đối tác không hủy được đơn đã xác nhận, và không giảm được `seat_capacity` xuống dưới `seats_reserved`. Muốn đổi thì nhờ Super Admin hủy chuyến.
 
-### 5.6 Xe bao chuyến 🔜 plan 8
+### 5.6 Xe bao chuyến ✅ plan 8 (migration `00019`)
 
-| Bảng | Cột chính |
-|---|---|
-| `charter_services` | `listing_id` PK, `max_distance_km numeric(7,1) NULL`, `night_start time NULL`, `night_end time NULL` |
-| `charter_service_areas` | PK `(listing_id, province_code)` |
-| `charter_vehicle_classes` | `id`, `listing_id`, `name`, `seats > 0`, `base_fare ≥ 0`, `price_per_km ≥ 0`, `active` |
-| `charter_surcharges` | `id`, `vehicle_class_id`, `kind` (`night`\|`weekend`\|`holiday`\|`round_trip_waiting`), `calc` (`fixed`\|`percent`), `amount bigint ≥ 0` (VND nếu `fixed`, bps nếu `percent`), `active`, `UNIQUE(vehicle_class_id, kind)` |
+| Bảng | Cột chính | Ràng buộc |
+|---|---|---|
+| `charter_services` | `listing_id` PK FK listings, `max_distance_km numeric(7,1) NULL`, `night_start time NULL`, `night_end time NULL` | `max_distance_km > 0` (NULL = không giới hạn; app nhận 1,0..2000,0 km, tối đa 1 chữ số thập phân). `night_start` và `night_end` cùng NULL hoặc cùng có, và khác nhau. Khung đêm hiểu theo giờ VN, được qua nửa đêm (`night_start > night_end`) |
+| `charter_service_areas` | PK `(listing_id, province_code)`, FK `charter_services`, FK provinces | các tỉnh **điểm đón** được phục vụ, 1..34 tỉnh |
+| `charter_vehicle_classes` | `id`, `listing_id` FK `charter_services`, `name`, `seats` 1..50, `base_fare ≥ 0`, `price_per_km > 0`, `active` | `name` không rỗng. `UNIQUE(id, listing_id)` làm đích cho FK kép từ `booking_charter_details` (mục 1.2). Index `(listing_id)`. App giới hạn `base_fare` 0..50.000.000 và `price_per_km` 1..1.000.000 |
+| `charter_surcharges` | `id`, `vehicle_class_id` FK, `kind` (`night`\|`weekend`\|`holiday`\|`round_trip_waiting`), `calc` (`fixed`\|`percent`), `amount bigint ≥ 0` (VND nếu `fixed`, bps nếu `percent`), `active` | `UNIQUE(vehicle_class_id, kind)`. `CHECK (kind IN ('weekend','holiday') OR calc = 'fixed')`: `night` và `round_trip_waiting` chỉ được `fixed`. `CHECK (calc <> 'percent' OR amount <= 10000)`. App giới hạn phụ phí cố định 0..5.000.000 |
 
-**[Chốt]** Phụ phí nào không có dòng thì bằng 0đ.
+**[Chốt]** Phụ phí nào không có dòng, có `active = false` hoặc `amount = 0` thì bằng 0đ, không áp và không sinh dòng `booking_items`.
+
+✅ **Plan 8** **[Builder]**:
+- **Giá loại xe (ruling R1):** `price_per_km > 0`, nên báo giá không bao giờ là 0đ (checkout 0đ thì PayOS không tạo được link). `price_from` của listing charter trong tìm kiếm và chi tiết public = `min(base_fare + price_per_km)` của các loại xe đang hoạt động, tức giá cho km đầu tiên. Listing charter không còn loại xe nào hoạt động thì không hiện trong tìm kiếm.
+- **Gửi duyệt** listing `private_charter` cần có dịch vụ, ít nhất một khu vực và ít nhất một loại xe đang hoạt động.
+- **Khu vực phục vụ (quyết định C4):** chỉ ràng **tỉnh điểm đón**: tỉnh điểm đón phải thuộc `charter_service_areas`, nếu không thì 422 `outside_service_area`. Điểm trả không giới hạn tỉnh. Tìm kiếm theo tỉnh cũng khớp listing charter có đón ở tỉnh đó. `max_distance_km` so với quãng đường **một chiều**; vượt thì 422 `distance_exceeds_max`.
+- **Quãng đường:** lấy từ API bản đồ (`MAP_PROVIDER`), **làm tròn lên 0,1 km**: `tenths = ceil(distance_m / 100)` (30.200 m → 30,2 km; 30.201 m → 30,3 km). Thời gian chạy làm tròn lên phút.
+- **Công thức giá [Chốt] (spec §5.7):** `giá = base_fare + billed_km × price_per_km + Σ phụ phí áp dụng`.
+  - `billed_km` = `distance_km` (một chiều), hoặc `2 × distance_km` khi khứ hồi.
+  - `distance_total = round_half_up(price_per_km × billed_km)` (`money.MulTenths`).
+  - **Cước** `fare = base_fare + distance_total`. Phụ phí `percent` = `round_half_up(fare × amount / 10000)` (`money.MulBps`), tính trên cước, không tính trên phụ phí khác.
+- **Khi nào áp phụ phí** (theo giờ đón, giờ VN):
+  - `night`: giờ đón nằm trong `[night_start, night_end)`. Khung qua nửa đêm khi `night_start > night_end` (22:00–05:00: 22:00 và 04:59 tính, 05:00 không). Không có khung đêm thì không áp, kể cả khi đã bật phụ phí. Tính một lần, kể cả khứ hồi.
+  - `weekend`: ngày đón là thứ Bảy hoặc Chủ nhật. `holiday`: ngày đón có trong `holidays` (mục 4).
+  - **Cuối tuần trùng ngày lễ (quyết định C1):** không cộng dồn, chỉ áp khoản **lớn hơn**; bằng nhau thì ghi `holiday`.
+  - `round_trip_waiting`: cộng cố định khi đi khứ hồi.
+- **Dòng `booking_items`** theo thứ tự: `charter_base` (`unit_price = base_fare`, `quantity = 1`, bỏ nếu 0), `charter_distance` (`unit_price = price_per_km`, `quantity = billed_km`, một chữ số thập phân, luôn có), rồi mỗi phụ phí > 0 một dòng `surcharge` (`unit_price` = số tiền đã tính, `quantity = 1`) theo thứ tự `night`, `weekend`/`holiday`, `round_trip_waiting`. Tổng các dòng = `gross_amount`.
 
 ### 5.7 Thuê xe tự lái ✅ plan 7 (migration `00018`)
 
@@ -275,7 +295,7 @@ Trước khi giữ ghế, transaction đã khóa chuyến **[Builder]**. Ngay l�
 
 ---
 
-## 6. Booking 🔜 plan 4 (lớp chung + vé tham quan), plan 6–8 (các loại xe)
+## 6. Booking ✅ plan 4 (lớp chung + vé tham quan), plan 6–8 (các loại xe)
 
 ### `checkouts`: một lần khách thanh toán
 | Cột | Kiểu | Ghi chú |
@@ -316,7 +336,7 @@ Trước khi giữ ghế, transaction đã khóa chuyến **[Builder]**. Ngay l�
 |---|---|---|---|
 | Attraction | ngày tham quan + giờ bắt đầu khung | 00:00 ngày hôm sau ngày tham quan theo giờ VN (mốc mở, vé dùng được cả ngày tham quan). Giờ của khung nằm ở `booking_attraction_details.slot_start/slot_end` | check-in → `completed` ngay. Qua `service_end_at` mà chưa check-in → `no_show` |
 | Scheduled Ride | `departure_at` | `departure_at` + `duration_minutes` (chụp lại lúc đặt) | check-in QR chỉ được trong khoảng `departure_at` ± `ride_checkin_window_minutes` (tính cả hai đầu) → `checked_in`. Qua `departure_at` + `ride_no_show_after_minutes` mà chưa check-in → `no_show`. Đã check-in → job `CompleteRides` chuyển `completed` khi `service_end_at ≤ now` (kể cả khi Super Admin đã hủy chuyến sau lúc khách lên xe). Quy tắc 00:00 hôm sau của Attraction không áp cho xe tuyến |
-| Private Charter | `pickup_at` | `return_at` nếu đi khứ hồi, nếu không thì `pickup_at` + thời gian chạy ước tính từ API bản đồ | đối tác bấm hoàn thành, hoặc job tự hoàn thành sau `service_end_at` + `charter_auto_complete_hours` |
+| Private Charter ✅ plan 8 | `pickup_at` (`original_service_start_at` cũng là `pickup_at`) | `return_at` nếu đi khứ hồi, nếu không thì `pickup_at` + thời gian chạy một chiều từ API bản đồ (`ceil(duration_s / 60)` phút) | đón khách (đối tác quét QR) trong khoảng `[pickup_at − 2h, service_end_at + charter_auto_complete_hours)` → `in_service`, ghi `in_service_at = checked_in_at` = giờ đón. Đối tác bấm "hoàn thành chuyến" bất kỳ lúc nào khi `in_service` → `completed` (bấm lại khi đã `completed` thì trả 200, không đổi gì). Đối tác bấm No-show khi đơn còn `confirmed` và `now ≥ pickup_at` → `no_show`. Job `FinishCharters` (mỗi phút): `in_service` mà `now ≥ service_end_at + charter_auto_complete_hours` → `completed`; `confirmed` (chưa đón) cùng mốc → `no_show`, không hoàn tiền. Cả hai đều do actor `system`. Mọi đường kết thúc hẹn giải phóng tiền `release_delay_days` sau lúc kết thúc |
 | Self-Drive Rental ✅ plan 7 | `pickup_at` (`original_service_start_at` cũng là `pickup_at`) | `return_at` theo lịch | giao xe (đối tác quét QR) trong khoảng `[pickup_at − 2h, return_at)` → `in_service`, ghi `in_service_at = checked_in_at` = giờ giao. Đối tác bấm "đã nhận lại xe" bất kỳ lúc nào (sớm cũng được) → `completed`. Đối tác bấm No-show khi đơn còn `confirmed` và `now ≥ pickup_at` → `no_show`. Job `FinishRentals` (mỗi phút): `in_service` mà `now ≥ service_end_at + 24h` → `completed`; `confirmed` (chưa giao xe) mà `now ≥ service_end_at` → `no_show`, tiền xử lý như No-show. Cả hai đều do actor `system`. Mọi đường kết thúc đặt `holds_vehicle = false` và hẹn giải phóng tiền `release_delay_days` sau lúc kết thúc |
 
 Index của job No-show dùng `service_start_at` cho Scheduled Ride, vì mốc No-show của xe tuyến tính theo giờ khởi hành.
@@ -327,6 +347,15 @@ Index của job No-show dùng `service_start_at` cho Scheduled Ride, vì mốc N
 - **Tự kết thúc**: job `FinishRentals` dùng index `(service_end_at) WHERE status IN ('confirmed','checked_in','in_service')` đã có. Đối tác bấm trước thì thắng: job khóa mẫu xe rồi booking và kiểm tra lại trạng thái.
 - **Trả sớm, trả muộn** **[Chốt]**: trả sớm không hoàn tiền; xe trống lại ngay khi đơn rời `in_service` (`holds_vehicle = false`). Không bao giờ sửa `return_at` để thu ngắn khoảng giữ, vì `period` được sinh từ `return_at`. Trả muộn do cửa hàng thu ngoài sàn. Xe đang `in_service` quá giờ trả mà chưa bấm nhận lại thì **không** chặn lượt thuê bắt đầu từ `return_at`: thuê xe là Request Booking, đối tác thấy từng yêu cầu và tự từ chối nếu xe chưa về.
 - **Không đổi lịch**: thuê xe luôn `can_reschedule = false`.
+
+✅ Plan 8, **xe bao chuyến** **[Builder]**:
+- **Không giữ sức chứa nào**: việc nhận chuyến là quyết định của đối tác (spec §6.2). Mọi bước giữ hoặc nhả chỗ của vòng đời Request Booking không làm gì với charter.
+- **Báo giá không lưu (mặc định C6)**: `POST /v1/charter-quotes` (public, 20 lần/phút/IP) trả giá của mọi loại xe đang hoạt động sau **một** lần gọi bản đồ. Khi gửi yêu cầu, body bắt buộc có `quoted_total` (> 0) là tổng khách đã xem. Server gọi lại bản đồ (qua cache 6 giờ), tính lại giá trong transaction; lệch thì 409 `quote_changed` và không tạo gì (không checkout, không booking, không lưu phản hồi Idempotency-Key). Đơn đã tạo giữ snapshot (`booking_items` + `quote`); đối tác sửa giá sau đó không ảnh hưởng.
+- **Bản đồ lỗi**: timeout 5 giây, không retry trong request. Lỗi mạng, HTTP 5xx hoặc timeout → 503 `map_unavailable`; không có đường → 422 `no_route`. Không mở transaction, không giữ Idempotency-Key, nên gửi lại cùng key sau đó vẫn tạo được đơn. Phát lại cùng key không gọi bản đồ.
+- **Thời gian (quyết định C7)**: `pickup_at`, `return_at` tròn phút; `pickup_at ≥ now + request_payment_hours + 1h` (nếu không thì 422 `pickup_too_soon`) và `≤ now + 180 ngày`. Một chiều thì không có `return_at`. Khứ hồi: `return_at ≥ pickup_at + thời gian chạy một chiều` và `≤ pickup_at + 7 ngày`. Tọa độ phải trong khung Việt Nam (`lat` 8,0..23,5, `lng` 102,0..110,0), lưu 6 chữ số thập phân; server không geocode, FE gửi `province_code` của điểm đón.
+- **Hạn của Request Booking** dùng chung với thuê xe (đoạn bên dưới).
+- **Tiền về trễ** (spec §8): đơn trễ (`expired`, hoặc `awaiting_payment` đã quá `hold_release_at`) chỉ được xác nhận lại khi cả ba điều kiện đúng: đối tác **đã chấp nhận** (`accepted_at` có), listing còn bán được (listing hiện, đối tác không bị đình chỉ; ruling R2), và `pickup_at − now ≥ charter_late_confirm_min_hours` (3 giờ: còn đúng 3h00 thì xác nhận, 2h59 thì hoàn). Không thỏa thì đơn `expired`, hoàn `late_payment` 100% (`awaiting_bank_info`), không ghi bút toán. Tiền về **đúng hạn** thì xác nhận bình thường, kể cả khi đối tác bị đình chỉ sau lúc chấp nhận.
+- **Hủy**: như các loại khác. Khách hoặc Super Admin hủy đơn `confirmed` tới `service_end_at`, % hoàn tính theo `original_service_start_at = pickup_at`. `in_service`, `completed`, `no_show` không hủy được. Charter luôn `can_reschedule = false`.
 
 **Hạn của Request Booking** **[Builder]** (plan 7, dùng chung cho plan 8). Các setting đã có trong `platform_settings`: `request_response_hours` (12), `request_payment_hours` (2), `hold_grace_minutes` (5):
 - Tạo yêu cầu: chỉ nhận khi `service_start_at ≥ now + request_payment_hours + 1h` (nếu không thì 422 `pickup_too_soon`). `response_due_at = min(now + request_response_hours, service_start_at − request_payment_hours)`, để đơn được chấp nhận sát hạn vẫn còn đủ thời gian trả tiền trước giờ nhận xe.
@@ -369,7 +398,7 @@ Ràng buộc khác của `bookings` (migration `00012`):
 Index cho job nền (partial index để nhỏ và nhanh):
 - `(hold_release_at) WHERE status IN ('pending_payment','awaiting_payment')`: hết hạn giữ chỗ
 - `(response_due_at) WHERE status = 'requested'`: đối tác quá hạn phản hồi
-- `(service_end_at) WHERE status IN ('confirmed','checked_in','in_service')`: No-show của vé tham quan, tự hoàn thành, và job `FinishRentals` của thuê xe
+- `(service_end_at) WHERE status IN ('confirmed','checked_in','in_service')`: No-show của vé tham quan, tự hoàn thành, job `FinishRentals` của thuê xe và job `FinishCharters` của xe bao chuyến
 - `(service_start_at) WHERE status = 'confirmed' AND service_type = 'scheduled_ride'`: No-show của xe tuyến
 - `(customer_id, created_at DESC)` và `(partner_id, status, service_start_at)`: màn danh sách đơn
 
@@ -380,7 +409,7 @@ Index cho job nền (partial index để nhỏ và nhanh):
 | `booking_ticket_lines` | `booking_item_id` PK, `booking_id`, `listing_id`, `ticket_type_id` | loại vé của từng dòng. FK kép `(booking_item_id, booking_id) → booking_items(id, booking_id)`, `(booking_id, listing_id) → bookings(id, listing_id)`, `(ticket_type_id, listing_id) → attraction_ticket_types(id, listing_id)` |
 | `booking_attraction_details` | `booking_id` PK, `listing_id`, `visit_date date`, `time_slot_id`, `slot_start time`, `slot_end time` | chụp lại giờ của khung, `slot_end > slot_start`. FK kép `(booking_id, listing_id) → bookings`, `(time_slot_id, listing_id) → attraction_time_slots`. Index `(listing_id, visit_date)` và `(time_slot_id, visit_date)` cho `BookingGuard` |
 | `booking_ride_details` ✅ plan 6 (migration `00017`) | `booking_id` PK, `listing_id`, `trip_id`, `seats int > 0`, `direction` (`outbound`\|`return`), `origin_name`, `dest_name` | `origin_name`/`dest_name` chụp lại tên điểm đi, điểm đến của tuyến lúc đặt. FK kép `(booking_id, listing_id) → bookings(id, listing_id)` và `(trip_id, listing_id) → ride_trips(id, listing_id)`, index `(trip_id)`. Booking xe tuyến có đúng một dòng `booking_items` (`line_kind = 'seat'`, `quantity` = số ghế) |
-| `booking_charter_details` | `booking_id` PK, `vehicle_class_id`, `pickup_at`, `pickup_address`, `pickup_lat/lng`, `dropoff_address`, `dropoff_lat/lng`, `distance_km numeric(7,1)`, `is_round_trip`, `return_at NULL`, `quote jsonb` | `quote` chụp lại toàn bộ cách tính giá |
+| `booking_charter_details` ✅ plan 8 (migration `00019`) | `booking_id` PK, `listing_id`, `vehicle_class_id`, `pickup_at`, `pickup_address`, `pickup_lat/lng numeric(9,6)`, `dropoff_address`, `dropoff_lat/lng numeric(9,6)`, `distance_km numeric(7,1) > 0`, `is_round_trip`, `return_at NULL`, `quote jsonb`, `pickup_province_code` FK provinces, `duration_minutes int > 0`, `vehicle_class_name`, `seats` | `quote` chụp lại toàn bộ cách tính giá (loại xe, provider, quãng đường m và km, km tính tiền, thời gian chạy, cước, từng phụ phí, tổng). `distance_km` là quãng đường **một chiều** đã làm tròn lên 0,1 km. Cột bổ sung so với bản cũ, chụp lại lúc đặt: `pickup_province_code` (tỉnh điểm đón, để kiểm khu vực), `duration_minutes` (thời gian chạy một chiều, để tính `service_end_at`), `vehicle_class_name` và `seats` (hiển thị đúng khi đối tác đổi tên loại xe). `CHECK (is_round_trip = (return_at IS NOT NULL))`, `CHECK (return_at IS NULL OR return_at > pickup_at)`, địa chỉ không rỗng. FK kép `(booking_id, listing_id) → bookings(id, listing_id)` và `(vehicle_class_id, listing_id) → charter_vehicle_classes(id, listing_id)`, index `(vehicle_class_id)` |
 | `booking_rental_details` ✅ plan 7 (migration `00018`) | `booking_id` PK, `listing_id`, `vehicle_model_id`, `pickup_point_id NOT NULL`, `pickup_at`, `return_at`, `period tstzrange GENERATED ALWAYS AS (tstzrange(pickup_at, return_at, '[)')) STORED`, `days int > 0`, `model_name`, `pickup_point_name`, `pickup_address`, `destination_province_code` FK provinces, `holds_vehicle bool`, `hold_until timestamptz NULL` | `CHECK (return_at > pickup_at)`, `CHECK (holds_vehicle OR hold_until IS NULL)`. FK kép `(booking_id, listing_id) → bookings`, `(vehicle_model_id, listing_id) → rental_vehicle_models`, `(pickup_point_id, listing_id) → rental_pickup_points`. `model_name`, `pickup_point_name`, `pickup_address` chụp lại lúc đặt. `destination_province_code` là tỉnh khách định đến (bắt buộc), chỉ hiện cho đối tác. Không có `delivery_address` (mục 5.7). `period` do DB sinh, app không ghi. Xem ghi chú bên dưới |
 | `booking_status_history` | `id`, `booking_id`, `from_status`, `to_status`, `actor_kind` (`customer`\|`partner`\|`admin`\|`system`), `actor_user_id NULL`, `reason`, `created_at` | index `(booking_id, created_at)`. `CHECK (actor_kind = 'system' OR actor_user_id IS NOT NULL)` |
 | `booking_reschedules` | `id`, `booking_id` **UNIQUE**, `listing_id`, `from_visit_date`, `from_slot_id`, `to_visit_date`, `to_slot_id`, `created_by`, `created_at` | **[Builder]** dùng `UNIQUE` để DB tự chặn đổi lịch quá 1 lần. Không cần cột `reschedule_count`. Cả hai khung giờ phải thuộc Listing của booking (FK kép qua `listing_id`) |
@@ -401,6 +430,15 @@ Kết hợp với việc khóa dòng `rental_vehicle_models FOR UPDATE` (spec §
 - Request Booking cấm `checked_in`, nên giao xe chuyển `confirmed → in_service` và ghi cả `checked_in_at`.
 - Spec §7 (và bản cũ của tài liệu này) đếm số booking có khoảng giao nhau rồi so với `quantity`. Plan 7 đếm **đỉnh sử dụng cùng lúc** (mục 5.7).
 - Checkout `closed` cả khi khách rút yêu cầu (`customer_withdraw`); tiền về sau khi rút được hoàn `duplicate_payment`.
+
+✅ **Mâu thuẫn và chỗ thiếu đã chốt ở plan 8** (ruling R3):
+- Bản cũ của mục 5.6 cho mọi `kind` dùng `fixed` hoặc `percent`; spec §5.7 nói `night` và `round_trip_waiting` cộng cố định. Migration `00019` chỉ cho `weekend`/`holiday` dùng `percent`, và `percent ≤ 10000`.
+- Bản cũ của mục 5.6 không ghi `UNIQUE(id, listing_id)` cho `charter_vehicle_classes`, trong khi mục 1.2 yêu cầu và `booking_charter_details` cần cho FK kép. Đã thêm.
+- Bản cũ cho `price_per_km ≥ 0`, nên một loại xe có thể giá 0đ. Ruling R1 bắt `price_per_km > 0`.
+- Bản cũ của `booking_charter_details` thiếu tỉnh điểm đón, thời gian chạy, tên và số chỗ của loại xe. Đã thêm `pickup_province_code`, `duration_minutes`, `vehicle_class_name`, `seats`.
+- Khứ hồi lấy `service_end_at = return_at`, tức chưa tính thời gian chạy chiều về. Giữ theo tài liệu này; QR và job tự kết thúc dời thêm `charter_auto_complete_hours` nên không cắt ngang chuyến.
+- Spec §6.2 không có `no_show` trong sơ đồ xe bao chuyến nhưng phần chữ cho đối tác đánh dấu. Plan 8 thêm `confirmed → no_show` do đối tác bấm hoặc do job `FinishCharters`, giống thuê xe.
+- Spec §8 đòi listing còn hiện và đối tác chưa bị đình chỉ khi xác nhận lại đơn tiền về trễ, còn đoạn trên cho đối tác bị đình chỉ vẫn chấp nhận yêu cầu đang chờ. Ruling R2: vẫn chấp nhận được, nhưng tiền về **trễ** khi đối tác bị đình chỉ hoặc listing bị ẩn thì hoàn tiền.
 
 ---
 
@@ -525,6 +563,8 @@ Email không có bảng riêng, chạy qua job River (outbox) như plan 1.
 | Chuyến đã có người đặt giữ nguyên giờ và giá | trigger `ride_trips_booked_immutable` |
 | Mỗi listing không có hai chuyến cùng giờ | `ride_trips UNIQUE(listing_id, departure_at)` |
 | Chuyến và lịch thuộc đúng listing của booking | FK kép `booking_ride_details (trip_id, listing_id)` và `ride_trips (schedule_id, listing_id)` |
+| Loại xe bao chuyến thuộc đúng listing của booking | FK kép `booking_charter_details (vehicle_class_id, listing_id)` |
+| Loại xe bao chuyến không bao giờ giá 0đ, phụ phí đêm và chờ khứ hồi chỉ cố định, phụ phí % không quá 100% | `CHECK` trên `charter_vehicle_classes` (`price_per_km > 0`) và `charter_surcharges` |
 | Sổ cái không bị sửa | trigger chặn UPDATE và DELETE |
 | Đổi lịch tối đa 1 lần | `booking_reschedules.booking_id UNIQUE` |
 | Tối đa 1 review mỗi đơn | `reviews.booking_id UNIQUE` |

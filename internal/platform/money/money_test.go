@@ -45,3 +45,40 @@ func TestMulBpsPanics(t *testing.T) {
 		})
 	}
 }
+
+func TestMulTenths(t *testing.T) {
+	cases := []struct{ amount, tenths, want int64 }{
+		{12_000, 303, 363_600},
+		{12_345, 303, 374_054}, // 374,053.5 rounds up
+		{1, 4, 0},
+		{1, 5, 1},
+		{0, 1000, 0},
+		{12_000, 0, 0},
+	}
+	for _, c := range cases {
+		if got := MulTenths(c.amount, c.tenths); got != c.want {
+			t.Errorf("MulTenths(%d,%d)=%d want %d", c.amount, c.tenths, got, c.want)
+		}
+	}
+}
+
+func TestMulTenthsPanics(t *testing.T) {
+	cases := []struct {
+		name           string
+		amount, tenths int64
+	}{
+		{"amount negative", -1, 10},
+		{"tenths negative", 10, -1},
+		{"overflow", 1 << 40, 1 << 30},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("expected panic")
+				}
+			}()
+			MulTenths(c.amount, c.tenths)
+		})
+	}
+}

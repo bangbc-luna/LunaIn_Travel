@@ -324,6 +324,63 @@ func (q *Queries) GetBookingDetail(ctx context.Context, id uuid.UUID) (GetBookin
 	return i, err
 }
 
+const getCharterDetails = `-- name: GetCharterDetails :one
+SELECT booking_id, listing_id, vehicle_class_id, pickup_at, pickup_address,
+       pickup_lat::float8 AS pickup_lat, pickup_lng::float8 AS pickup_lng,
+       dropoff_address, dropoff_lat::float8 AS dropoff_lat, dropoff_lng::float8 AS dropoff_lng,
+       distance_km::float8 AS distance_km, is_round_trip, return_at, quote,
+       pickup_province_code, duration_minutes, vehicle_class_name, seats
+FROM booking_charter_details WHERE booking_id = $1
+`
+
+type GetCharterDetailsRow struct {
+	BookingID          uuid.UUID
+	ListingID          uuid.UUID
+	VehicleClassID     uuid.UUID
+	PickupAt           time.Time
+	PickupAddress      string
+	PickupLat          float64
+	PickupLng          float64
+	DropoffAddress     string
+	DropoffLat         float64
+	DropoffLng         float64
+	DistanceKm         float64
+	IsRoundTrip        bool
+	ReturnAt           *time.Time
+	Quote              []byte
+	PickupProvinceCode string
+	DurationMinutes    int32
+	VehicleClassName   string
+	Seats              int32
+}
+
+// Coordinates and distance are cast to float8 so no numeric type override is needed.
+func (q *Queries) GetCharterDetails(ctx context.Context, bookingID uuid.UUID) (GetCharterDetailsRow, error) {
+	row := q.db.QueryRow(ctx, getCharterDetails, bookingID)
+	var i GetCharterDetailsRow
+	err := row.Scan(
+		&i.BookingID,
+		&i.ListingID,
+		&i.VehicleClassID,
+		&i.PickupAt,
+		&i.PickupAddress,
+		&i.PickupLat,
+		&i.PickupLng,
+		&i.DropoffAddress,
+		&i.DropoffLat,
+		&i.DropoffLng,
+		&i.DistanceKm,
+		&i.IsRoundTrip,
+		&i.ReturnAt,
+		&i.Quote,
+		&i.PickupProvinceCode,
+		&i.DurationMinutes,
+		&i.VehicleClassName,
+		&i.Seats,
+	)
+	return i, err
+}
+
 const getCheckout = `-- name: GetCheckout :one
 SELECT id, code, customer_id, total_amount, status, created_at, updated_at, paid_payment_id FROM checkouts WHERE id = $1
 `
@@ -502,6 +559,102 @@ func (q *Queries) InsertBookingItem(ctx context.Context, arg InsertBookingItemPa
 		arg.UnitPrice,
 		arg.Quantity,
 		arg.LineTotal,
+		arg.Now,
+	)
+	return err
+}
+
+const insertBookingItemTenths = `-- name: InsertBookingItemTenths :exec
+INSERT INTO booking_items (id, booking_id, line_kind, description, unit_price, quantity, line_total, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, ($6::bigint)::numeric / 10, $7, $8, $8)
+`
+
+type InsertBookingItemTenthsParams struct {
+	ID             uuid.UUID
+	BookingID      uuid.UUID
+	LineKind       string
+	Description    string
+	UnitPrice      int64
+	QuantityTenths int64
+	LineTotal      int64
+	Now            time.Time
+}
+
+// A booking line whose quantity has one decimal (charter_distance km), sent
+// as tenths so no float reaches the CHECK line_total =
+// round(unit_price × quantity).
+func (q *Queries) InsertBookingItemTenths(ctx context.Context, arg InsertBookingItemTenthsParams) error {
+	_, err := q.db.Exec(ctx, insertBookingItemTenths,
+		arg.ID,
+		arg.BookingID,
+		arg.LineKind,
+		arg.Description,
+		arg.UnitPrice,
+		arg.QuantityTenths,
+		arg.LineTotal,
+		arg.Now,
+	)
+	return err
+}
+
+const insertCharterDetail = `-- name: InsertCharterDetail :exec
+INSERT INTO booking_charter_details (
+    booking_id, listing_id, vehicle_class_id, pickup_at,
+    pickup_address, pickup_lat, pickup_lng, dropoff_address, dropoff_lat, dropoff_lng,
+    distance_km, is_round_trip, return_at, quote,
+    pickup_province_code, duration_minutes, vehicle_class_name, seats, created_at
+) VALUES (
+    $1, $2, $3, $4,
+    $5, $6::float8, $7::float8, $8, $9::float8, $10::float8,
+    ($11::int)::numeric / 10, $12, $13, $14,
+    $15, $16::int, $17, $18::int, $19
+)
+`
+
+type InsertCharterDetailParams struct {
+	BookingID          uuid.UUID
+	ListingID          uuid.UUID
+	VehicleClassID     uuid.UUID
+	PickupAt           time.Time
+	PickupAddress      string
+	PickupLat          float64
+	PickupLng          float64
+	DropoffAddress     string
+	DropoffLat         float64
+	DropoffLng         float64
+	DistanceTenths     int32
+	IsRoundTrip        bool
+	ReturnAt           *time.Time
+	Quote              []byte
+	PickupProvinceCode string
+	DurationMinutes    int32
+	VehicleClassName   string
+	Seats              int32
+	Now                time.Time
+}
+
+// Coordinates arrive as float8 (already rounded to 6 decimals) and the
+// one-way distance as tenths of a km.
+func (q *Queries) InsertCharterDetail(ctx context.Context, arg InsertCharterDetailParams) error {
+	_, err := q.db.Exec(ctx, insertCharterDetail,
+		arg.BookingID,
+		arg.ListingID,
+		arg.VehicleClassID,
+		arg.PickupAt,
+		arg.PickupAddress,
+		arg.PickupLat,
+		arg.PickupLng,
+		arg.DropoffAddress,
+		arg.DropoffLat,
+		arg.DropoffLng,
+		arg.DistanceTenths,
+		arg.IsRoundTrip,
+		arg.ReturnAt,
+		arg.Quote,
+		arg.PickupProvinceCode,
+		arg.DurationMinutes,
+		arg.VehicleClassName,
+		arg.Seats,
 		arg.Now,
 	)
 	return err
@@ -962,6 +1115,44 @@ func (q *Queries) ListBookings(ctx context.Context, arg ListBookingsParams) ([]L
 			return nil, err
 		}
 		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listCharterAutoFinish = `-- name: ListCharterAutoFinish :many
+SELECT id FROM bookings
+WHERE status IN ('confirmed', 'in_service') AND service_type = 'private_charter'
+  AND service_end_at <= $1::timestamptz
+  AND NOT (id = ANY($2::uuid[]))
+ORDER BY service_end_at, id
+LIMIT $3
+`
+
+type ListCharterAutoFinishParams struct {
+	Cutoff time.Time
+	Skip   []uuid.UUID
+	Lim    int32
+}
+
+// FinishCharters: confirmed or in_service private charters whose
+// service_end_at is at or before @cutoff = now − charter_auto_complete_hours
+// (bookings_service_end_idx).
+func (q *Queries) ListCharterAutoFinish(ctx context.Context, arg ListCharterAutoFinishParams) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listCharterAutoFinish, arg.Cutoff, arg.Skip, arg.Lim)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

@@ -93,11 +93,23 @@ func TestCreate_RejectsUnknownServiceType(t *testing.T) {
 	require.Equal(t, "invalid_service_type", code)
 }
 
-// Ruling 5: only attraction_ticket can be listed for now.
+// futureType registers a service type the listing module has no detail model
+// for (every catalog type is supported now).
+const futureType = "hot_air_balloon"
+
+func (e *env) registerFutureType(t *testing.T) {
+	t.Helper()
+	_, err := e.Pool.Exec(context.Background(),
+		`INSERT INTO service_types (code, name, booking_mode, sort_order) VALUES ($1, 'Khinh khí cầu', 'request', 9)`, futureType)
+	require.NoError(t, err)
+}
+
+// Ruling 5: a catalog type without a detail model cannot be listed.
 func TestCreate_UnsupportedServiceType422(t *testing.T) {
 	e := newEnv(t)
-	p := e.partner(t, "Alpha", attraction, "private_charter")
-	_, err := e.Svc.Create(context.Background(), p.ID, p.OwnerUserID, listing.CreateInput{ServiceType: "private_charter", Title: "Xe"})
+	e.registerFutureType(t)
+	p := e.partner(t, "Alpha", attraction, futureType)
+	_, err := e.Svc.Create(context.Background(), p.ID, p.OwnerUserID, listing.CreateInput{ServiceType: futureType, Title: "Xe"})
 	requireErr(t, err, http.StatusUnprocessableEntity, "service_type_not_supported")
 	require.Contains(t, err.Error(), "Loại dịch vụ này chưa hỗ trợ đăng bán")
 	require.Zero(t, e.count(t, `SELECT count(*) FROM listings`))
@@ -108,9 +120,10 @@ func TestCreate_UnsupportedServiceType422(t *testing.T) {
 // complete, has no admin/public detail and is never bookable.
 func TestUnsupportedServiceType_FailsClosed(t *testing.T) {
 	e := newEnv(t)
+	e.registerFutureType(t)
 	ctx := context.Background()
-	p := e.partner(t, "Alpha", attraction, "private_charter")
-	id := e.rawListing(t, p, "private_charter", "Xe")
+	p := e.partner(t, "Alpha", attraction, futureType)
+	id := e.rawListing(t, p, futureType, "Xe")
 	_, _, err := e.Svc.SetImages(ctx, p.ID, p.OwnerUserID, id, []uuid.UUID{e.upload(t, p.OwnerUserID, "listing_image")}, nil)
 	require.NoError(t, err)
 

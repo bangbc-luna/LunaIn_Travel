@@ -55,8 +55,15 @@ Lịch lặp của một Route (giờ khởi hành, các thứ trong tuần, kho
 Hai Booking riêng (chiều đi và chiều về) trong cùng một Checkout, thanh toán chung một lần. Chiều về là Route ngược lại của cùng đối tác, cùng số ghế; hai chiều được hủy cùng nhau.
 
 **Private Charter** (Xe bao chuyến):
-Loại dịch vụ xe có tài xế mà khách bao nguyên xe; giá tính theo km cộng phụ phí.
+Loại dịch vụ xe có tài xế mà khách bao nguyên xe, đi theo yêu cầu (Request Booking). Khách chọn điểm đón và điểm trả trên bản đồ, hệ thống báo giá cho từng loại xe: giá mở cửa + số km (quãng đường từ API bản đồ, làm tròn lên 0,1 km; khứ hồi tính hai lần) × giá mỗi km + phụ phí (ban đêm, cuối tuần hoặc ngày lễ, chờ khứ hồi). Không giữ chỗ: đối tác tự quyết định nhận chuyến.
 _Avoid_: Taxi, private transfer
+
+**Charter Quote** (Báo giá xe bao chuyến):
+Giá của một chuyến xe bao chuyến cho từng loại xe, tính lúc khách xem; không lưu và không có hạn. Khi gửi yêu cầu, khách gửi kèm tổng đã xem; giá đã đổi thì yêu cầu bị từ chối để khách xem lại.
+_Avoid_: Estimate (khi ý là giá chốt)
+
+**Service Area** (Khu vực phục vụ):
+Các tỉnh/thành mà nhà xe bao chuyến nhận **đón** khách; điểm trả không giới hạn.
 
 **Self-Drive Rental** (Thuê xe tự lái):
 Loại dịch vụ cho khách thuê xe tự lái, tính theo ngày 24 giờ kể từ giờ nhận xe.
@@ -103,6 +110,9 @@ Check-in của Self-Drive Rental: đối tác quét QR khi giao xe cho khách, t
 **Vehicle Return** (Nhận lại xe):
 Việc đối tác xác nhận đã nhận lại xe thuê, sớm hay đúng hạn; Booking hoàn thành, xe trống lại ngay, trả sớm không hoàn tiền. Đối tác quên bấm thì hệ thống tự hoàn thành sau giờ trả 24 giờ.
 
+**Charter Pickup** (Đón khách):
+Check-in của Private Charter: đối tác quét QR khi đón khách, từ 2 giờ trước giờ đón; Booking chuyển sang đang phục vụ. Xong chuyến thì đối tác bấm "hoàn thành chuyến"; quên bấm thì hệ thống tự hoàn thành sau giờ kết thúc chuyến 24 giờ.
+
 **Hold** (Giữ chỗ):
 Khoảng thời gian ghế hoặc xe được giữ cho một Booking chưa thanh toán; quá hạn thì Booking hết hiệu lực và chỗ được nhả.
 
@@ -110,7 +120,7 @@ Khoảng thời gian ghế hoặc xe được giữ cho một Booking chưa than
 Việc đối tác quét mã QR của Booking để xác nhận khách đã đến sử dụng dịch vụ.
 
 **No-show** (Bỏ vé):
-Booking đã thanh toán mà khách không đến sử dụng dịch vụ; không hoàn tiền, đối tác vẫn nhận tiền như đã hoàn thành. Vé tham quan: qua ngày tham quan mà chưa Check-in. Xe tuyến: quá giờ khởi hành một khoảng mà chưa Check-in. Thuê xe tự lái: đối tác đánh dấu khách không đến nhận xe (từ giờ nhận xe trở đi), hoặc tới giờ trả mà xe chưa được giao.
+Booking đã thanh toán mà khách không đến sử dụng dịch vụ; không hoàn tiền, đối tác vẫn nhận tiền như đã hoàn thành. Vé tham quan: qua ngày tham quan mà chưa Check-in. Xe tuyến: quá giờ khởi hành một khoảng mà chưa Check-in. Thuê xe tự lái: đối tác đánh dấu khách không đến nhận xe (từ giờ nhận xe trở đi), hoặc tới giờ trả mà xe chưa được giao. Xe bao chuyến: đối tác đánh dấu khách không có mặt ở điểm đón (từ giờ đón trở đi), hoặc quá giờ kết thúc chuyến 24 giờ mà khách chưa được đón.
 
 **Reschedule** (Đổi lịch):
 Việc khách đổi ngày hoặc khung giờ của một Booking vé tham quan; tối đa một lần, phải làm trong 14 ngày kể từ lúc thanh toán.

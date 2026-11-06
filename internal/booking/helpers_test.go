@@ -34,6 +34,7 @@ import (
 	"github.com/bangbc-luna/lunain-travel/internal/platform/httpx"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/jobs"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/mailer"
+	"github.com/bangbc-luna/lunain-travel/internal/platform/maps"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/storage"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/testutil"
 	"github.com/bangbc-luna/lunain-travel/internal/settings"
@@ -64,6 +65,8 @@ type env struct {
 	Issuer   *auth.Issuer
 	Pool     *pgxpool.Pool
 	Clock    *clock.Fixed
+	Maps     *maps.Fake
+	Settings *settings.Service
 	Handler  http.Handler
 	Admin    uuid.UUID
 
@@ -93,8 +96,11 @@ func newBareEnv(t *testing.T) *env {
 	pSvc := partner.NewService(partner.Deps{
 		Pool: pool, Clock: clk, Users: idSvc, Catalog: cat, Geo: geoSvc, Files: fileSvc,
 	})
+	settingsSvc := settings.NewService(pool, clk)
+	mapsFake := maps.NewFake()
 	lSvc := listing.NewService(listing.Deps{
 		Pool: pool, Clock: clk, Partners: pSvc, Catalog: cat, Geo: geoSvc, Files: fileSvc, BookingGuard: booking.Guard{},
+		Maps: mapsFake, Holidays: settingsSvc,
 	})
 	fake := payment.NewFake()
 	fake.Now = clk.Now
@@ -106,7 +112,7 @@ func newBareEnv(t *testing.T) *env {
 	jobClient, err := jobs.NewClient(pool, workers, slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
 	svc := booking.NewService(booking.Deps{
-		Pool: pool, Clock: clk, Listings: lSvc, Catalog: cat, Settings: settings.NewService(pool, clk),
+		Pool: pool, Clock: clk, Listings: lSvc, Catalog: cat, Settings: settingsSvc,
 		Identity: idSvc, Payments: paySvc, Ledger: ledgerSvc, Partners: pSvc, Jobs: jobClient,
 	})
 	mux := http.NewServeMux()
@@ -118,6 +124,7 @@ func newBareEnv(t *testing.T) *env {
 	e := &env{
 		Svc: svc, Listing: lSvc, Partner: pSvc, Identity: idSvc, Catalog: cat, Payments: paySvc, Fake: fake,
 		Ledger: ledgerSvc, Files: fileSvc, Issuer: iss, Pool: pool, Clock: clk,
+		Maps: mapsFake, Settings: settingsSvc,
 		Handler: httpx.Chain(mux, httpx.RequestID, httpx.Recover),
 	}
 	require.NoError(t, db.InTx(context.Background(), pool, func(tx pgx.Tx) error {

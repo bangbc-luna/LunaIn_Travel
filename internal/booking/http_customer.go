@@ -124,6 +124,21 @@ func (s *Service) CustomerRoutes(mux httpx.Router, iss *auth.Issuer) {
 		writeView(w, r, http.StatusCreated, v, err)
 	}))
 
+	mux.Handle(endpointCharter, customer(func(w http.ResponseWriter, r *http.Request, userID uuid.UUID) {
+		key := r.Header.Get("Idempotency-Key")
+		if !validIdemKey(key) {
+			httpx.WriteError(w, r, ErrIdempotencyKeyRequired)
+			return
+		}
+		var in CreateCharterInput
+		if err := httpx.DecodeJSON(r, &in); err != nil {
+			httpx.WriteError(w, r, err)
+			return
+		}
+		v, err := s.CreateCharter(r.Context(), userID, key, in)
+		writeView(w, r, http.StatusCreated, v, err)
+	}))
+
 	mux.Handle("GET /v1/bookings", customer(func(w http.ResponseWriter, r *http.Request, userID uuid.UUID) {
 		f, err := parseListFilter(r.URL.Query())
 		if err != nil {

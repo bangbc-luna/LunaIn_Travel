@@ -46,6 +46,10 @@ type Config struct {
 	PayOSBaseURL     string
 	PayOSReturnURL   string
 	PayOSCancelURL   string
+	// Map provider for charter distances. MapProvider is "goong" or "fake".
+	MapProvider  string
+	GoongAPIKey  string
+	GoongBaseURL string
 
 	trustedProxyHopsSet      bool
 	paymentProviderDefaulted bool
@@ -78,6 +82,14 @@ func (c Config) PaymentWarnings() []string {
 	return w
 }
 
+// MapWarnings returns startup warnings about the map provider setup.
+func (c Config) MapWarnings() []string {
+	if c.MapProvider == "fake" {
+		return []string{"map provider is FAKE — distances are estimates"}
+	}
+	return nil
+}
+
 // rawEnv mirrors the environment; secrets are strings because env would
 // parse a []byte as a comma-separated list of numbers.
 type rawEnv struct {
@@ -107,6 +119,9 @@ type rawEnv struct {
 	PayOSBaseURL      string `env:"PAYOS_BASE_URL" envDefault:"https://api-merchant.payos.vn"`
 	PayOSReturnURL    string `env:"PAYOS_RETURN_URL"`
 	PayOSCancelURL    string `env:"PAYOS_CANCEL_URL"`
+	MapProvider       string `env:"MAP_PROVIDER"`
+	GoongAPIKey       string `env:"GOONG_API_KEY"`
+	GoongBaseURL      string `env:"GOONG_BASE_URL" envDefault:"https://rsapi.goong.io"`
 }
 
 // Load reads the environment and validates it.
@@ -144,6 +159,19 @@ func Load() (Config, error) {
 		PayOSBaseURL:     raw.PayOSBaseURL,
 		PayOSReturnURL:   raw.PayOSReturnURL,
 		PayOSCancelURL:   raw.PayOSCancelURL,
+
+		MapProvider:  raw.MapProvider,
+		GoongAPIKey:  raw.GoongAPIKey,
+		GoongBaseURL: raw.GoongBaseURL,
+	}
+	if cfg.MapProvider == "" {
+		// Unset: goong when keyed, otherwise fake outside prod (prod's missing
+		// key is reported by validate).
+		if cfg.GoongAPIKey != "" || cfg.AppEnv == "prod" {
+			cfg.MapProvider = "goong"
+		} else {
+			cfg.MapProvider = "fake"
+		}
 	}
 	cfg.paymentProviderDefaulted = cfg.PaymentProvider == ""
 	if cfg.PaymentProvider == "" {
@@ -216,6 +244,24 @@ func (c Config) validate() error {
 		}
 	default:
 		return fmt.Errorf("PAYMENT_PROVIDER must be payos or fake, got %q", c.PaymentProvider)
+	}
+	switch c.MapProvider {
+	case "fake":
+		if c.AppEnv == "prod" {
+			return errors.New("MAP_PROVIDER must be goong when APP_ENV=prod")
+		}
+	case "goong":
+		if c.GoongAPIKey == "" {
+			return errors.New("GOONG_API_KEY is required when MAP_PROVIDER=goong")
+		}
+		if c.GoongBaseURL == "" {
+			return errors.New("GOONG_BASE_URL is required when MAP_PROVIDER=goong")
+		}
+		if c.AppEnv == "prod" && !strings.HasPrefix(c.GoongBaseURL, "https://") {
+			return errors.New("GOONG_BASE_URL must start with https:// when APP_ENV=prod")
+		}
+	default:
+		return fmt.Errorf("MAP_PROVIDER must be goong or fake, got %q", c.MapProvider)
 	}
 	return nil
 }

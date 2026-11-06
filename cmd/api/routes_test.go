@@ -29,6 +29,7 @@ import (
 	"github.com/bangbc-luna/lunain-travel/internal/platform/clock"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/db"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/httpx"
+	"github.com/bangbc-luna/lunain-travel/internal/platform/maps"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/storage"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/testutil"
 	"github.com/bangbc-luna/lunain-travel/internal/reconcile"
@@ -70,11 +71,11 @@ func newTestAppEnv(t *testing.T, appEnv string) *testApp {
 	partnerSvc := partner.NewService(partner.Deps{
 		Pool: pool, Clock: clk, Users: idSvc, Catalog: catSvc, Geo: geoSvc, Files: fileSvc,
 	})
+	settingsSvc := settings.NewService(pool, clk)
 	listingSvc := listing.NewService(listing.Deps{
 		Pool: pool, Clock: clk, Partners: partnerSvc, Catalog: catSvc, Geo: geoSvc, Files: fileSvc,
-		BookingGuard: booking.Guard{},
+		BookingGuard: booking.Guard{}, Maps: maps.NewFake(), Holidays: settingsSvc,
 	})
-	settingsSvc := settings.NewService(pool, clk)
 	paymentSvc := payment.NewService(pool, clk, payment.NewFake(), nil)
 	ledgerSvc := ledger.NewService(pool, clk)
 	bookingSvc := booking.NewService(booking.Deps{
@@ -255,6 +256,11 @@ var partnerRoutes = []route{
 	{"PATCH /v1/partner/listings/{id}/rental-pickup-points/{pointID}", "/v1/partner/listings/" + uuid.Nil.String() + "/rental-pickup-points/" + uuid.Nil.String()},
 	{"POST /v1/partner/listings/{id}/rental-models", "/v1/partner/listings/" + uuid.Nil.String() + "/rental-models"},
 	{"PATCH /v1/partner/listings/{id}/rental-models/{modelID}", "/v1/partner/listings/" + uuid.Nil.String() + "/rental-models/" + uuid.Nil.String()},
+	{"GET /v1/partner/listings/{id}/charter", "/v1/partner/listings/" + uuid.Nil.String() + "/charter"},
+	{"PUT /v1/partner/listings/{id}/charter-service", "/v1/partner/listings/" + uuid.Nil.String() + "/charter-service"},
+	{"POST /v1/partner/listings/{id}/charter-classes", "/v1/partner/listings/" + uuid.Nil.String() + "/charter-classes"},
+	{"PATCH /v1/partner/listings/{id}/charter-classes/{classID}", "/v1/partner/listings/" + uuid.Nil.String() + "/charter-classes/" + uuid.Nil.String()},
+	{"PUT /v1/partner/listings/{id}/charter-classes/{classID}/surcharges", "/v1/partner/listings/" + uuid.Nil.String() + "/charter-classes/" + uuid.Nil.String() + "/surcharges"},
 	{"GET /v1/partner/listings/{id}/ride-trips", "/v1/partner/listings/" + uuid.Nil.String() + "/ride-trips"},
 	{"POST /v1/partner/listings/{id}/ride-trips", "/v1/partner/listings/" + uuid.Nil.String() + "/ride-trips"},
 	{"PATCH /v1/partner/listings/{id}/ride-trips/{tripID}", "/v1/partner/listings/" + uuid.Nil.String() + "/ride-trips/" + uuid.Nil.String()},
@@ -269,6 +275,7 @@ var partnerRoutes = []route{
 	{"POST /v1/partner/bookings/{id}/reject", "/v1/partner/bookings/" + uuid.Nil.String() + "/reject"},
 	{"POST /v1/partner/bookings/{id}/no-show", "/v1/partner/bookings/" + uuid.Nil.String() + "/no-show"},
 	{"POST /v1/partner/bookings/{id}/return", "/v1/partner/bookings/" + uuid.Nil.String() + "/return"},
+	{"POST /v1/partner/bookings/{id}/complete", "/v1/partner/bookings/" + uuid.Nil.String() + "/complete"},
 	{"POST /v1/partner/check-ins", "/v1/partner/check-ins"},
 	{"POST /v1/partner/payouts", "/v1/partner/payouts"},
 	{"GET /v1/partner/payouts", "/v1/partner/payouts"},
@@ -367,6 +374,9 @@ func TestPublicRoutes(t *testing.T) {
 	// not a 401.
 	require.Equal(t, []string{"GET /v1/rental-vehicles"}, recordedUnder(app.patterns, "/v1/rental-vehicles"))
 	requireError(t, app.do("GET", "/v1/rental-vehicles", ""), http.StatusBadRequest, "invalid_request", "rental search without parameters")
+	// The charter quote needs no token: an empty quote is a 422, not a 401.
+	require.Equal(t, []string{"POST /v1/charter-quotes"}, recordedUnder(app.patterns, "/v1/charter-quotes"))
+	requireError(t, app.do("POST", "/v1/charter-quotes", ""), http.StatusUnprocessableEntity, "invalid_location", "empty charter quote")
 	rec = app.do("GET", "/nope", "")
 	require.Equal(t, http.StatusNotFound, rec.Code)
 	require.Contains(t, rec.Body.String(), `"error"`)
@@ -377,6 +387,7 @@ var customerBookingRoutes = []route{
 	{"POST /v1/bookings/attraction", "/v1/bookings/attraction"},
 	{"POST /v1/bookings/ride", "/v1/bookings/ride"},
 	{"POST /v1/bookings/rental", "/v1/bookings/rental"},
+	{"POST /v1/bookings/charter", "/v1/bookings/charter"},
 	{"GET /v1/bookings", "/v1/bookings"},
 	{"GET /v1/bookings/{id}", "/v1/bookings/" + uuid.Nil.String()},
 	{"POST /v1/bookings/{id}/pay", "/v1/bookings/" + uuid.Nil.String() + "/pay"},

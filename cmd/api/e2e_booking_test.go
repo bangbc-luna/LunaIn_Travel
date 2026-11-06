@@ -36,26 +36,30 @@ import (
 	"github.com/bangbc-luna/lunain-travel/internal/platform/httpx"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/jobs"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/mailer"
+	"github.com/bangbc-luna/lunain-travel/internal/platform/maps"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/storage"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/testutil"
 	"github.com/bangbc-luna/lunain-travel/internal/reconcile"
 	"github.com/bangbc-luna/lunain-travel/internal/settings"
 )
 
-// e2eApp is the real mux wired like main (payment.Fake, BookingGuard,
-// release, no-show, complete-rides and finish-rentals workers, payment ops,
-// payout and reconcile services) over a fresh Postgres with a movable clock. The job client
-// is never started: emails stay in river_job, where the test reads the
-// verification code.
+// e2eApp is the real mux wired like main (payment.Fake, maps.Fake,
+// BookingGuard, release, no-show, complete-rides, finish-rentals and
+// finish-charters workers, payment ops, payout and reconcile services) over a
+// fresh Postgres with a movable clock. The job client is never started:
+// emails stay in river_job, where the test reads the verification code.
 type e2eApp struct {
-	handler  http.Handler
-	pool     *pgxpool.Pool
-	clock    *clock.Fixed
-	ledger   *ledger.Service
-	release  *booking.ReleaseWorker
-	noShow   *booking.NoShowWorker
-	complete *booking.CompleteRidesWorker
-	finish   *booking.FinishRentalsWorker
+	handler        http.Handler
+	pool           *pgxpool.Pool
+	clock          *clock.Fixed
+	ledger         *ledger.Service
+	release        *booking.ReleaseWorker
+	noShow         *booking.NoShowWorker
+	complete       *booking.CompleteRidesWorker
+	finish         *booking.FinishRentalsWorker
+	finishCharters *booking.FinishChartersWorker
+	// maps is the map provider of the charter quotes and requests.
+	maps *maps.Fake
 }
 
 func newE2EApp(t *testing.T, now time.Time) *e2eApp {
@@ -77,11 +81,12 @@ func newE2EApp(t *testing.T, now time.Time) *e2eApp {
 	partnerSvc := partner.NewService(partner.Deps{
 		Pool: pool, Clock: clk, Users: idSvc, Catalog: catSvc, Geo: geoSvc, Files: fileSvc,
 	})
+	settingsSvc := settings.NewService(pool, clk)
+	mapFake := maps.NewFake()
 	listingSvc := listing.NewService(listing.Deps{
 		Pool: pool, Clock: clk, Partners: partnerSvc, Catalog: catSvc, Geo: geoSvc, Files: fileSvc,
-		BookingGuard: booking.Guard{},
+		BookingGuard: booking.Guard{}, Maps: mapFake, Holidays: settingsSvc,
 	})
-	settingsSvc := settings.NewService(pool, clk)
 	fake := payment.NewFake()
 	fake.Now = clk.Now
 	paymentSvc := payment.NewService(pool, clk, fake, nil)
@@ -115,7 +120,9 @@ func newE2EApp(t *testing.T, now time.Time) *e2eApp {
 		handler: httpx.Chain(mux, httpx.RequestID, httpx.Recover), pool: pool, clock: clk,
 		ledger: ledgerSvc, release: &booking.ReleaseWorker{Service: bookingSvc},
 		noShow: &booking.NoShowWorker{Service: bookingSvc}, complete: &booking.CompleteRidesWorker{Service: bookingSvc},
-		finish: &booking.FinishRentalsWorker{Service: bookingSvc},
+		finish:         &booking.FinishRentalsWorker{Service: bookingSvc},
+		finishCharters: &booking.FinishChartersWorker{Service: bookingSvc},
+		maps:           mapFake,
 	}
 }
 

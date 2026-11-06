@@ -29,8 +29,10 @@ import (
 	"github.com/bangbc-luna/lunain-travel/internal/platform/clock"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/db"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/httpx"
+	"github.com/bangbc-luna/lunain-travel/internal/platform/maps"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/storage"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/testutil"
+	"github.com/bangbc-luna/lunain-travel/internal/settings"
 )
 
 var testNow = time.Date(2026, 11, 4, 9, 0, 0, 0, time.FixedZone("ICT", 7*3600))
@@ -47,6 +49,8 @@ type env struct {
 	Pool     *pgxpool.Pool
 	Files    *files.Service
 	Clock    *clock.Fixed
+	Maps     *maps.Fake
+	Settings *settings.Service
 	Admin    uuid.UUID
 	Handler  http.Handler
 }
@@ -66,16 +70,21 @@ func newEnv(t *testing.T) *env {
 	pSvc := partner.NewService(partner.Deps{
 		Pool: pool, Clock: clk, Users: idSvc, Catalog: cat, Geo: geoSvc, Files: fileSvc,
 	})
+	fake := maps.NewFake()
+	setSvc := settings.NewService(pool, clk)
 	svc := listing.NewService(listing.Deps{
 		Pool: pool, Clock: clk, Partners: pSvc, Catalog: cat, Geo: geoSvc, Files: fileSvc, BookingGuard: booking.Guard{},
+		Maps: fake, Holidays: setSvc,
 	})
 	mux := http.NewServeMux()
 	svc.PartnerRoutes(mux, iss, pSvc.RequireMember())
 	svc.AdminRoutes(mux, iss)
 	svc.PublicRoutes(mux)
+	svc.CharterQuoteRoutes(mux, httpx.ClientIPFunc(0))
 	mux.HandleFunc("/", httpx.NotFound)
 	e := &env{
 		Svc: svc, Files: fileSvc, Partner: pSvc, Identity: idSvc, Issuer: iss, Pool: pool, Clock: clk,
+		Maps: fake, Settings: setSvc,
 		Handler: httpx.Chain(mux, httpx.RequestID, httpx.Recover),
 	}
 	require.NoError(t, db.InTx(context.Background(), pool, func(tx pgx.Tx) error {

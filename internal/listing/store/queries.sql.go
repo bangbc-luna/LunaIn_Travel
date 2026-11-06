@@ -137,6 +137,17 @@ func (q *Queries) CancelTrip(ctx context.Context, arg CancelTripParams) (RideTri
 	return i, err
 }
 
+const countActiveCharterClasses = `-- name: CountActiveCharterClasses :one
+SELECT count(*) FROM charter_vehicle_classes WHERE listing_id = $1 AND active
+`
+
+func (q *Queries) CountActiveCharterClasses(ctx context.Context, listingID uuid.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, countActiveCharterClasses, listingID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const countActiveRentalPickupPoints = `-- name: CountActiveRentalPickupPoints :one
 SELECT count(*) FROM rental_pickup_points WHERE listing_id = $1 AND active
 `
@@ -198,6 +209,17 @@ func (q *Queries) CountListingImages(ctx context.Context, listingID uuid.UUID) (
 	return count, err
 }
 
+const countProvincesIn = `-- name: CountProvincesIn :one
+SELECT count(*) FROM provinces WHERE code = ANY($1::text[])
+`
+
+func (q *Queries) CountProvincesIn(ctx context.Context, codes []string) (int64, error) {
+	row := q.db.QueryRow(ctx, countProvincesIn, codes)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const countRentableRentalModels = `-- name: CountRentableRentalModels :one
 SELECT count(*) FROM rental_vehicle_models WHERE listing_id = $1 AND active AND quantity > 0
 `
@@ -209,12 +231,43 @@ func (q *Queries) CountRentableRentalModels(ctx context.Context, listingID uuid.
 	return count, err
 }
 
+const deactivateCharterSurchargesNotIn = `-- name: DeactivateCharterSurchargesNotIn :exec
+UPDATE charter_surcharges SET active = false, updated_at = $1
+WHERE vehicle_class_id = $2 AND active AND NOT (kind = ANY($3::text[]))
+`
+
+type DeactivateCharterSurchargesNotInParams struct {
+	Now            time.Time
+	VehicleClassID uuid.UUID
+	Kinds          []string
+}
+
+func (q *Queries) DeactivateCharterSurchargesNotIn(ctx context.Context, arg DeactivateCharterSurchargesNotInParams) error {
+	_, err := q.db.Exec(ctx, deactivateCharterSurchargesNotIn, arg.Now, arg.VehicleClassID, arg.Kinds)
+	return err
+}
+
 const deleteCancellationTiers = `-- name: DeleteCancellationTiers :exec
 DELETE FROM listing_cancellation_tiers WHERE listing_id = $1
 `
 
 func (q *Queries) DeleteCancellationTiers(ctx context.Context, listingID uuid.UUID) error {
 	_, err := q.db.Exec(ctx, deleteCancellationTiers, listingID)
+	return err
+}
+
+const deleteCharterAreasNotIn = `-- name: DeleteCharterAreasNotIn :exec
+DELETE FROM charter_service_areas
+WHERE listing_id = $1 AND NOT (province_code = ANY($2::text[]))
+`
+
+type DeleteCharterAreasNotInParams struct {
+	ListingID uuid.UUID
+	Codes     []string
+}
+
+func (q *Queries) DeleteCharterAreasNotIn(ctx context.Context, arg DeleteCharterAreasNotInParams) error {
+	_, err := q.db.Exec(ctx, deleteCharterAreasNotIn, arg.ListingID, arg.Codes)
 	return err
 }
 
@@ -273,6 +326,35 @@ func (q *Queries) GetAttraction(ctx context.Context, listingID uuid.UUID) (Attra
 		&i.CheckinInstructions,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getCharterService = `-- name: GetCharterService :one
+SELECT listing_id, COALESCE(round(max_distance_km * 10), 0)::bigint AS max_distance_tenths,
+       COALESCE(to_char(night_start, 'HH24:MI'), '')::text AS night_start,
+       COALESCE(to_char(night_end, 'HH24:MI'), '')::text AS night_end
+FROM charter_services WHERE listing_id = $1
+`
+
+type GetCharterServiceRow struct {
+	ListingID         uuid.UUID
+	MaxDistanceTenths int64
+	NightStart        string
+	NightEnd          string
+}
+
+// Private charter: service, areas, vehicle classes and surcharges.
+// sqlc cannot type a nullable expression: 0 tenths and ” mean NULL (the
+// column is > 0 by CHECK).
+func (q *Queries) GetCharterService(ctx context.Context, listingID uuid.UUID) (GetCharterServiceRow, error) {
+	row := q.db.QueryRow(ctx, getCharterService, listingID)
+	var i GetCharterServiceRow
+	err := row.Scan(
+		&i.ListingID,
+		&i.MaxDistanceTenths,
+		&i.NightStart,
+		&i.NightEnd,
 	)
 	return i, err
 }
@@ -391,6 +473,8 @@ SELECT l.id, l.partner_id, l.service_type, l.title, l.slug, l.summary, l.descrip
                 (SELECT min(m.price_per_day) FROM rental_vehicle_models m
                  WHERE m.listing_id = l.id AND m.active AND m.quantity > 0
                    AND EXISTS (SELECT 1 FROM rental_pickup_points pp WHERE pp.listing_id = l.id AND pp.active)),
+                (SELECT min(c.base_fare + c.price_per_km) FROM charter_vehicle_classes c
+                 WHERE c.listing_id = l.id AND c.active),
                 0)::bigint AS price_from
 FROM visible_listings l
 WHERE l.slug = $1
@@ -724,6 +808,63 @@ func (q *Queries) InsertCancellationTier(ctx context.Context, arg InsertCancella
 		arg.Now,
 	)
 	return err
+}
+
+const insertCharterAreas = `-- name: InsertCharterAreas :exec
+INSERT INTO charter_service_areas (listing_id, province_code)
+SELECT $1, unnest($2::text[])
+ON CONFLICT DO NOTHING
+`
+
+type InsertCharterAreasParams struct {
+	ListingID uuid.UUID
+	Codes     []string
+}
+
+func (q *Queries) InsertCharterAreas(ctx context.Context, arg InsertCharterAreasParams) error {
+	_, err := q.db.Exec(ctx, insertCharterAreas, arg.ListingID, arg.Codes)
+	return err
+}
+
+const insertCharterClass = `-- name: InsertCharterClass :one
+INSERT INTO charter_vehicle_classes (id, listing_id, name, seats, base_fare, price_per_km, active, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, true, $7, $7)
+RETURNING id, listing_id, name, seats, base_fare, price_per_km, active, created_at, updated_at
+`
+
+type InsertCharterClassParams struct {
+	ID         uuid.UUID
+	ListingID  uuid.UUID
+	Name       string
+	Seats      int32
+	BaseFare   int64
+	PricePerKm int64
+	Now        time.Time
+}
+
+func (q *Queries) InsertCharterClass(ctx context.Context, arg InsertCharterClassParams) (CharterVehicleClass, error) {
+	row := q.db.QueryRow(ctx, insertCharterClass,
+		arg.ID,
+		arg.ListingID,
+		arg.Name,
+		arg.Seats,
+		arg.BaseFare,
+		arg.PricePerKm,
+		arg.Now,
+	)
+	var i CharterVehicleClass
+	err := row.Scan(
+		&i.ID,
+		&i.ListingID,
+		&i.Name,
+		&i.Seats,
+		&i.BaseFare,
+		&i.PricePerKm,
+		&i.Active,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }
 
 const insertClosedDate = `-- name: InsertClosedDate :execrows
@@ -1415,6 +1556,149 @@ func (q *Queries) ListCancellationTiers(ctx context.Context, listingID uuid.UUID
 	return items, nil
 }
 
+const listCharterServiceAreas = `-- name: ListCharterServiceAreas :many
+SELECT province_code FROM charter_service_areas WHERE listing_id = $1 ORDER BY province_code
+`
+
+func (q *Queries) ListCharterServiceAreas(ctx context.Context, listingID uuid.UUID) ([]string, error) {
+	rows, err := q.db.Query(ctx, listCharterServiceAreas, listingID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var province_code string
+		if err := rows.Scan(&province_code); err != nil {
+			return nil, err
+		}
+		items = append(items, province_code)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listCharterSurcharges = `-- name: ListCharterSurcharges :many
+SELECT s.id, s.vehicle_class_id, s.kind, s.calc, s.amount, s.active, s.created_at, s.updated_at FROM charter_surcharges s
+JOIN charter_vehicle_classes c ON c.id = s.vehicle_class_id
+WHERE c.listing_id = $1 AND ($2::bool OR (s.active AND s.amount > 0))
+ORDER BY s.vehicle_class_id,
+         array_position(ARRAY['night','weekend','holiday','round_trip_waiting'], s.kind)
+`
+
+type ListCharterSurchargesParams struct {
+	ListingID       uuid.UUID
+	IncludeInactive bool
+}
+
+// Surcharges of every class of a listing in kind order. Without
+// include_inactive only the ones that apply (active and > 0).
+func (q *Queries) ListCharterSurcharges(ctx context.Context, arg ListCharterSurchargesParams) ([]CharterSurcharge, error) {
+	rows, err := q.db.Query(ctx, listCharterSurcharges, arg.ListingID, arg.IncludeInactive)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []CharterSurcharge
+	for rows.Next() {
+		var i CharterSurcharge
+		if err := rows.Scan(
+			&i.ID,
+			&i.VehicleClassID,
+			&i.Kind,
+			&i.Calc,
+			&i.Amount,
+			&i.Active,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listCharterSurchargesOfClass = `-- name: ListCharterSurchargesOfClass :many
+SELECT id, vehicle_class_id, kind, calc, amount, active, created_at, updated_at FROM charter_surcharges WHERE vehicle_class_id = $1
+ORDER BY array_position(ARRAY['night','weekend','holiday','round_trip_waiting'], kind)
+`
+
+func (q *Queries) ListCharterSurchargesOfClass(ctx context.Context, vehicleClassID uuid.UUID) ([]CharterSurcharge, error) {
+	rows, err := q.db.Query(ctx, listCharterSurchargesOfClass, vehicleClassID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []CharterSurcharge
+	for rows.Next() {
+		var i CharterSurcharge
+		if err := rows.Scan(
+			&i.ID,
+			&i.VehicleClassID,
+			&i.Kind,
+			&i.Calc,
+			&i.Amount,
+			&i.Active,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listCharterVehicleClasses = `-- name: ListCharterVehicleClasses :many
+SELECT id, listing_id, name, seats, base_fare, price_per_km, active, created_at, updated_at FROM charter_vehicle_classes
+WHERE listing_id = $1 AND ($2::bool OR active)
+ORDER BY created_at, id
+`
+
+type ListCharterVehicleClassesParams struct {
+	ListingID       uuid.UUID
+	IncludeInactive bool
+}
+
+func (q *Queries) ListCharterVehicleClasses(ctx context.Context, arg ListCharterVehicleClassesParams) ([]CharterVehicleClass, error) {
+	rows, err := q.db.Query(ctx, listCharterVehicleClasses, arg.ListingID, arg.IncludeInactive)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []CharterVehicleClass
+	for rows.Next() {
+		var i CharterVehicleClass
+		if err := rows.Scan(
+			&i.ID,
+			&i.ListingID,
+			&i.Name,
+			&i.Seats,
+			&i.BaseFare,
+			&i.PricePerKm,
+			&i.Active,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listClosedDatesFrom = `-- name: ListClosedDatesFrom :many
 SELECT listing_id, date, reason, created_at, updated_at FROM attraction_closed_dates WHERE listing_id = $1 AND date >= $2 ORDER BY date
 `
@@ -2040,6 +2324,32 @@ func (q *Queries) ListingPartnerID(ctx context.Context, id uuid.UUID) (uuid.UUID
 	return partner_id, err
 }
 
+const lockCharterClass = `-- name: LockCharterClass :one
+SELECT id, listing_id, name, seats, base_fare, price_per_km, active, created_at, updated_at FROM charter_vehicle_classes WHERE id = $1 AND listing_id = $2 FOR UPDATE
+`
+
+type LockCharterClassParams struct {
+	ID        uuid.UUID
+	ListingID uuid.UUID
+}
+
+func (q *Queries) LockCharterClass(ctx context.Context, arg LockCharterClassParams) (CharterVehicleClass, error) {
+	row := q.db.QueryRow(ctx, lockCharterClass, arg.ID, arg.ListingID)
+	var i CharterVehicleClass
+	err := row.Scan(
+		&i.ID,
+		&i.ListingID,
+		&i.Name,
+		&i.Seats,
+		&i.BaseFare,
+		&i.PricePerKm,
+		&i.Active,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const lockListing = `-- name: LockListing :one
 SELECT id, partner_id, service_type, title, slug, summary, description, cover_file_id, province_code, ward_code, address, latitude, longitude, review_status, rejection_reason, submitted_at, reviewed_at, reviewed_by, visibility, hidden_reason, hidden_at, hidden_by, hidden_from_visibility, rating_sum, rating_count, created_at, updated_at FROM listings WHERE id = $1 FOR NO KEY UPDATE
 `
@@ -2493,12 +2803,21 @@ SELECT l.id, l.partner_id, l.service_type, l.title, l.slug, l.summary, l.descrip
                 (SELECT min(m.price_per_day) FROM rental_vehicle_models m
                  WHERE m.listing_id = l.id AND m.active AND m.quantity > 0
                    AND EXISTS (SELECT 1 FROM rental_pickup_points pp WHERE pp.listing_id = l.id AND pp.active)),
+                (SELECT min(c.base_fare + c.price_per_km) FROM charter_vehicle_classes c
+                 WHERE c.listing_id = l.id AND c.active),
                 0)::bigint AS price_from
 FROM visible_listings l
 WHERE (l.service_type <> 'self_drive_rental'
        OR EXISTS (SELECT 1 FROM rental_pickup_points pp WHERE pp.listing_id = l.id AND pp.active))
+  -- A charter without an active vehicle class cannot be quoted.
+  AND (l.service_type <> 'private_charter'
+       OR EXISTS (SELECT 1 FROM charter_vehicle_classes c WHERE c.listing_id = l.id AND c.active))
   AND ($1::text IS NULL OR l.service_type = $1)
-  AND ($2::text IS NULL OR l.province_code = $2)
+  -- A charter also matches every province it picks up in.
+  AND ($2::text IS NULL OR l.province_code = $2
+       OR (l.service_type = 'private_charter'
+           AND EXISTS (SELECT 1 FROM charter_service_areas a
+                       WHERE a.listing_id = l.id AND a.province_code = $2)))
   AND ($3::text IS NULL
        OR public.f_unaccent(lower(l.title)) ILIKE '%' || public.f_unaccent(lower($4::text)) || '%' ESCAPE '\'
        OR similarity(public.f_unaccent(lower(l.title)), public.f_unaccent(lower($3))) >= 0.3)
@@ -2524,7 +2843,8 @@ type SearchPublicListingsRow struct {
 
 // Public search over visible_listings (the single visibility rule, see
 // migration 00010). price_from is the cheapest active ticket type or, for a
-// ride, the cheapest active schedule, for a rental the cheapest active model in
+// ride, the cheapest active schedule, for a charter the cheapest active class
+// for its first km (base_fare + price_per_km), for a rental the cheapest active model in
 // stock (rentals without an active pickup point are unbookable and hidden from
 // the search), 0 when there is none (prices are > 0 by
 // CHECK; sqlc cannot type a nullable
@@ -3013,6 +3333,49 @@ func (q *Queries) UnhideListing(ctx context.Context, arg UnhideListingParams) (L
 	return i, err
 }
 
+const updateCharterClass = `-- name: UpdateCharterClass :one
+UPDATE charter_vehicle_classes
+SET name = $1, seats = $2, base_fare = $3, price_per_km = $4,
+    active = $5, updated_at = $6
+WHERE id = $7
+RETURNING id, listing_id, name, seats, base_fare, price_per_km, active, created_at, updated_at
+`
+
+type UpdateCharterClassParams struct {
+	Name       string
+	Seats      int32
+	BaseFare   int64
+	PricePerKm int64
+	Active     bool
+	Now        time.Time
+	ID         uuid.UUID
+}
+
+func (q *Queries) UpdateCharterClass(ctx context.Context, arg UpdateCharterClassParams) (CharterVehicleClass, error) {
+	row := q.db.QueryRow(ctx, updateCharterClass,
+		arg.Name,
+		arg.Seats,
+		arg.BaseFare,
+		arg.PricePerKm,
+		arg.Active,
+		arg.Now,
+		arg.ID,
+	)
+	var i CharterVehicleClass
+	err := row.Scan(
+		&i.ID,
+		&i.ListingID,
+		&i.Name,
+		&i.Seats,
+		&i.BaseFare,
+		&i.PricePerKm,
+		&i.Active,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const updateListingContent = `-- name: UpdateListingContent :one
 UPDATE listings
 SET title = $1,
@@ -3431,6 +3794,64 @@ func (q *Queries) UpsertAttraction(ctx context.Context, arg UpsertAttractionPara
 	return i, err
 }
 
+const upsertCharterService = `-- name: UpsertCharterService :exec
+INSERT INTO charter_services (listing_id, max_distance_km, night_start, night_end, created_at, updated_at)
+VALUES ($1, ($2::bigint / 10.0)::numeric(7,1),
+        $3::text::time, $4::text::time, $5, $5)
+ON CONFLICT (listing_id) DO UPDATE
+SET max_distance_km = EXCLUDED.max_distance_km, night_start = EXCLUDED.night_start,
+    night_end = EXCLUDED.night_end, updated_at = EXCLUDED.updated_at
+`
+
+type UpsertCharterServiceParams struct {
+	ListingID         uuid.UUID
+	MaxDistanceTenths *int64
+	NightStart        *string
+	NightEnd          *string
+	Now               time.Time
+}
+
+func (q *Queries) UpsertCharterService(ctx context.Context, arg UpsertCharterServiceParams) error {
+	_, err := q.db.Exec(ctx, upsertCharterService,
+		arg.ListingID,
+		arg.MaxDistanceTenths,
+		arg.NightStart,
+		arg.NightEnd,
+		arg.Now,
+	)
+	return err
+}
+
+const upsertCharterSurcharge = `-- name: UpsertCharterSurcharge :exec
+INSERT INTO charter_surcharges (id, vehicle_class_id, kind, calc, amount, active, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
+ON CONFLICT (vehicle_class_id, kind) DO UPDATE
+SET calc = EXCLUDED.calc, amount = EXCLUDED.amount, active = EXCLUDED.active, updated_at = EXCLUDED.updated_at
+`
+
+type UpsertCharterSurchargeParams struct {
+	ID             uuid.UUID
+	VehicleClassID uuid.UUID
+	Kind           string
+	Calc           string
+	Amount         int64
+	Active         bool
+	Now            time.Time
+}
+
+func (q *Queries) UpsertCharterSurcharge(ctx context.Context, arg UpsertCharterSurchargeParams) error {
+	_, err := q.db.Exec(ctx, upsertCharterSurcharge,
+		arg.ID,
+		arg.VehicleClassID,
+		arg.Kind,
+		arg.Calc,
+		arg.Amount,
+		arg.Active,
+		arg.Now,
+	)
+	return err
+}
+
 const upsertRentalStore = `-- name: UpsertRentalStore :one
 INSERT INTO rental_stores (listing_id, handover_open, handover_close, delivery_available,
     deposit_terms, documents_terms, late_fee_terms, allowed_area_terms, other_terms, created_at, updated_at)
@@ -3553,4 +3974,15 @@ func (q *Queries) UpsertRideRoute(ctx context.Context, arg UpsertRideRouteParams
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const visibleListingServiceType = `-- name: VisibleListingServiceType :one
+SELECT service_type FROM visible_listings WHERE id = $1
+`
+
+func (q *Queries) VisibleListingServiceType(ctx context.Context, id uuid.UUID) (string, error) {
+	row := q.db.QueryRow(ctx, visibleListingServiceType, id)
+	var service_type string
+	err := row.Scan(&service_type)
+	return service_type, err
 }
