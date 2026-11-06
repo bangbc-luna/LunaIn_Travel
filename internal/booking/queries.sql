@@ -425,3 +425,12 @@ WHERE status = 'confirmed' AND service_type = 'self_drive_rental' AND service_en
   AND NOT (id = ANY(@skip::uuid[]))
 ORDER BY service_end_at, id
 LIMIT @lim;
+
+-- Coordinates and distance are cast to float8 so no numeric type override is needed.
+-- name: GetCharterDetails :one
+SELECT booking_id, listing_id, vehicle_class_id, pickup_at, pickup_address,
+       pickup_lat::float8 AS pickup_lat, pickup_lng::float8 AS pickup_lng,
+       dropoff_address, dropoff_lat::float8 AS dropoff_lat, dropoff_lng::float8 AS dropoff_lng,
+       distance_km::float8 AS distance_km, is_round_trip, return_at, quote,
+       pickup_province_code, duration_minutes, vehicle_class_name, seats
+FROM booking_charter_details WHERE booking_id = @booking_id;

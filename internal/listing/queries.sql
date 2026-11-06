@@ -624,3 +624,18 @@ LIMIT @cap;
 
 -- name: RequestPaymentHours :one
 SELECT request_payment_hours FROM platform_settings WHERE id = 1;
+
+-- name: GetCharterService :one
+SELECT listing_id, max_distance_km::float8 AS max_distance_km, night_start, night_end
+FROM charter_services WHERE listing_id = @listing_id;
+
+-- name: ListCharterServiceAreas :many
+SELECT province_code FROM charter_service_areas WHERE listing_id = @listing_id ORDER BY province_code;
+
+-- name: ListCharterVehicleClasses :many
+SELECT * FROM charter_vehicle_classes WHERE listing_id = @listing_id ORDER BY created_at, id;
+
+-- name: ListCharterSurcharges :many
+SELECT s.* FROM charter_surcharges s
+JOIN charter_vehicle_classes c ON c.id = s.vehicle_class_id
+WHERE c.listing_id = @listing_id ORDER BY s.vehicle_class_id, s.kind;

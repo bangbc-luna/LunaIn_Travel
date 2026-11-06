@@ -277,6 +277,30 @@ func (q *Queries) GetAttraction(ctx context.Context, listingID uuid.UUID) (Attra
 	return i, err
 }
 
+const getCharterService = `-- name: GetCharterService :one
+SELECT listing_id, max_distance_km::float8 AS max_distance_km, night_start, night_end
+FROM charter_services WHERE listing_id = $1
+`
+
+type GetCharterServiceRow struct {
+	ListingID     uuid.UUID
+	MaxDistanceKm float64
+	NightStart    pgtype.Time
+	NightEnd      pgtype.Time
+}
+
+func (q *Queries) GetCharterService(ctx context.Context, listingID uuid.UUID) (GetCharterServiceRow, error) {
+	row := q.db.QueryRow(ctx, getCharterService, listingID)
+	var i GetCharterServiceRow
+	err := row.Scan(
+		&i.ListingID,
+		&i.MaxDistanceKm,
+		&i.NightStart,
+		&i.NightEnd,
+	)
+	return i, err
+}
+
 const getClosedDate = `-- name: GetClosedDate :one
 SELECT listing_id, date, reason, created_at, updated_at FROM attraction_closed_dates WHERE listing_id = $1 AND date = $2
 `
@@ -1402,6 +1426,99 @@ func (q *Queries) ListCancellationTiers(ctx context.Context, listingID uuid.UUID
 			&i.ListingID,
 			&i.HoursBefore,
 			&i.RefundBps,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listCharterServiceAreas = `-- name: ListCharterServiceAreas :many
+SELECT province_code FROM charter_service_areas WHERE listing_id = $1 ORDER BY province_code
+`
+
+func (q *Queries) ListCharterServiceAreas(ctx context.Context, listingID uuid.UUID) ([]string, error) {
+	rows, err := q.db.Query(ctx, listCharterServiceAreas, listingID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var province_code string
+		if err := rows.Scan(&province_code); err != nil {
+			return nil, err
+		}
+		items = append(items, province_code)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listCharterSurcharges = `-- name: ListCharterSurcharges :many
+SELECT s.id, s.vehicle_class_id, s.kind, s.calc, s.amount, s.active, s.created_at, s.updated_at FROM charter_surcharges s
+JOIN charter_vehicle_classes c ON c.id = s.vehicle_class_id
+WHERE c.listing_id = $1 ORDER BY s.vehicle_class_id, s.kind
+`
+
+func (q *Queries) ListCharterSurcharges(ctx context.Context, listingID uuid.UUID) ([]CharterSurcharge, error) {
+	rows, err := q.db.Query(ctx, listCharterSurcharges, listingID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []CharterSurcharge
+	for rows.Next() {
+		var i CharterSurcharge
+		if err := rows.Scan(
+			&i.ID,
+			&i.VehicleClassID,
+			&i.Kind,
+			&i.Calc,
+			&i.Amount,
+			&i.Active,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listCharterVehicleClasses = `-- name: ListCharterVehicleClasses :many
+SELECT id, listing_id, name, seats, base_fare, price_per_km, active, created_at, updated_at FROM charter_vehicle_classes WHERE listing_id = $1 ORDER BY created_at, id
+`
+
+func (q *Queries) ListCharterVehicleClasses(ctx context.Context, listingID uuid.UUID) ([]CharterVehicleClass, error) {
+	rows, err := q.db.Query(ctx, listCharterVehicleClasses, listingID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []CharterVehicleClass
+	for rows.Next() {
+		var i CharterVehicleClass
+		if err := rows.Scan(
+			&i.ID,
+			&i.ListingID,
+			&i.Name,
+			&i.Seats,
+			&i.BaseFare,
+			&i.PricePerKm,
+			&i.Active,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {

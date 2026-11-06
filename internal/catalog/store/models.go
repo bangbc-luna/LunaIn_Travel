@@ -117,6 +117,28 @@ type BookingAttractionDetail struct {
 	UpdatedAt  time.Time
 }
 
+type BookingCharterDetail struct {
+	BookingID          uuid.UUID
+	ListingID          uuid.UUID
+	VehicleClassID     uuid.UUID
+	PickupAt           time.Time
+	PickupAddress      string
+	PickupLat          pgtype.Numeric
+	PickupLng          pgtype.Numeric
+	DropoffAddress     string
+	DropoffLat         pgtype.Numeric
+	DropoffLng         pgtype.Numeric
+	DistanceKm         pgtype.Numeric
+	IsRoundTrip        bool
+	ReturnAt           *time.Time
+	Quote              []byte
+	PickupProvinceCode string
+	DurationMinutes    int32
+	VehicleClassName   string
+	Seats              int32
+	CreatedAt          time.Time
+}
+
 type BookingItem struct {
 	ID          uuid.UUID
 	BookingID   uuid.UUID
@@ -202,6 +224,43 @@ type BookingTicketLine struct {
 	TicketTypeID  uuid.UUID
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
+}
+
+type CharterService struct {
+	ListingID     uuid.UUID
+	MaxDistanceKm pgtype.Numeric
+	NightStart    pgtype.Time
+	NightEnd      pgtype.Time
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+}
+
+type CharterServiceArea struct {
+	ListingID    uuid.UUID
+	ProvinceCode string
+}
+
+type CharterSurcharge struct {
+	ID             uuid.UUID
+	VehicleClassID uuid.UUID
+	Kind           string
+	Calc           string
+	Amount         int64
+	Active         bool
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
+type CharterVehicleClass struct {
+	ID         uuid.UUID
+	ListingID  uuid.UUID
+	Name       string
+	Seats      int32
+	BaseFare   int64
+	PricePerKm int64
+	Active     bool
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
 }
 
 type Checkout struct {

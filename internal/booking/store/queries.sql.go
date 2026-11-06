@@ -324,6 +324,63 @@ func (q *Queries) GetBookingDetail(ctx context.Context, id uuid.UUID) (GetBookin
 	return i, err
 }
 
+const getCharterDetails = `-- name: GetCharterDetails :one
+SELECT booking_id, listing_id, vehicle_class_id, pickup_at, pickup_address,
+       pickup_lat::float8 AS pickup_lat, pickup_lng::float8 AS pickup_lng,
+       dropoff_address, dropoff_lat::float8 AS dropoff_lat, dropoff_lng::float8 AS dropoff_lng,
+       distance_km::float8 AS distance_km, is_round_trip, return_at, quote,
+       pickup_province_code, duration_minutes, vehicle_class_name, seats
+FROM booking_charter_details WHERE booking_id = $1
+`
+
+type GetCharterDetailsRow struct {
+	BookingID          uuid.UUID
+	ListingID          uuid.UUID
+	VehicleClassID     uuid.UUID
+	PickupAt           time.Time
+	PickupAddress      string
+	PickupLat          float64
+	PickupLng          float64
+	DropoffAddress     string
+	DropoffLat         float64
+	DropoffLng         float64
+	DistanceKm         float64
+	IsRoundTrip        bool
+	ReturnAt           *time.Time
+	Quote              []byte
+	PickupProvinceCode string
+	DurationMinutes    int32
+	VehicleClassName   string
+	Seats              int32
+}
+
+// Coordinates and distance are cast to float8 so no numeric type override is needed.
+func (q *Queries) GetCharterDetails(ctx context.Context, bookingID uuid.UUID) (GetCharterDetailsRow, error) {
+	row := q.db.QueryRow(ctx, getCharterDetails, bookingID)
+	var i GetCharterDetailsRow
+	err := row.Scan(
+		&i.BookingID,
+		&i.ListingID,
+		&i.VehicleClassID,
+		&i.PickupAt,
+		&i.PickupAddress,
+		&i.PickupLat,
+		&i.PickupLng,
+		&i.DropoffAddress,
+		&i.DropoffLat,
+		&i.DropoffLng,
+		&i.DistanceKm,
+		&i.IsRoundTrip,
+		&i.ReturnAt,
+		&i.Quote,
+		&i.PickupProvinceCode,
+		&i.DurationMinutes,
+		&i.VehicleClassName,
+		&i.Seats,
+	)
+	return i, err
+}
+
 const getCheckout = `-- name: GetCheckout :one
 SELECT id, code, customer_id, total_amount, status, created_at, updated_at, paid_payment_id FROM checkouts WHERE id = $1
 `
