@@ -75,7 +75,12 @@ var _ payment.PaymentHandler = (*Service)(nil)
 // runs rentalChecks (awaiting_payment in time: yes; late: accepted, not yet
 // picked up, model active and one vehicle still free by peak, excluding the
 // booking itself); a confirmed rental then holds its vehicle with no end
-// (hold_until NULL), also when re-confirmed. Only then the
+// (hold_until NULL), also when re-confirmed. A private charter checkout
+// locks nothing more (no capacity rows); charterChecks then allows a late
+// charter booking only if it was accepted and the money arrives at least
+// charter_late_confirm_min_hours (settings) before pickup, besides its
+// listing being bookable (an on-time payment confirms even if the partner
+// was suspended after accepting: ruling R2). Only then the
 // checkout and its bookings (id order) are locked FOR UPDATE, its payments
 // (id order) FOR NO KEY UPDATE, and the state is decided from the locked rows:
 //
@@ -175,6 +180,19 @@ func (s *Service) HandlePaid(ctx context.Context, tx pgx.Tx, ev payment.PaidEven
 			return payment.PaidOutcome{}, fmt.Errorf("list checkout bookings: %w", err)
 		}
 		if err := s.rentalChecks(ctx, tx, rows, models, rebookable, now); err != nil {
+			return payment.PaidOutcome{}, err
+		}
+	}
+	// A charter checkout holds no capacity: nothing more is locked. A late
+	// charter booking also needs to have been accepted and the money to
+	// arrive charter_late_confirm_min_hours before pickup.
+	if hasCharter(rows) {
+		cfg, err := s.settings.GetTx(ctx, tx)
+		if err != nil {
+			return payment.PaidOutcome{}, err
+		}
+		minLead := time.Duration(cfg.CharterLateConfirmMinHours) * time.Hour
+		if err := charterChecks(rows, rebookable, minLead, now); err != nil {
 			return payment.PaidOutcome{}, err
 		}
 	}

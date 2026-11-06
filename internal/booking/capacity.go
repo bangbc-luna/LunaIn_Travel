@@ -189,3 +189,42 @@ func (s *Service) rentalChecks(ctx context.Context, tx pgx.Tx, rows []store.List
 	}
 	return nil
 }
+
+// hasCharter reports whether a checkout holds a private charter booking.
+func hasCharter(rows []store.ListCheckoutBookingsRow) bool {
+	for _, r := range rows {
+		if r.Booking.ServiceType == serviceTypeCharter {
+			return true
+		}
+	}
+	return false
+}
+
+// charterChecks decides whether each late private charter booking of rows
+// (lateBooking: expired, or awaiting_payment past hold_release_at) can be
+// re-confirmed by the money arriving now, and records it in rebookable (spec
+// §8): only an accepted request (accepted_at set: a request that expired
+// unanswered was never accepted by the partner), with its listing bookable
+// (listing visible, partner active; checked by reconfirmChecks, ruling R2; a
+// late booking it did not see is errStateChanged), and its pickup
+// (service_start_at) at least minLead after now (charter_late_confirm_min_hours:
+// exactly minLead before pickup still re-confirms). Otherwise the booking is
+// (or stays) expired and refunded in full without any ledger entry.
+//
+// A charter holds no capacity, so nothing is locked. A charter booking
+// awaiting_payment and not late is not recorded: it is confirmed (eligible),
+// also when its partner was suspended after accepting (ruling R2).
+func charterChecks(rows []store.ListCheckoutBookingsRow, rebookable map[uuid.UUID]bool, minLead time.Duration, now time.Time) error {
+	for _, r := range rows {
+		b := r.Booking
+		if b.ServiceType != serviceTypeCharter || !lateBooking(b, now) {
+			continue
+		}
+		listed, checked := rebookable[b.ID]
+		if !checked {
+			return errStateChanged
+		}
+		rebookable[b.ID] = listed && b.AcceptedAt != nil && !b.ServiceStartAt.Before(now.Add(minLead))
+	}
+	return nil
+}
