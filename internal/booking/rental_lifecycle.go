@@ -2,7 +2,6 @@ package booking
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -42,9 +41,10 @@ var (
 	// [pickup_at − 2h, return_at).
 	ErrHandoverOutsideWindow = httpx.NewError(http.StatusUnprocessableEntity, "handover_outside_window",
 		"Chỉ giao xe được từ 2 giờ trước giờ nhận đến trước giờ trả")
-	// ErrNoShowTooEarly: a no-show is marked before pickup_at.
+	// ErrNoShowTooEarly: a no-show (rental or charter) is marked before
+	// pickup_at.
 	ErrNoShowTooEarly = httpx.NewError(http.StatusConflict, "no_show_too_early",
-		"Chỉ đánh dấu khách không đến sau giờ nhận xe")
+		"Chỉ đánh dấu khách không đến sau giờ đón/nhận xe")
 
 	errNotRental = httpx.NewError(ErrInvalidBookingState.Status, ErrInvalidBookingState.Code,
 		"Thao tác này chỉ dành cho đơn thuê xe tự lái")
@@ -82,12 +82,9 @@ func (s *Service) checkInRental(ctx context.Context, _ pgx.Tx, q *store.Queries,
 // self-drive rental: another partner's or unknown is ErrBookingNotFound,
 // another service type errNotRental (409 invalid_booking_state).
 func (s *Service) partnerRental(ctx context.Context, partnerID, bookingID uuid.UUID) error {
-	b, err := store.New(s.pool).GetBooking(ctx, bookingID)
-	if errors.Is(err, pgx.ErrNoRows) || (err == nil && b.PartnerID != partnerID) {
-		return ErrBookingNotFound
-	}
+	b, err := s.partnerBooking(ctx, partnerID, bookingID)
 	if err != nil {
-		return fmt.Errorf("get booking: %w", err)
+		return err
 	}
 	if b.ServiceType != serviceTypeRental {
 		return errNotRental
@@ -114,23 +111,24 @@ func (s *Service) lockRental(ctx context.Context, tx pgx.Tx, bookingID uuid.UUID
 	return b, nil
 }
 
-// endRental moves a locked rental booking, whose model the tx holds, to
-// completed (from in_service) or no_show (from confirmed): the vehicle is no
-// longer held and the release is scheduled release_delay_days after now.
+// endService moves a locked self-drive rental (whose model the tx holds) or
+// private charter booking to completed (from in_service) or no_show (from
+// confirmed): a rental's vehicle is no longer held (a charter holds
+// nothing) and the release is scheduled release_delay_days after now.
 // actorUser is nil for the system.
-func (s *Service) endRental(ctx context.Context, tx pgx.Tx, b store.Booking, to, actorKind string, actorUser *uuid.UUID, reason *string, now time.Time) error {
+func (s *Service) endService(ctx context.Context, tx pgx.Tx, b store.Booking, to, actorKind string, actorUser *uuid.UUID, reason *string, now time.Time) error {
 	q := store.New(tx)
 	switch to {
 	case StatusCompleted:
 		if err := q.CompleteRide(ctx, store.CompleteRideParams{Now: now, ID: b.ID}); err != nil {
-			return fmt.Errorf("complete rental: %w", err)
+			return fmt.Errorf("complete service: %w", err)
 		}
 	case StatusNoShow:
 		if err := q.MarkNoShow(ctx, store.MarkNoShowParams{Now: now, ID: b.ID}); err != nil {
-			return fmt.Errorf("mark rental no-show: %w", err)
+			return fmt.Errorf("mark no-show: %w", err)
 		}
 	default:
-		return fmt.Errorf("booking: cannot end rental %s as %s", b.ID, to)
+		return fmt.Errorf("booking: cannot end service of %s as %s", b.ID, to)
 	}
 	if err := insertHistory(ctx, q, b, to, actorKind, actorUser, reason, now); err != nil {
 		return err
@@ -163,7 +161,7 @@ func (s *Service) MarkRentalNoShow(ctx context.Context, partnerID, userID, booki
 		if now.Before(b.ServiceStartAt) {
 			return ErrNoShowTooEarly
 		}
-		return s.endRental(ctx, tx, b, StatusNoShow, actorPartner, &userID, nil, now)
+		return s.endService(ctx, tx, b, StatusNoShow, actorPartner, &userID, nil, now)
 	})
 	if err != nil {
 		return BookingView{}, err
@@ -190,7 +188,7 @@ func (s *Service) MarkRentalReturned(ctx context.Context, partnerID, userID, boo
 		case StatusCompleted:
 			return nil
 		case StatusInService:
-			return s.endRental(ctx, tx, b, StatusCompleted, actorPartner, &userID, nil, s.clock.Now())
+			return s.endService(ctx, tx, b, StatusCompleted, actorPartner, &userID, nil, s.clock.Now())
 		}
 		return errReturnState
 	})
@@ -262,7 +260,7 @@ func (s *Service) FinishRentals(ctx context.Context) (int, error) {
 				return nil
 			}
 			done = true
-			return s.endRental(ctx, tx, b, to, actorSystem, nil, &reason, now)
+			return s.endService(ctx, tx, b, to, actorSystem, nil, &reason, now)
 		})
 		if err != nil {
 			s.itemFailed(&s.finishBackoff, "booking: finish rental failed", "booking_id", id, now, err)

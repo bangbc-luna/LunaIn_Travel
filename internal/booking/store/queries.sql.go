@@ -1122,6 +1122,44 @@ func (q *Queries) ListBookings(ctx context.Context, arg ListBookingsParams) ([]L
 	return items, nil
 }
 
+const listCharterAutoFinish = `-- name: ListCharterAutoFinish :many
+SELECT id FROM bookings
+WHERE status IN ('confirmed', 'in_service') AND service_type = 'private_charter'
+  AND service_end_at <= $1::timestamptz
+  AND NOT (id = ANY($2::uuid[]))
+ORDER BY service_end_at, id
+LIMIT $3
+`
+
+type ListCharterAutoFinishParams struct {
+	Cutoff time.Time
+	Skip   []uuid.UUID
+	Lim    int32
+}
+
+// FinishCharters: confirmed or in_service private charters whose
+// service_end_at is at or before @cutoff = now − charter_auto_complete_hours
+// (bookings_service_end_idx).
+func (q *Queries) ListCharterAutoFinish(ctx context.Context, arg ListCharterAutoFinishParams) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listCharterAutoFinish, arg.Cutoff, arg.Skip, arg.Lim)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listCheckoutBookings = `-- name: ListCheckoutBookings :many
 SELECT b.id, b.code, b.checkout_id, b.customer_id, b.partner_id, b.listing_id, b.service_type, b.booking_mode, b.status, b.service_start_at, b.service_end_at, b.original_service_start_at, b.gross_amount, b.commission_rate_bps, b.commission_amount, b.cancellation_policy_snapshot, b.contact_name, b.contact_phone, b.contact_email, b.customer_note, b.hold_expires_at, b.hold_release_at, b.response_due_at, b.payment_due_at, b.accepted_at, b.rejected_at, b.reject_reason, b.confirmed_at, b.checked_in_at, b.in_service_at, b.completed_at, b.no_show_at, b.cancelled_at, b.cancel_kind, b.cancel_reason, b.cancelled_by, b.qr_token, b.created_at, b.updated_at,
        COALESCE(to_char(d.visit_date, 'YYYY-MM-DD'), '')::text AS visit_date,

@@ -276,9 +276,10 @@ func rideTripIDs(rows []store.ListCheckoutBookingsRow) []uuid.UUID {
 
 // reconfirmChecks evaluates, before any checkout lock, whether each late
 // booking could still be (re-)confirmed. Bookings that are not late are
-// absent from the map. For a ride or rental booking only the listing is
-// checked here (bookable listing, active partner); rideChecks adds the trip
-// and rentalChecks the vehicle model under their locks.
+// absent from the map. For a ride, rental or private charter booking only
+// the listing is checked here (bookable listing, active partner); rideChecks
+// adds the trip and rentalChecks the vehicle model under their locks, and
+// charterChecks the acceptance and the minimum lead before pickup.
 func (s *Service) reconfirmChecks(ctx context.Context, tx pgx.Tx, rows []store.ListCheckoutBookingsRow, now time.Time) (map[uuid.UUID]bool, error) {
 	out := map[uuid.UUID]bool{}
 	var listingIDs []uuid.UUID
@@ -477,7 +478,7 @@ func (c *confirmation) canTakeMoney(ctx context.Context) (bool, error) {
 	}
 	// A request still requested, rejected or withdrawn (cancelled, above)
 	// cannot take money: only an accepted one (awaiting_payment, or expired
-	// after acceptance, see rentalChecks) can.
+	// after acceptance, see rentalChecks and charterChecks) can.
 	for _, b := range c.bookings {
 		if b.Status != StatusPendingPayment && b.Status != StatusAwaitingPayment && b.Status != StatusExpired {
 			return false, nil

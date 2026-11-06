@@ -426,6 +426,17 @@ WHERE status = 'confirmed' AND service_type = 'self_drive_rental' AND service_en
 ORDER BY service_end_at, id
 LIMIT @lim;
 
+-- FinishCharters: confirmed or in_service private charters whose
+-- service_end_at is at or before @cutoff = now − charter_auto_complete_hours
+-- (bookings_service_end_idx).
+-- name: ListCharterAutoFinish :many
+SELECT id FROM bookings
+WHERE status IN ('confirmed', 'in_service') AND service_type = 'private_charter'
+  AND service_end_at <= @cutoff::timestamptz
+  AND NOT (id = ANY(@skip::uuid[]))
+ORDER BY service_end_at, id
+LIMIT @lim;
+
 -- Coordinates and distance are cast to float8 so no numeric type override is needed.
 -- name: GetCharterDetails :one
 SELECT booking_id, listing_id, vehicle_class_id, pickup_at, pickup_address,

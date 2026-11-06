@@ -81,15 +81,16 @@ func (s *Service) PartnerRoutes(mux httpx.Router, iss *auth.Issuer, requireMembe
 		writeView(w, r, http.StatusOK, v, err)
 	}))
 
-	// Self-drive rental: the customer never came, the vehicle came back (no
-	// body). The handover is POST /v1/partner/check-ins.
+	// Self-drive rental or private charter: the customer never came (no
+	// body). Rental: the vehicle came back; charter: the trip is over (no
+	// body). The handover or pickup is POST /v1/partner/check-ins.
 	mux.Handle("POST /v1/partner/bookings/{id}/no-show", member(func(w http.ResponseWriter, r *http.Request, partnerID uuid.UUID) {
 		id, ok := pathID(w, r)
 		if !ok {
 			return
 		}
 		p, _ := auth.PrincipalFrom(r.Context())
-		v, err := s.MarkRentalNoShow(r.Context(), partnerID, p.UserID, id)
+		v, err := s.MarkNoShow(r.Context(), partnerID, p.UserID, id)
 		writeView(w, r, http.StatusOK, v, err)
 	}))
 
@@ -100,6 +101,16 @@ func (s *Service) PartnerRoutes(mux httpx.Router, iss *auth.Issuer, requireMembe
 		}
 		p, _ := auth.PrincipalFrom(r.Context())
 		v, err := s.MarkRentalReturned(r.Context(), partnerID, p.UserID, id)
+		writeView(w, r, http.StatusOK, v, err)
+	}))
+
+	mux.Handle("POST /v1/partner/bookings/{id}/complete", member(func(w http.ResponseWriter, r *http.Request, partnerID uuid.UUID) {
+		id, ok := pathID(w, r)
+		if !ok {
+			return
+		}
+		p, _ := auth.PrincipalFrom(r.Context())
+		v, err := s.CompleteCharter(r.Context(), partnerID, p.UserID, id)
 		writeView(w, r, http.StatusOK, v, err)
 	}))
 
