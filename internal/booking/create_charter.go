@@ -209,7 +209,7 @@ func (s *Service) precheckCharter(ctx context.Context, req charterRequest, now t
 			return err
 		}
 		if l.ServiceType != serviceTypeCharter {
-			return listing.ErrWrongServiceType
+			return listing.ErrNotCharterListing
 		}
 		cfg, err := s.settings.GetTx(ctx, tx)
 		if err != nil {
@@ -230,7 +230,7 @@ func (s *Service) createCharterTx(ctx context.Context, tx pgx.Tx, customerID uui
 		return createdRef{}, err
 	}
 	if l.ServiceType != serviceTypeCharter {
-		return createdRef{}, listing.ErrWrongServiceType
+		return createdRef{}, listing.ErrNotCharterListing
 	}
 	cfg, err := s.settings.GetTx(ctx, tx)
 	if err != nil {

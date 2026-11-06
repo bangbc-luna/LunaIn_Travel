@@ -40,8 +40,13 @@ func NewGoong(cfg GoongConfig, hc *http.Client) *Goong {
 // Name implements Provider.
 func (*Goong) Name() string { return "goong" }
 
+// goongResponse is the Distance Matrix answer. Status is the top-level
+// status ("OK" or an error such as a denied key or an exhausted quota); Error
+// is set by some error answers instead.
 type goongResponse struct {
-	Rows []struct {
+	Status string          `json:"status"`
+	Error  json.RawMessage `json:"error"`
+	Rows   []struct {
 		Elements []struct {
 			Status   string `json:"status"`
 			Distance struct {
@@ -88,12 +93,38 @@ func (g *Goong) Route(ctx context.Context, from, to Point) (Route, error) {
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&body); err != nil {
 		return Route{}, fmt.Errorf("%w: invalid response", ErrUnavailable)
 	}
+	// A top-level error (denied key, quota) or an answer without any element
+	// is the provider failing, not the trip: ErrUnavailable, which the caller
+	// logs. Only the status code is kept, never a message (it could echo the
+	// request).
+	if (body.Status != "" && body.Status != "OK") || (len(body.Error) > 0 && string(body.Error) != "null") {
+		return Route{}, fmt.Errorf("%w: status %q", ErrUnavailable, safeStatus(body.Status, g.cfg.APIKey))
+	}
 	if len(body.Rows) == 0 || len(body.Rows[0].Elements) == 0 {
-		return Route{}, ErrNoRoute
+		return Route{}, fmt.Errorf("%w: no element in the answer", ErrUnavailable)
 	}
 	el := body.Rows[0].Elements[0]
-	if el.Status != "OK" || el.Distance.Value <= 0 {
+	switch el.Status {
+	case "OK":
+	case "ZERO_RESULTS", "NOT_FOUND":
+		return Route{}, ErrNoRoute
+	default:
+		return Route{}, fmt.Errorf("%w: element status %q", ErrUnavailable, safeStatus(el.Status, g.cfg.APIKey))
+	}
+	if el.Distance.Value <= 0 {
 		return Route{}, ErrNoRoute
 	}
 	return Route{DistanceMeters: el.Distance.Value, DurationSeconds: el.Duration.Value}, nil
+}
+
+// safeStatus is a provider status fit for a log line: at most 40 bytes and
+// never containing the API key.
+func safeStatus(status, key string) string {
+	if key != "" && strings.Contains(status, key) {
+		return "<redacted>"
+	}
+	if len(status) > 40 {
+		status = status[:40]
+	}
+	return status
 }

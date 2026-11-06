@@ -3,6 +3,7 @@ package booking_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"testing"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/bangbc-luna/lunain-travel/internal/booking"
 	"github.com/bangbc-luna/lunain-travel/internal/listing"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/auth"
+	"github.com/bangbc-luna/lunain-travel/internal/platform/httpx"
 	"github.com/bangbc-luna/lunain-travel/internal/platform/maps"
 )
 
@@ -305,7 +307,12 @@ func TestCreateCharter_Validation(t *testing.T) {
 	// A rental listing is the wrong type.
 	rental := in
 	rental.ListingID = c.RL.ID
-	requireErr(t, try(rental), http.StatusUnprocessableEntity, "wrong_service_type")
+	err = try(rental)
+	requireErr(t, err, http.StatusUnprocessableEntity, "wrong_service_type")
+	require.ErrorIs(t, err, listing.ErrNotCharterListing)
+	var ae *httpx.AppError
+	require.True(t, errors.As(err, &ae))
+	require.Equal(t, "Thao tác này chỉ áp dụng cho Listing xe bao chuyến", ae.Message)
 	require.Equal(t, 0, c.Maps.Calls(), "every check above runs before the map call")
 
 	// Beyond the 300 km maximum (one way): needs the route.

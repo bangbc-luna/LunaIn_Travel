@@ -45,7 +45,7 @@ func TestGoong_ParsesDistanceMatrix(t *testing.T) {
 func TestGoong_NoRoute(t *testing.T) {
 	for name, body := range map[string]string{
 		"zero results": `{"rows":[{"elements":[{"status":"ZERO_RESULTS"}]}]}`,
-		"empty rows":   `{"rows":[]}`,
+		"not found":    `{"status":"OK","rows":[{"elements":[{"status":"NOT_FOUND"}]}]}`,
 		"zero meters":  `{"rows":[{"elements":[{"status":"OK","distance":{"value":0},"duration":{"value":0}}]}]}`,
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -56,6 +56,36 @@ func TestGoong_NoRoute(t *testing.T) {
 			g := maps.NewGoong(maps.GoongConfig{APIKey: "k", BaseURL: srv.URL}, nil)
 			if _, err := g.Route(context.Background(), danang, hanoi); !errors.Is(err, maps.ErrNoRoute) {
 				t.Fatalf("err = %v", err)
+			}
+		})
+	}
+}
+
+// An HTTP 200 answer that reports a provider error (denied key, quota) or has
+// no element is ErrUnavailable (503, logged by the caller), not ErrNoRoute,
+// and the error never carries the key, even when Goong echoes it.
+func TestGoong_ErrorStatusOn200IsUnavailable(t *testing.T) {
+	for name, body := range map[string]string{
+		"request denied":    `{"status":"REQUEST_DENIED","error_message":"The provided API key secret-key is invalid.","rows":[]}`,
+		"quota":             `{"status":"OVER_QUERY_LIMIT","rows":[]}`,
+		"error object":      `{"error":{"code":"INVALID_API_KEY","message":"api_key=secret-key not found"}}`,
+		"status echoes key": `{"status":"BAD secret-key","rows":[]}`,
+		"empty rows":        `{"rows":[]}`,
+		"empty elements":    `{"status":"OK","rows":[{"elements":[]}]}`,
+		"element denied":    `{"rows":[{"elements":[{"status":"OVER_QUERY_LIMIT"}]}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(body))
+			}))
+			defer srv.Close()
+			g := maps.NewGoong(maps.GoongConfig{APIKey: "secret-key", BaseURL: srv.URL}, nil)
+			_, err := g.Route(context.Background(), danang, hanoi)
+			if !errors.Is(err, maps.ErrUnavailable) || errors.Is(err, maps.ErrNoRoute) {
+				t.Fatalf("err = %v", err)
+			}
+			if strings.Contains(err.Error(), "secret-key") || strings.Contains(err.Error(), "api_key") {
+				t.Fatalf("error leaks key: %v", err)
 			}
 		})
 	}
