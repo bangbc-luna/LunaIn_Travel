@@ -135,7 +135,9 @@ func (s *Service) CharterRoute(ctx context.Context, pickup, dropoff CharterPlace
 		DistanceMeters:  r.DistanceMeters,
 		DurationSeconds: r.DurationSeconds,
 		DistanceTenths:  (r.DistanceMeters + 99) / 100,
-		DurationMinutes: int((r.DurationSeconds + 59) / 60),
+		// At least one minute: a route of some length always takes time
+		// (booking_charter_details.duration_minutes > 0).
+		DurationMinutes: max(1, int((r.DurationSeconds+59)/60)),
 	}, nil
 }
 
@@ -381,6 +383,56 @@ type CharterTrip struct {
 	ReturnAt        *time.Time
 }
 
+// Normalize checks and normalizes a trip before any I/O: the pickup (its
+// province is required) and the dropoff as CharterPlace.normalize does, and a
+// pickup time must be given (ErrInvalidCharterTime).
+func (t CharterTrip) Normalize() (CharterTrip, error) {
+	pickup, err := t.Pickup.normalize(true)
+	if err != nil {
+		return t, err
+	}
+	dropoff, err := t.Dropoff.normalize(false)
+	if err != nil {
+		return t, err
+	}
+	if t.PickupAt.IsZero() {
+		return t, ErrInvalidCharterTime
+	}
+	t.Pickup, t.Dropoff = pickup, dropoff
+	return t, nil
+}
+
+// CharterPrecheck runs in tx, before the paid map call, every check of a
+// normalized trip that does not need the route: the times (CheckCharterTime
+// with a zero duration: whole minutes, horizon, return presence and span,
+// lead time), the charter service (ErrListingNotFound), the pickup province in
+// its service area (ErrOutsideServiceArea) and, with classID, that class
+// active and of the listing (ErrCharterClassNotFound). It returns how many
+// classes would be quoted (0: no active class, so the map need not be
+// called). CharterQuoteTx repeats the checks with the route, authoritatively.
+func (s *Service) CharterPrecheck(ctx context.Context, tx pgx.Tx, listingID uuid.UUID, classID *uuid.UUID, trip CharterTrip, now time.Time, paymentHours int) (int, error) {
+	if _, err := CheckCharterTime(trip.PickupAt, trip.RoundTrip, trip.ReturnAt, 0, now, paymentHours); err != nil {
+		return 0, err
+	}
+	d, err := s.charterDetail(ctx, tx, listingID, false)
+	if err != nil {
+		return 0, err
+	}
+	if d.Service == nil {
+		return 0, ErrListingNotFound
+	}
+	if !slices.Contains(d.Service.ProvinceCodes, trip.Pickup.ProvinceCode) {
+		return 0, ErrOutsideServiceArea
+	}
+	if classID != nil {
+		if !slices.ContainsFunc(d.Classes, func(c CharterClass) bool { return c.ID == *classID }) {
+			return 0, ErrCharterClassNotFound
+		}
+		return 1, nil
+	}
+	return len(d.Classes), nil
+}
+
 // CharterQuoteTx prices trip on route inside the caller's tx: the listing's
 // charter service must exist (ErrListingNotFound), the pickup province be in
 // its service area (ErrOutsideServiceArea) and the one-way distance within
@@ -476,40 +528,62 @@ func visibleCharter(ctx context.Context, dbtx store.DBTX, id uuid.UUID) error {
 }
 
 // QuoteCharter prices a trip for every active class of a visible charter
-// listing (ErrListingNotFound otherwise) after one map call made outside any
-// transaction. The times are checked against the route's duration and the
-// prices read in a read-only transaction. Nothing is stored.
+// listing (ErrListingNotFound otherwise). The checks that do not need the
+// route (CharterPrecheck) run first in a read-only transaction, and a listing
+// without an active class answers no quotes without calling the map. Then
+// one map call is made outside any transaction, and the times are checked
+// against the route's duration and the prices read in a second read-only
+// transaction. Nothing is stored.
 func (s *Service) QuoteCharter(ctx context.Context, in CharterQuoteInput) (CharterQuoteResult, error) {
-	pickup, err := in.Pickup.normalize(true)
-	if err != nil {
-		return CharterQuoteResult{}, err
-	}
-	dropoff, err := in.Dropoff.normalize(false)
-	if err != nil {
-		return CharterQuoteResult{}, err
-	}
-	if in.PickupAt.IsZero() {
-		return CharterQuoteResult{}, ErrInvalidCharterTime
-	}
-	if err := visibleCharter(ctx, s.pool, in.ListingID); err != nil {
-		return CharterQuoteResult{}, err
-	}
-	route, err := s.CharterRoute(ctx, pickup, dropoff)
+	trip, err := CharterTrip{
+		Pickup: in.Pickup, Dropoff: in.Dropoff, PickupAt: in.PickupAt, RoundTrip: in.IsRoundTrip, ReturnAt: in.ReturnAt,
+	}.Normalize()
 	if err != nil {
 		return CharterQuoteResult{}, err
 	}
 	now := s.clock.Now()
-	trip := CharterTrip{Pickup: pickup, Dropoff: dropoff, PickupAt: in.PickupAt, RoundTrip: in.IsRoundTrip, ReturnAt: in.ReturnAt}
-	out := CharterQuoteResult{DistanceKm: tenthsToKm(route.DistanceTenths), DurationMinutes: route.DurationMinutes}
-	err = pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
+	readOnly := pgx.TxOptions{AccessMode: pgx.ReadOnly}
+	paymentHours := func(tx pgx.Tx) (int, error) {
+		h, err := store.New(tx).RequestPaymentHours(ctx)
+		if err != nil {
+			return 0, fmt.Errorf("read request_payment_hours: %w", err)
+		}
+		return int(h), nil
+	}
+
+	var active int
+	err = pgx.BeginTxFunc(ctx, s.pool, readOnly, func(tx pgx.Tx) error {
 		if err := visibleCharter(ctx, tx, in.ListingID); err != nil {
 			return err
 		}
-		paymentHours, err := store.New(tx).RequestPaymentHours(ctx)
+		hours, err := paymentHours(tx)
 		if err != nil {
-			return fmt.Errorf("read request_payment_hours: %w", err)
+			return err
 		}
-		if _, err := CheckCharterTime(trip.PickupAt, trip.RoundTrip, trip.ReturnAt, route.DurationMinutes, now, int(paymentHours)); err != nil {
+		active, err = s.CharterPrecheck(ctx, tx, in.ListingID, nil, trip, now, hours)
+		return err
+	})
+	if err != nil {
+		return CharterQuoteResult{}, err
+	}
+	if active == 0 {
+		return CharterQuoteResult{Quotes: []CharterQuote{}}, nil
+	}
+
+	route, err := s.CharterRoute(ctx, trip.Pickup, trip.Dropoff)
+	if err != nil {
+		return CharterQuoteResult{}, err
+	}
+	out := CharterQuoteResult{DistanceKm: tenthsToKm(route.DistanceTenths), DurationMinutes: route.DurationMinutes}
+	err = pgx.BeginTxFunc(ctx, s.pool, readOnly, func(tx pgx.Tx) error {
+		if err := visibleCharter(ctx, tx, in.ListingID); err != nil {
+			return err
+		}
+		hours, err := paymentHours(tx)
+		if err != nil {
+			return err
+		}
+		if _, err := CheckCharterTime(trip.PickupAt, trip.RoundTrip, trip.ReturnAt, route.DurationMinutes, now, hours); err != nil {
 			return err
 		}
 		out.Quotes, err = s.CharterQuoteTx(ctx, tx, in.ListingID, nil, trip, route)

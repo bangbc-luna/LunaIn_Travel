@@ -434,3 +434,25 @@ SELECT booking_id, listing_id, vehicle_class_id, pickup_at, pickup_address,
        distance_km::float8 AS distance_km, is_round_trip, return_at, quote,
        pickup_province_code, duration_minutes, vehicle_class_name, seats
 FROM booking_charter_details WHERE booking_id = @booking_id;
+
+-- A booking line whose quantity has one decimal (charter_distance km), sent
+-- as tenths so no float reaches the CHECK line_total =
+-- round(unit_price × quantity).
+-- name: InsertBookingItemTenths :exec
+INSERT INTO booking_items (id, booking_id, line_kind, description, unit_price, quantity, line_total, created_at, updated_at)
+VALUES (@id, @booking_id, @line_kind, @description, @unit_price, (@quantity_tenths::bigint)::numeric / 10, @line_total, @now, @now);
+
+-- Coordinates arrive as float8 (already rounded to 6 decimals) and the
+-- one-way distance as tenths of a km.
+-- name: InsertCharterDetail :exec
+INSERT INTO booking_charter_details (
+    booking_id, listing_id, vehicle_class_id, pickup_at,
+    pickup_address, pickup_lat, pickup_lng, dropoff_address, dropoff_lat, dropoff_lng,
+    distance_km, is_round_trip, return_at, quote,
+    pickup_province_code, duration_minutes, vehicle_class_name, seats, created_at
+) VALUES (
+    @booking_id, @listing_id, @vehicle_class_id, @pickup_at,
+    @pickup_address, @pickup_lat::float8, @pickup_lng::float8, @dropoff_address, @dropoff_lat::float8, @dropoff_lng::float8,
+    (@distance_tenths::int)::numeric / 10, @is_round_trip, sqlc.narg(return_at), @quote,
+    @pickup_province_code, @duration_minutes::int, @vehicle_class_name, @seats::int, @now
+);

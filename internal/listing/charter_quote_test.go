@@ -131,6 +131,11 @@ func TestCharterRoute_ProviderErrors(t *testing.T) {
 	e.Maps.SetRoute(airportPt, hoiAnPt, maps.Route{DistanceMeters: 0, DurationSeconds: 0})
 	_, err := e.Svc.CharterRoute(ctx, airport, hoiAn)
 	requireErr(t, err, http.StatusUnprocessableEntity, "no_route")
+	// A route of some length takes at least a minute (duration_minutes > 0).
+	e.Maps.SetRoute(airportPt, hoiAnPt, maps.Route{DistanceMeters: 500, DurationSeconds: 0})
+	r, err := e.Svc.CharterRoute(ctx, airport, hoiAn)
+	require.NoError(t, err)
+	require.Equal(t, 1, r.DurationMinutes)
 
 	calls := e.Maps.Calls()
 	for _, bad := range []listing.CharterPlace{
@@ -567,6 +572,51 @@ func TestQuoteCharter_AllActiveClasses(t *testing.T) {
 		requireErr(t, err, http.StatusNotFound, "not_found")
 	}
 	require.Equal(t, calls, e.Maps.Calls())
+}
+
+// The checks that do not need the route reject a quote before the paid map
+// call, and a listing without an active class never calls the map.
+func TestQuoteCharter_ChecksBeforeMapCall(t *testing.T) {
+	e, p := charterEnv(t)
+	ctx := context.Background()
+	l, c7, c16 := e.charterPublished(t, p)
+	in := listing.CharterQuoteInput{ListingID: l.ID, Pickup: airport, Dropoff: hoiAn, PickupAt: wed0800}
+
+	outside := in
+	outside.Pickup.ProvinceCode = "79"
+	soon := in
+	soon.PickupAt = charterNow.Add(2*time.Hour + 59*time.Minute)
+	seconds := in
+	seconds.PickupAt = wed0800.Add(time.Second)
+	far := in
+	far.PickupAt = charterNow.AddDate(0, 0, 181)
+	oneWayReturn := pickupPlus(in, 2*time.Hour)
+	roundNoReturn := in
+	roundNoReturn.IsRoundTrip = true
+	for _, c := range []struct {
+		in   listing.CharterQuoteInput
+		code string
+	}{
+		{outside, "outside_service_area"},
+		{soon, "pickup_too_soon"},
+		{seconds, "invalid_charter_time"},
+		{far, "invalid_charter_time"},
+		{oneWayReturn, "invalid_charter_time"},
+		{roundNoReturn, "invalid_charter_time"},
+	} {
+		_, err := e.Svc.QuoteCharter(ctx, c.in)
+		requireErr(t, err, http.StatusUnprocessableEntity, c.code)
+	}
+	require.Equal(t, 0, e.Maps.Calls(), "rejected before the map call")
+
+	for _, id := range []uuid.UUID{c7.ID, c16.ID} {
+		_, err := e.Svc.UpdateCharterClass(ctx, p.ID, p.OwnerUserID, l.ID, id, listing.CharterClassPatch{Active: ptr(false)})
+		require.NoError(t, err)
+	}
+	res, err := e.Svc.QuoteCharter(ctx, in)
+	require.NoError(t, err)
+	require.Empty(t, res.Quotes)
+	require.Equal(t, 0, e.Maps.Calls(), "no active class: no map call")
 }
 
 func pickupPlus(in listing.CharterQuoteInput, d time.Duration) listing.CharterQuoteInput {

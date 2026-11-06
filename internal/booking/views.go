@@ -89,6 +89,30 @@ type RentalView struct {
 	DestinationProvinceCode string    `json:"destination_province_code"`
 }
 
+// CharterView is the trip of a private charter booking (snapshots taken at
+// request time): the class, the places picked on the map, the one-way
+// distance and driving time, and Quote, the price snapshot (the JSON of
+// listing.CharterQuote). PickupAt is its service_start_at; ReturnAt is set
+// for a round trip only.
+type CharterView struct {
+	VehicleClassID     uuid.UUID       `json:"vehicle_class_id"`
+	VehicleClassName   string          `json:"vehicle_class_name"`
+	Seats              int             `json:"seats"`
+	PickupAt           time.Time       `json:"pickup_at"`
+	PickupAddress      string          `json:"pickup_address"`
+	PickupLat          float64         `json:"pickup_lat"`
+	PickupLng          float64         `json:"pickup_lng"`
+	PickupProvinceCode string          `json:"pickup_province_code"`
+	DropoffAddress     string          `json:"dropoff_address"`
+	DropoffLat         float64         `json:"dropoff_lat"`
+	DropoffLng         float64         `json:"dropoff_lng"`
+	DistanceKm         float64         `json:"distance_km"`
+	DurationMinutes    int             `json:"duration_minutes"`
+	IsRoundTrip        bool            `json:"is_round_trip"`
+	ReturnAt           *time.Time      `json:"return_at"`
+	Quote              json.RawMessage `json:"quote"`
+}
+
 // RequestView is the partner-answer and payment deadlines of a Request
 // Booking.
 type RequestView struct {
@@ -105,7 +129,8 @@ type RequestView struct {
 // only for the owning customer while pending_payment or awaiting_payment;
 // CommissionRateBps/CommissionAmount only for the partner and the admin.
 // Ride is set for a scheduled ride booking only, Rental for a self-drive
-// rental only, Request for a Request Booking only.
+// rental only, Charter for a private charter only, Request for a Request
+// Booking only.
 type BookingView struct {
 	ID                 uuid.UUID                  `json:"id"`
 	Code               string                     `json:"code"`
@@ -116,6 +141,7 @@ type BookingView struct {
 	TimeSlot           SlotView                   `json:"time_slot"`
 	Ride               *RideView                  `json:"ride,omitempty"`
 	Rental             *RentalView                `json:"rental,omitempty"`
+	Charter            *CharterView               `json:"charter,omitempty"`
 	Request            *RequestView               `json:"request,omitempty"`
 	ServiceStartAt     time.Time                  `json:"service_start_at"`
 	ServiceEndAt       time.Time                  `json:"service_end_at"`
@@ -255,6 +281,20 @@ func (s *Service) load(ctx context.Context, row store.GetBookingDetailRow, aud a
 			PickupPointID: d.PickupPointID, PickupPointName: d.PickupPointName, PickupAddress: d.PickupAddress,
 			PickupAt: d.PickupAt, ReturnAt: d.ReturnAt, Days: int(d.Days),
 			DestinationProvinceCode: d.DestinationProvinceCode,
+		}
+	}
+	if b.ServiceType == serviceTypeCharter {
+		d, err := q.GetCharterDetails(ctx, b.ID)
+		if err != nil {
+			return v, fmt.Errorf("get charter details: %w", err)
+		}
+		v.Charter = &CharterView{
+			VehicleClassID: d.VehicleClassID, VehicleClassName: d.VehicleClassName, Seats: int(d.Seats),
+			PickupAt: d.PickupAt, PickupAddress: d.PickupAddress, PickupLat: d.PickupLat, PickupLng: d.PickupLng,
+			PickupProvinceCode: d.PickupProvinceCode,
+			DropoffAddress:     d.DropoffAddress, DropoffLat: d.DropoffLat, DropoffLng: d.DropoffLng,
+			DistanceKm: d.DistanceKm, DurationMinutes: int(d.DurationMinutes),
+			IsRoundTrip: d.IsRoundTrip, ReturnAt: d.ReturnAt, Quote: json.RawMessage(d.Quote),
 		}
 	}
 	if b.BookingMode == bookingModeRequest {

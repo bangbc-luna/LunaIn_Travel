@@ -564,6 +564,102 @@ func (q *Queries) InsertBookingItem(ctx context.Context, arg InsertBookingItemPa
 	return err
 }
 
+const insertBookingItemTenths = `-- name: InsertBookingItemTenths :exec
+INSERT INTO booking_items (id, booking_id, line_kind, description, unit_price, quantity, line_total, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, ($6::bigint)::numeric / 10, $7, $8, $8)
+`
+
+type InsertBookingItemTenthsParams struct {
+	ID             uuid.UUID
+	BookingID      uuid.UUID
+	LineKind       string
+	Description    string
+	UnitPrice      int64
+	QuantityTenths int64
+	LineTotal      int64
+	Now            time.Time
+}
+
+// A booking line whose quantity has one decimal (charter_distance km), sent
+// as tenths so no float reaches the CHECK line_total =
+// round(unit_price × quantity).
+func (q *Queries) InsertBookingItemTenths(ctx context.Context, arg InsertBookingItemTenthsParams) error {
+	_, err := q.db.Exec(ctx, insertBookingItemTenths,
+		arg.ID,
+		arg.BookingID,
+		arg.LineKind,
+		arg.Description,
+		arg.UnitPrice,
+		arg.QuantityTenths,
+		arg.LineTotal,
+		arg.Now,
+	)
+	return err
+}
+
+const insertCharterDetail = `-- name: InsertCharterDetail :exec
+INSERT INTO booking_charter_details (
+    booking_id, listing_id, vehicle_class_id, pickup_at,
+    pickup_address, pickup_lat, pickup_lng, dropoff_address, dropoff_lat, dropoff_lng,
+    distance_km, is_round_trip, return_at, quote,
+    pickup_province_code, duration_minutes, vehicle_class_name, seats, created_at
+) VALUES (
+    $1, $2, $3, $4,
+    $5, $6::float8, $7::float8, $8, $9::float8, $10::float8,
+    ($11::int)::numeric / 10, $12, $13, $14,
+    $15, $16::int, $17, $18::int, $19
+)
+`
+
+type InsertCharterDetailParams struct {
+	BookingID          uuid.UUID
+	ListingID          uuid.UUID
+	VehicleClassID     uuid.UUID
+	PickupAt           time.Time
+	PickupAddress      string
+	PickupLat          float64
+	PickupLng          float64
+	DropoffAddress     string
+	DropoffLat         float64
+	DropoffLng         float64
+	DistanceTenths     int32
+	IsRoundTrip        bool
+	ReturnAt           *time.Time
+	Quote              []byte
+	PickupProvinceCode string
+	DurationMinutes    int32
+	VehicleClassName   string
+	Seats              int32
+	Now                time.Time
+}
+
+// Coordinates arrive as float8 (already rounded to 6 decimals) and the
+// one-way distance as tenths of a km.
+func (q *Queries) InsertCharterDetail(ctx context.Context, arg InsertCharterDetailParams) error {
+	_, err := q.db.Exec(ctx, insertCharterDetail,
+		arg.BookingID,
+		arg.ListingID,
+		arg.VehicleClassID,
+		arg.PickupAt,
+		arg.PickupAddress,
+		arg.PickupLat,
+		arg.PickupLng,
+		arg.DropoffAddress,
+		arg.DropoffLat,
+		arg.DropoffLng,
+		arg.DistanceTenths,
+		arg.IsRoundTrip,
+		arg.ReturnAt,
+		arg.Quote,
+		arg.PickupProvinceCode,
+		arg.DurationMinutes,
+		arg.VehicleClassName,
+		arg.Seats,
+		arg.Now,
+	)
+	return err
+}
+
 const insertCheckout = `-- name: InsertCheckout :execrows
 INSERT INTO checkouts (id, code, customer_id, total_amount, status, created_at, updated_at)
 VALUES ($1, $2, $3, $4, 'open', $5, $5)
